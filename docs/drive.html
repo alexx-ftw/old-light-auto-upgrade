@@ -6,28 +6,56 @@
   <meta name="referrer" content="strict-origin-when-cross-origin">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://accounts.google.com/gsi/client; connect-src https://accounts.google.com/gsi/ https://www.googleapis.com; frame-src https://accounts.google.com/gsi/; style-src 'self' https://accounts.google.com/gsi/style; img-src 'self' data:; base-uri 'none'; object-src 'none'; form-action 'none'">
   <title>Copias de Old Light</title>
-  <link rel="stylesheet" href="./drive.css">
-  <script id="google-identity" src="https://accounts.google.com/gsi/client" async defer></script>
-  <script src="./drive.js" defer></script>
+  <link rel="stylesheet" href="./drive.css?v=1.3.0">
+  <script src="./drive.js?v=1.3.0" defer></script>
 </head>
 <body>
   <main>
     <header>
       <p class="eyebrow">OLD LIGHT · AUTO UPGRADE</p>
       <h1>Tus ajustes, con copia.</h1>
-      <p>Guarda copias privadas en Google Drive y elige cuál restaurar.</p>
+      <p>Conecta tu cuenta de Google para guardar y recuperar tus ajustes.</p>
     </header>
     <section aria-labelledby="connection-heading">
-      <h2 id="connection-heading">Conexión</h2>
-      <p id="status" role="status" aria-live="polite">Esperando al userscript…</p>
+      <div class="section-heading"><h2 id="connection-heading">Google Drive</h2><span class="version">v1.3.0</span></div>
+      <p id="account" class="account">Ninguna cuenta conectada</p>
+      <p id="session-status" class="connection-status" role="status" aria-live="polite">Esperando al userscript…</p>
+      <p id="expiry" class="note"></p>
       <div class="actions">
         <button id="connect" type="button" disabled>Conectar Google Drive</button>
-        <button id="disconnect" type="button" class="secondary" disabled>Desconectar Google</button>
+        <button id="switch-account" type="button" class="secondary" disabled>Cambiar cuenta</button>
+        <button id="cancel-auth" type="button" class="secondary" hidden>Cancelar autorización</button>
+        <button id="retry-library" type="button" class="secondary" hidden>Reintentar conexión con Google</button>
+      </div>
+      <div class="preferences">
+        <label class="check"><input id="remember-account" type="checkbox" disabled>Recordar mi cuenta para volver a conectar</label>
+        <label class="check"><input id="auto-backup" type="checkbox" disabled>Copia automática de los cambios locales</label>
       </div>
       <p id="automatic" class="note">Copia automática desactivada.</p>
+      <p class="autosave-hint">Los ajustes se guardan automáticamente.</p>
     </section>
+    <details id="setup" class="card" open>
+      <summary>Configuración inicial</summary>
+      <p class="note">Solo necesitas configurar tu Client ID una vez. Puedes pegarlo o importar el JSON descargado de Google Cloud.</p>
+      <label for="client-id">Client ID de Google OAuth</label>
+      <input id="client-id" type="text" maxlength="300" autocomplete="off" spellcheck="false" placeholder="…apps.googleusercontent.com" disabled aria-describedby="setup-status">
+      <div class="actions compact">
+        <button id="choose-client-file" type="button" class="secondary" disabled>Importar JSON de Google</button>
+        <button id="clear-client" type="button" class="text-button" disabled>Borrar Client ID</button>
+      </div>
+      <input id="import-client" type="file" accept=".json,application/json" hidden>
+      <p id="setup-status" class="note" role="status" aria-live="polite">Al escribir se guarda el borrador. Se aplica cuando el Client ID esté completo.</p>
+      <ol class="setup-steps">
+        <li>Activa <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noopener noreferrer">Google Drive API</a> en tu proyecto.</li>
+        <li>Configura el <a href="https://console.cloud.google.com/auth/overview" target="_blank" rel="noopener noreferrer">consentimiento OAuth</a>. Si está en pruebas, añade tu cuenta como usuario de prueba.</li>
+        <li>Crea un <a href="https://console.cloud.google.com/auth/clients" target="_blank" rel="noopener noreferrer">cliente OAuth de tipo Aplicación web</a> con este origen JavaScript autorizado:</li>
+      </ol>
+      <div class="origin"><code id="authorized-origin">https://alexx-ftw.github.io</code><button id="copy-origin" type="button" class="secondary">Copiar origen</button></div>
+      <p class="note">Del JSON solo se conserva el Client ID. El client secret no se utiliza ni se guarda. Vaciar el campo conserva la conexión; usa Borrar Client ID para eliminarla.</p>
+    </details>
     <section aria-labelledby="backups-heading">
       <h2 id="backups-heading">Copias privadas</h2>
+      <p id="status" role="status" aria-live="polite">Conecta tu cuenta para consultar las copias.</p>
       <div class="actions">
         <button id="save" type="button" disabled>Guardar copia ahora</button>
         <button id="refresh" type="button" class="secondary" disabled>Actualizar lista</button>
@@ -38,10 +66,23 @@
       <p id="restore-note" class="note">Restaurar reemplaza todos los ajustes del helper, incluidas sus credenciales de Telegram. Elige una copia y pulsa Restaurar.</p>
       <button id="restore" type="button" class="secondary" disabled>Restaurar la copia seleccionada</button>
     </section>
+    <details class="card account-options" open>
+      <summary>Gestionar la conexión</summary>
+      <p class="note">Desconectar cierra esta sesión. Retirar el permiso revoca el acceso concedido a esta aplicación en Google.</p>
+      <div class="actions compact">
+        <button id="disconnect" type="button" class="secondary" disabled>Desconectar esta sesión</button>
+        <button id="revoke" type="button" class="text-button danger" disabled>Retirar permiso de Google</button>
+      </div>
+      <div id="revoke-confirmation" class="confirmation" hidden>
+        <p>¿Retirar el permiso de esta aplicación? Para volver a usar las copias tendrás que autorizarla de nuevo.</p>
+        <div class="actions"><button id="confirm-revoke" type="button">Retirar permiso</button><button id="cancel-revoke" type="button" class="secondary">Cancelar</button></div>
+      </div>
+      <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener noreferrer">Ver permisos en tu cuenta de Google</a>
+    </details>
     <footer>
-      <p>El permiso se limita a los datos privados de esta aplicación. El token de Google sólo permanece en la memoria de esta ventana. Al caducar tendrás que volver a conectar.</p>
-      <p>La copia automática guarda cambios locales mientras esta ventana está conectada. Las restauraciones siempre las eliges tú.</p>
-      <a href="https://github.com/alexx-ftw/old-light-auto-upgrade" target="_blank" rel="noopener noreferrer">Código e instrucciones</a>
+      <p>El permiso se limita a los datos privados de esta aplicación. El token de Google solo permanece en la memoria de esta ventana. Al caducar, pulsa Volver a conectar.</p>
+      <p>La copia automática guarda cambios mientras esta ventana está enlazada con el helper. Las restauraciones siempre las eliges tú.</p>
+      <a href="https://github.com/alexx-ftw/old-light-auto-upgrade#copias-en-google-drive" target="_blank" rel="noopener noreferrer">Código e instrucciones</a>
     </footer>
   </main>
 </body>

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.2.0
-// @description  Mejoras por prioridad, mínimos de naves, informes y avisos, panel móvil y copias locales/Drive. Con actualización automática.
+// @version      1.3.0
+// @description  Mejoras por prioridad, mínimos de naves, presets con Shift + clic, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
 // @supportURL   https://github.com/alexx-ftw/old-light-auto-upgrade/issues
@@ -43,6 +43,8 @@
   const SHIPS = [['probe', 'Probe'], ['marauder', 'Marauder'], ['sentinel', 'Sentinel'], ['vanguard', 'Vanguard']];
   const DEFAULT_SHIP_ORDER = SHIPS.map(([id]) => id);
   const MAX_SHIP_MINIMUM = 1000000;
+  const MAX_NUMERIC_DRAFT_LENGTH = 32;
+  const NUMERIC_DEBOUNCE_MS = 400;
   const MIN_GAP_MS = 500;
   const RESPONSE_TIMEOUT_MS = 12000;
   const RETRY_GAP_MS = 5000;
@@ -51,7 +53,11 @@
   if (window.top !== window.self || document.getElementById(HOST_ID)) return;
 
   let settings = readSettings();
+  const shiftPresets = createShiftPresetMenu({ isEnabled: () => settings.shiftPresetShortcut });
   const notifier = createNotifier({ onSettingsChange: settingsChanged });
+  const levelTargets = createLevelTargets({ buildings: BUILDINGS, send: event => notifier.emit(event),
+    canNotify: () => notifier.isEventEnabled('game.level_target'),
+    getSnapshot: () => readLevelTargetSnapshot(rows()), onSettingsChange: settingsChanged });
   const reports = createReportsWatcher({ send: event => notifier.emit(event) });
   let driveBackup = null;
   let importingBackup = false;
@@ -73,6 +79,12 @@
   let releaseLock = null;
   let lockError = false;
   let observingNotifications = false;
+  const numericInputs = new Map();
+  const numericDraftTimers = new Map();
+  const numericErrors = new Map();
+  const numericSaved = new Set();
+  const numericUnsavedEditors = new Set();
+  let numericRevision = 0;
 
   function emitEvent(type, message, id, systemName = text(document.querySelector('[data-field="nameplate-name"]'))) {
     notifier.emit({ type, id: id || `${notificationSession}:${++eventSequence}`,
@@ -95,6 +107,24 @@
       ? { x: Math.round(value.x), y: Math.round(value.y) } : null;
   }
 
+  function numericDraftText(value) {
+    return typeof value === 'string' && value.length <= MAX_NUMERIC_DRAFT_LENGTH ? value : null;
+  }
+
+  function normalizeNumericDrafts(value) {
+    return { ships: Object.fromEntries(SHIPS.map(([id]) => [id, numericDraftText(value?.ships?.[id])])),
+      depot: numericDraftText(value?.depot) };
+  }
+
+  function validNumericDrafts(value) {
+    const object = item => item && typeof item === 'object' && !Array.isArray(item);
+    const draft = item => item === null || (typeof item === 'string' && item.length <= MAX_NUMERIC_DRAFT_LENGTH);
+    return object(value) && object(value.ships) && draft(value.depot)
+      && Object.keys(value).every(key => ['ships', 'depot'].includes(key))
+      && Object.keys(value.ships).every(key => DEFAULT_SHIP_ORDER.includes(key))
+      && SHIPS.every(([id]) => draft(value.ships[id]));
+  }
+
   function normalizeSettings(value) {
       return {
         enabled: value?.enabled !== false,
@@ -109,9 +139,11 @@
         shipMinimums: Object.fromEntries(SHIPS.map(([id]) => [id, normalizeMinimum(value?.shipMinimums?.[id])])),
         shipOrder: normalizeOrder(value?.shipOrder, DEFAULT_SHIP_ORDER),
         countAway: value?.countAway === true,
+        shiftPresetShortcut: value?.shiftPresetShortcut !== false,
         fleetExpanded: value?.fleetExpanded === true,
         depotFillPercent: typeof value?.depotFillPercent === 'number' && Number.isFinite(value.depotFillPercent)
           ? Math.min(100, Math.max(1, Math.round(value.depotFillPercent))) : 90,
+        numericDrafts: normalizeNumericDrafts(value?.numericDrafts),
       };
   }
 
@@ -128,9 +160,168 @@
   }
 
   function saveSettings() {
-    try { localStorage.setItem(KEY, JSON.stringify(settings)); settingsChanged(); } catch {
+    try { localStorage.setItem(KEY, JSON.stringify(settings)); } catch {
       // El script sigue funcionando si el navegador bloquea el almacenamiento.
+      return false;
     }
+    try { settingsChanged(); } catch { /* El guardado local no depende de Drive. */ }
+    return true;
+  }
+
+  function numericDraft(source, id) {
+    return id === 'depot' ? source.numericDrafts.depot : source.numericDrafts.ships[id];
+  }
+
+  function numericActive(source, id) {
+    return id === 'depot' ? source.depotFillPercent : source.shipMinimums[id];
+  }
+
+  function setNumericDraft(source, id, value) {
+    if (id === 'depot') source.numericDrafts.depot = value;
+    else source.numericDrafts.ships[id] = value;
+  }
+
+  function parseNumericDraft(raw, id) {
+    if (typeof raw !== 'string' || !/^\d+$/.test(raw.trim())) return null;
+    const value = Number(raw.trim());
+    return Number.isSafeInteger(value) && value >= (id === 'depot' ? 1 : 0)
+      && value <= (id === 'depot' ? 100 : MAX_SHIP_MINIMUM) ? value : null;
+  }
+
+  function cancelNumericDraftTimers() {
+    numericRevision += 1;
+    for (const timer of numericDraftTimers.values()) clearTimeout(timer);
+    numericDraftTimers.clear();
+  }
+
+  function syncNumericInputs(force = false) {
+    for (const [id, { input, status }] of numericInputs) {
+      const draft = numericDraft(settings, id);
+      const active = numericActive(settings, id);
+      if (force || (input.getRootNode().activeElement !== input && !numericUnsavedEditors.has(id))) {
+        const value = draft === null ? String(active) : draft;
+        if (input.value !== value) input.value = value;
+      }
+      const invalid = draft !== null && parseNumericDraft(draft, id) === null;
+      input.setAttribute('aria-invalid', String(invalid));
+      const range = id === 'depot' ? '1 a 100' : '0 a 1.000.000';
+      setText(status, numericErrors.get(id) || (draft !== null
+        ? invalid ? `Borrador guardado. Introduce un entero de ${range}; sigue activo ${active}.`
+          : 'Borrador guardado. Se aplicará al terminar de escribir.'
+        : numericSaved.has(id) ? 'Guardado automáticamente.' : ''));
+    }
+  }
+
+  function promoteNumericDraft(id, revision = numericRevision, expectedRaw = numericDraft(settings, id),
+      expectedActive = numericActive(settings, id)) {
+    if (revision !== numericRevision) return false;
+    if (numericDraftTimers.has(id)) clearTimeout(numericDraftTimers.get(id));
+    numericDraftTimers.delete(id);
+    const value = parseNumericDraft(expectedRaw, id);
+    if (value === null) return false;
+    let latest;
+    try { latest = normalizeSettings(JSON.parse(localStorage.getItem(KEY) || '{}')); }
+    catch {
+      numericErrors.set(id, 'No se pudo leer el guardado. El valor activo se conserva.');
+      syncNumericInputs();
+      return false;
+    }
+    // Recheck storage as well as the timer revision: an import in another tab wins.
+    if (numericDraft(latest, id) !== expectedRaw || numericActive(latest, id) !== expectedActive) return false;
+    const next = normalizeSettings(latest);
+    if (id === 'depot') next.depotFillPercent = value;
+    else next.shipMinimums[id] = value;
+    setNumericDraft(next, id, null);
+    settings = next;
+    if (!saveSettings()) {
+      settings = latest;
+      numericErrors.set(id, 'No se pudo aplicar el cambio. El borrador y el valor activo se conservan.');
+      syncNumericInputs();
+      return false;
+    }
+    numericErrors.delete(id);
+    numericSaved.add(id);
+    syncNumericInputs();
+    if (value !== expectedActive) {
+      if (id === 'depot') emitEvent('settings.depot', `Resource Depot se mejorará desde el ${value}% de capacidad.`);
+      else emitEvent('settings.minimum', `Mínimo de ${SHIPS.find(([key]) => key === id)[1]}: ${value}.`);
+    }
+    schedule();
+    return true;
+  }
+
+  function scheduleNumericDraft(id) {
+    if (numericDraftTimers.has(id)) clearTimeout(numericDraftTimers.get(id));
+    numericDraftTimers.delete(id);
+    const raw = numericDraft(settings, id);
+    if (parseNumericDraft(raw, id) === null) return;
+    const revision = numericRevision;
+    const active = numericActive(settings, id);
+    numericDraftTimers.set(id, setTimeout(() => promoteNumericDraft(id, revision, raw, active), NUMERIC_DEBOUNCE_MS));
+  }
+
+  function saveNumericDraft(id, defer = true) {
+    const input = numericInputs.get(id).input;
+    const raw = input.value;
+    if (numericDraftTimers.has(id)) clearTimeout(numericDraftTimers.get(id));
+    numericDraftTimers.delete(id);
+    if (raw.length > MAX_NUMERIC_DRAFT_LENGTH) {
+      numericErrors.set(id, 'El borrador es demasiado largo para guardarlo.');
+      numericUnsavedEditors.add(id);
+      syncNumericInputs();
+      return false;
+    }
+    const previous = settings;
+    let latest;
+    try { latest = normalizeSettings(JSON.parse(localStorage.getItem(KEY) || '{}')); }
+    catch {
+      numericErrors.set(id, 'No se pudo guardar el borrador. Conserva este campo abierto para reintentarlo.');
+      numericUnsavedEditors.add(id);
+      syncNumericInputs();
+      return false;
+    }
+    const changed = numericDraft(latest, id) !== raw;
+    setNumericDraft(latest, id, raw);
+    settings = latest;
+    if (changed && !saveSettings()) {
+      settings = previous;
+      numericErrors.set(id, 'No se pudo guardar el borrador. Conserva este campo abierto para reintentarlo.');
+      numericUnsavedEditors.add(id);
+      syncNumericInputs();
+      return false;
+    }
+    numericErrors.delete(id);
+    numericUnsavedEditors.delete(id);
+    syncNumericInputs();
+    if (defer) scheduleNumericDraft(id);
+    return true;
+  }
+
+  function restoreNumericInputs() {
+    cancelNumericDraftTimers();
+    numericErrors.clear();
+    numericSaved.clear();
+    numericUnsavedEditors.clear();
+    syncNumericInputs(true);
+    for (const id of numericInputs.keys()) scheduleNumericDraft(id);
+  }
+
+  function installNumericInput(id, input, status) {
+    numericInputs.set(id, { input, status });
+    input.type = 'text';
+    input.inputMode = 'numeric';
+    input.maxLength = MAX_NUMERIC_DRAFT_LENGTH;
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    input.addEventListener('input', () => { saveNumericDraft(id); });
+    const flush = () => {
+      if (numericDraft(settings, id) === null && parseNumericDraft(input.value, id) === numericActive(settings, id)) return;
+      if (saveNumericDraft(id, false)) promoteNumericDraft(id);
+    };
+    input.addEventListener('change', flush);
+    input.addEventListener('blur', flush);
+    syncNumericInputs();
+    scheduleNumericDraft(id);
   }
 
   function text(node) {
@@ -445,7 +636,7 @@
           .oldlight-drive-config { margin-top:10px; padding:9px; border:1px solid #304252; border-radius:6px; }
           .oldlight-drive-config h4 { margin:0 0 8px; font-size:13px; color:#f2f7fa; }
           .oldlight-drive-config label { margin-top:8px; font-size:11px; }
-          .oldlight-drive-config label:first-of-type { display:grid; gap:5px; }
+          .oldlight-drive-config .drive-advanced label { display:grid; gap:5px; }
           .oldlight-drive-config input[type="text"] { width:100%; min-width:0; padding:7px;
             font:inherit; color:#e1edf4; background:#172632; border:1px solid #40576b; border-radius:5px; }
           .oldlight-drive-config p { font-size:11px; color:#aebfd0; }
@@ -468,9 +659,11 @@
             border:1px solid #40576b; border-radius:5px; background:#172632; color:#e1edf4; }
           .fleet-counts { grid-column:2 / -1; color:#93a9bb; font-size:11px; }
           .count-away { margin-top:10px; font-size:11px; }
+          .fleet-shortcut { margin-top:12px; padding-top:10px; border-top:1px solid #304252; font-size:11px; }
           .depot-threshold { display:flex; flex-wrap:wrap; gap:5px; margin-top:9px; font-size:11px; }
           .depot-threshold input { width:51px; padding:3px; border:1px solid #40576b;
             border-radius:5px; color:#e1edf4; background:#172632; font:inherit; }
+          .numeric-autosave { grid-column:2 / -1; margin-top:3px; font-size:10px; line-height:1.35; }
           .hint { color:#8298aa; font-size:11px; margin-top:8px; }
         </style>
         <section class="helper-shell" aria-label="Mejoras automáticas de Old Light">
@@ -493,8 +686,9 @@
             <p class="hint">Arrastra el asa ⠿ o usa ↑ / ↓. Se mejora el primero disponible entre los marcados.</p>
             <details class="conditions-details" open><summary>Condiciones de construcción</summary>
               <p class="hint">Reactor solo si otra mejora marcada necesita más energía. Cada Reactor o Depot espera al anterior en cola.</p>
-              <label class="depot-threshold">Depot al alcanzar <input type="number" min="1" max="100" step="1"
-                data-setting="depot-fill-percent" aria-label="Porcentaje de capacidad para mejorar Resource Depot">% de capacidad</label>
+              <label class="depot-threshold">Depot al alcanzar <input type="text" inputmode="numeric" maxlength="32"
+                data-setting="depot-fill-percent" aria-label="Porcentaje de capacidad para mejorar Resource Depot" aria-describedby="depot-numeric-status">% de capacidad</label>
+              <small class="numeric-autosave" id="depot-numeric-status" data-numeric-status="depot" aria-live="polite"></small>
             </details>
           </details>
           <details class="settings-page fleet-details" data-page="fleet" id="oldlight-settings-fleet" role="tabpanel" aria-labelledby="oldlight-tab-fleet" open hidden><summary>Mínimos de naves</summary>
@@ -503,6 +697,10 @@
             <label class="count-away"><input type="checkbox">Contar también las naves en misión</label>
             <button type="button" class="reset-ships">Restablecer orden de naves</button>
             <p class="hint">Se descuentan las naves ya en construcción. La reposición disponible tiene prioridad sobre las mejoras.</p>
+            <div class="fleet-shortcut">
+              <label><input type="checkbox" data-setting="shift-preset-shortcut">Shift + clic: mostrar presets de flota</label>
+              <p class="hint">Elige un preset y confirma el envío en el juego. Desactiva este atajo para usar la multiselección con Shift.</p>
+            </div>
           </details>
           <div class="settings-page" data-page="notifications" id="oldlight-settings-notifications" role="tabpanel" aria-labelledby="oldlight-tab-notifications" hidden></div>
           <div class="settings-page" data-page="data" id="oldlight-settings-data" role="tabpanel" aria-labelledby="oldlight-tab-data" hidden>
@@ -540,10 +738,12 @@
         choices: shadow.querySelector('.choices'),
         resetOrder: shadow.querySelector('.reset-order'),
         depotThreshold: shadow.querySelector('[data-setting="depot-fill-percent"]'),
+        depotStatus: shadow.querySelector('[data-numeric-status="depot"]'),
         items: new Map(),
         fleetDetails: shadow.querySelector('.fleet-details'),
         fleetChoices: shadow.querySelector('.fleet-choices'),
         countAway: shadow.querySelector('.count-away input'),
+        shiftPresetShortcut: shadow.querySelector('[data-setting="shift-preset-shortcut"]'),
         resetShips: shadow.querySelector('.reset-ships'),
         shipItems: new Map(),
       };
@@ -612,13 +812,6 @@
         input.step = '1';
         input.inputMode = 'numeric';
         input.setAttribute('aria-label', `Mínimo de ${name}`);
-        input.addEventListener('change', () => {
-          settings.shipMinimums[id] = normalizeMinimum(Number(input.value));
-          input.value = String(settings.shipMinimums[id]);
-          saveSettings();
-          emitEvent('settings.minimum', `Mínimo de ${name}: ${settings.shipMinimums[id]}.`);
-          schedule();
-        });
         const actions = document.createElement('div');
         actions.className = 'priority-actions';
         const up = document.createElement('button');
@@ -636,15 +829,28 @@
         }
         const counts = document.createElement('span');
         counts.className = 'fleet-counts';
-        item.append(position, label, input, actions, counts);
+        const status = document.createElement('small');
+        status.className = 'numeric-autosave';
+        status.dataset.numericStatus = id;
+        status.id = `minimum-${id}-status`;
+        status.setAttribute('aria-live', 'polite');
+        input.setAttribute('aria-describedby', status.id);
+        item.append(position, label, input, actions, counts, status);
         ui.fleetChoices.append(item);
         ui.shipItems.set(id, { item, position, input, up, down, counts });
+        installNumericInput(id, input, status);
       }
       ui.countAway.addEventListener('change', () => {
         settings.countAway = ui.countAway.checked;
         saveSettings();
         emitEvent('settings.fleet_mode', settings.countAway
           ? 'Los mínimos cuentan naves en base y en misión.' : 'Los mínimos cuentan las naves en base.');
+        schedule();
+      });
+      ui.shiftPresetShortcut.addEventListener('change', () => {
+        settings.shiftPresetShortcut = ui.shiftPresetShortcut.checked;
+        shiftPresets.cancel();
+        saveSettings();
         schedule();
       });
       ui.resetShips.addEventListener('click', () => {
@@ -661,14 +867,7 @@
         syncChoices();
         schedule();
       });
-      ui.depotThreshold.addEventListener('change', () => {
-        const value = Number(ui.depotThreshold.value);
-        settings.depotFillPercent = Number.isFinite(value) ? Math.min(100, Math.max(1, Math.round(value))) : 90;
-        ui.depotThreshold.value = String(settings.depotFillPercent);
-        saveSettings();
-        emitEvent('settings.depot', `Resource Depot se mejorará desde el ${settings.depotFillPercent}% de capacidad.`);
-        schedule();
-      });
+      installNumericInput('depot', ui.depotThreshold, ui.depotStatus);
       ui.toggle.addEventListener('click', () => {
         settings.enabled = !settings.enabled;
         if (settings.enabled) { error = ''; unconfirmed = 0; }
@@ -714,6 +913,7 @@
         });
       }
       notifier.mount(ui.notificationContainer);
+      levelTargets.mount(ui.notificationContainer);
       if (driveBackup) driveBackup.mount(ui.driveContainer);
       else {
         const unavailable = document.createElement('p');
@@ -745,10 +945,11 @@
     return {
       format: 'old-light-auto-upgrade-backup',
       schemaVersion: 1,
-      scriptVersion: '1.2.0',
+      scriptVersion: '1.3.0',
       exportedAt: new Date().toISOString(),
       settings: normalizeSettings(settings),
       notifications: notifier.exportConfig(),
+      levelTargets: levelTargets.exportConfig(),
       drive: driveBackup?.exportConfig?.() || { clientId: '', autoBackup: false },
     };
   }
@@ -768,13 +969,14 @@
     const next = value.settings;
     const list = (items, known) => Array.isArray(items) && items.length <= known.length
       && items.every(id => typeof id === 'string' && known.includes(id));
-    const booleanKeys = ['enabled', 'expanded', 'minimized', 'countAway', 'fleetExpanded', 'conditionsExpanded'];
+    const booleanKeys = ['enabled', 'expanded', 'minimized', 'countAway', 'fleetExpanded', 'conditionsExpanded', 'shiftPresetShortcut'];
     if (typeof next.enabled !== 'boolean' || !list(next.order, DEFAULT_ORDER) || !list(next.excluded, DEFAULT_ORDER)
         || !list(next.shipOrder, DEFAULT_SHIP_ORDER) || !object(next.shipMinimums)
         || booleanKeys.some(key => next[key] !== undefined && typeof next[key] !== 'boolean')
         || SHIPS.some(([id]) => !Number.isInteger(next.shipMinimums[id])
           || next.shipMinimums[id] < 0 || next.shipMinimums[id] > MAX_SHIP_MINIMUM)
-        || !Number.isFinite(next.depotFillPercent) || next.depotFillPercent < 1 || next.depotFillPercent > 100
+        || !Number.isInteger(next.depotFillPercent) || next.depotFillPercent < 1 || next.depotFillPercent > 100
+        || (next.numericDrafts !== undefined && !validNumericDrafts(next.numericDrafts))
         || (next.panelPosition != null && !normalizePanelPosition(next.panelPosition))
         || (next.activeTab !== undefined && !['buildings', 'fleet', 'notifications', 'data'].includes(next.activeTab))) {
       throw backupError('La copia contiene ajustes del helper inválidos.');
@@ -790,21 +992,28 @@
         drive = { clientId: '', autoBackup: false };
       }
     } catch { throw backupError('La copia contiene una configuración de Drive incompatible.'); }
-    return { settings: normalizeSettings(next), notifications, drive };
+    let targets;
+    try { targets = levelTargets.validateConfig(value.levelTargets === undefined ? {} : value.levelTargets); }
+    catch { throw backupError('La copia contiene objetivos de nivel inválidos.'); }
+    return { settings: normalizeSettings(next), notifications, drive, levelTargets: targets };
   }
 
   function applyBackup(value) {
     const next = validateBackup(value);
+    shiftPresets.cancel();
+    cancelNumericDraftTimers();
     ui?.cancelPriorityDrag?.();
     ui?.cancelPanelDrag?.();
     const previous = { settings, raw: localStorage.getItem(KEY), notifications: notifier.exportConfig(),
-      drive: driveBackup?.exportConfig?.() };
+      drive: driveBackup?.exportConfig?.(), levelTargets: levelTargets.exportConfig() };
     importingBackup = true;
     try {
       localStorage.setItem(KEY, JSON.stringify(next.settings));
       notifier.importConfig(next.notifications);
+      levelTargets.importConfig(next.levelTargets);
       if (driveBackup) driveBackup.importConfig(next.drive);
       settings = next.settings;
+      restoreNumericInputs();
       if (settings.enabled) { error = ''; unconfirmed = 0; }
       syncSettingsTabs();
       layoutHelper();
@@ -815,8 +1024,10 @@
         else localStorage.setItem(KEY, previous.raw);
       } catch { restored = false; }
       try { notifier.importConfig(previous.notifications); } catch { restored = false; }
+      try { levelTargets.importConfig(previous.levelTargets); } catch { restored = false; }
       try { if (driveBackup && previous.drive) driveBackup.importConfig(previous.drive); } catch { restored = false; }
       settings = previous.settings;
+      restoreNumericInputs();
       syncSettingsTabs();
       layoutHelper();
       if (!restored) {
@@ -1058,7 +1269,6 @@
       const atPosition = ui.fleetChoices.children[index];
       if (atPosition !== controls.item) ui.fleetChoices.insertBefore(controls.item, atPosition || null);
       setText(controls.position, String(index + 1));
-      if (focused !== controls.input) controls.input.value = String(settings.shipMinimums[id]);
       controls.up.disabled = index === 0;
       controls.down.disabled = index === settings.shipOrder.length - 1;
       const counts = fleetCounts(id);
@@ -1067,6 +1277,8 @@
         : 'Selecciona un solo sistema para leer la flota');
     }
     ui.countAway.checked = settings.countAway;
+    ui.shiftPresetShortcut.checked = settings.shiftPresetShortcut;
+    syncNumericInputs();
     ui.resetShips.disabled = settings.shipOrder.every((id, index) => id === DEFAULT_SHIP_ORDER[index]);
     if (hadFocus && focused.isConnected && !focused.disabled &&
         ui.fleetChoices.getRootNode().activeElement !== focused) focused.focus({ preventScroll: true });
@@ -1102,9 +1314,6 @@
     setText(ui.last, lastClick ? `Último clic: ${lastClick}` : '');
     syncSettingsTabs();
     layoutHelper();
-    if (ui.depotThreshold.getRootNode().activeElement !== ui.depotThreshold) {
-      ui.depotThreshold.value = String(settings.depotFillPercent);
-    }
     syncChoices();
     syncFleetChoices();
   }
@@ -1348,6 +1557,303 @@
     }
   }
 
+  // BEGIN SHIFT PRESETS
+  function createShiftPresetMenu({ isEnabled = () => true } = {}) {
+    const MENU_ID = 'oldlight-shift-presets-menu';
+    const NATIVE_GUARD_MS = 130;
+    const scope = new AbortController();
+    let gesture = null;
+    let flow = null;
+    let replaying = false;
+    let suppressClick = null;
+    let destroyed = false;
+
+    const enabled = () => !destroyed && isEnabled() !== false;
+    const on = (target, name, handler, options = {}) => target.addEventListener(name, handler,
+      { ...options, signal: scope.signal });
+    const visible = element => Boolean(element?.isConnected && !element.hidden
+      && !element.closest('[hidden], [inert], [aria-hidden="true"]')
+      && element.getClientRects().length && getComputedStyle(element).display !== 'none'
+      && getComputedStyle(element).visibility !== 'hidden');
+    const one = selector => {
+      const matches = document.querySelectorAll(selector);
+      return matches.length === 1 ? matches[0] : null;
+    };
+    const inMenu = event => Boolean(flow?.host && event.composedPath().includes(flow.host));
+    const plain = event => !event.altKey && !event.ctrlKey && !event.metaKey;
+
+    function cancel() {
+      gesture = null;
+      const current = flow;
+      flow = null;
+      if (!current) return;
+      clearTimeout(current.timer);
+      current.observer?.disconnect();
+      current.host?.remove();
+    }
+
+    function nativeAction(action) {
+      const previous = replaying;
+      replaying = true;
+      try { action(); } finally { replaying = previous; }
+    }
+
+    function nativeEvent(target, event) {
+      nativeAction(() => target.dispatchEvent(event));
+    }
+
+    function escapeNativeMenus() {
+      nativeEvent(document, new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    }
+
+    function pointer(target, name, source, modifiers = false) {
+      nativeEvent(target, new PointerEvent(name, {
+        bubbles: true, cancelable: true, composed: true, pointerId: source.pointerId,
+        pointerType: 'mouse', isPrimary: true, button: 0, buttons: name === 'pointerdown' ? 1 : 0,
+        clientX: source.clientX, clientY: source.clientY,
+        shiftKey: modifiers && source.shiftKey, altKey: modifiers && source.altKey,
+        ctrlKey: modifiers && source.ctrlKey, metaKey: modifiers && source.metaKey,
+      }));
+    }
+
+    function replayClick(start, end, modifiers) {
+      pointer(start.canvas, 'pointerdown', start, modifiers);
+      pointer(start.canvas, 'pointerup', end, modifiers);
+    }
+
+    function validDialog(current) {
+      return enabled() && flow === current && current.dialog?.isConnected && current.dialog.open
+        && current.dialog.dataset.mode === 'dispatch' && current.dialog.dataset.direction === 'forward'
+        && document.querySelectorAll('dialog[open]').length === 1
+        && current.route?.isConnected
+        && current.dialog.querySelector('[data-field="dispatch-route-slot"] .route-header') === current.route;
+    }
+
+    function presetButtons(current) {
+      return [...current.dialog.querySelectorAll('[data-field="dispatch-presets"] .dispatch-preset-apply')]
+        .filter(button => button instanceof HTMLButtonElement && visible(button));
+    }
+
+    function unavailable(button) {
+      return button.disabled || button.getAttribute('aria-disabled') === 'true'
+        || Boolean(button.closest('.dispatch-preset-tile-locked'));
+    }
+
+    function applyPreset(current, button) {
+      if (!validDialog(current) || !presetButtons(current).includes(button) || unavailable(button)) {
+        cancel();
+        return;
+      }
+      const dialog = current.dialog;
+      const confirm = dialog.querySelector('[data-field="dispatch-confirm"]');
+      if (!(confirm instanceof HTMLButtonElement) || confirm.hidden) { cancel(); return; }
+      cancel();
+      // The native preset can call confirm.click() when presetAutoSend is enabled.
+      // Intercept that synchronous programmatic click; later manual sends are untouched.
+      const blockAutomaticConfirm = event => {
+        if (event.target !== confirm || event.isTrusted) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      };
+      window.addEventListener('click', blockAutomaticConfirm, true);
+      try { button.click(); } finally {
+        window.removeEventListener('click', blockAutomaticConfirm, true);
+      }
+      if (dialog.open) dialog.querySelector('.dispatch-step-input:not(:disabled)')?.focus({ preventScroll: true });
+    }
+
+    function place(current) {
+      const rect = current.host.getBoundingClientRect();
+      current.host.style.left = `${Math.max(8, Math.min(current.x + 10, innerWidth - rect.width - 8))}px`;
+      current.host.style.top = `${Math.max(8, Math.min(current.y + 10, innerHeight - rect.height - 8))}px`;
+    }
+
+    function refreshPresets(current) {
+      if (!validDialog(current)) { cancel(); return; }
+      const buttons = presetButtons(current);
+      const signature = buttons.map(button => `${button.getAttribute('aria-label') || button.textContent}|${unavailable(button)}`);
+      if (current.buttons?.length === buttons.length
+          && buttons.every((button, index) => button === current.buttons[index] && signature[index] === current.signature[index])) return;
+      const hadFocus = current.shadow.activeElement;
+      const selected = current.items.findIndex(item => item === hadFocus);
+      current.buttons = buttons;
+      current.signature = signature;
+      current.items = buttons.map((native, index) => {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.setAttribute('role', 'menuitem');
+        item.textContent = (native.getAttribute('aria-label') || native.textContent || `Preset ${index + 1}`).replace(/^Use\s+/i, '').trim();
+        item.disabled = unavailable(native);
+        item.addEventListener('click', event => {
+          event.preventDefault(); event.stopPropagation(); applyPreset(current, native);
+        });
+        return item;
+      });
+      current.list.replaceChildren(...current.items);
+      current.empty.hidden = buttons.length > 0;
+      place(current);
+      if (hadFocus) (current.items[selected]?.disabled === false ? current.items[selected]
+        : current.items.find(item => !item.disabled))?.focus({ preventScroll: true });
+    }
+
+    function showMenu(current) {
+      if (!validDialog(current)) { cancel(); return; }
+      const host = document.createElement('div');
+      host.id = MENU_ID;
+      host.setAttribute('popover', 'manual');
+      const shadow = host.attachShadow({ mode: 'open' });
+      shadow.innerHTML = `<style>
+        :host { position:fixed; inset:auto; margin:0; padding:0; width:264px; max-width:calc(100vw - 16px);
+          border:1px solid #40546a; border-radius:12px; background:#101b27; color:#e8f0f7;
+          box-shadow:0 12px 38px #0009; z-index:2147483647; font:13px/1.4 system-ui,sans-serif; }
+        * { box-sizing:border-box; } section { padding:10px; } h2 { margin:0; font-size:13px; }
+        .target { color:#afc2d4; margin:3px 0 9px; overflow-wrap:anywhere; }
+        [role=menu] { display:grid; gap:4px; max-height:280px; overflow:auto; }
+        button { font:inherit; color:inherit; text-align:left; border:1px solid transparent;
+          border-radius:7px; background:#1b2b3b; padding:9px 10px; cursor:pointer; }
+        button:hover, button:focus-visible { outline:0; border-color:#77acd1; background:#243c51; }
+        button:disabled { opacity:.45; cursor:default; } p { margin:8px 0 0; font-size:11px; color:#9eb2c5; }
+        [hidden] { display:none!important; }
+      </style><section><h2>Presets de flota</h2><div class="target"></div>
+        <div role="menu" aria-label="Presets de flota"></div>
+        <p class="empty" hidden>No hay presets guardados. Puedes crearlos en el diálogo de flota.</p>
+        <p>Aplica las cantidades y revisa el envío en el diálogo.</p></section>`;
+      current.host = host;
+      current.shadow = shadow;
+      current.list = shadow.querySelector('[role="menu"]');
+      current.empty = shadow.querySelector('.empty');
+      current.items = [];
+      shadow.querySelector('.target').textContent = current.route.querySelector('.route-header-tile-col:last-child .route-header-tile-name')?.textContent || '';
+      shadow.addEventListener('keydown', event => {
+        // Keep native digit shortcuts from bypassing the guarded preset application.
+        if (/^[1-8]$/.test(event.key)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
+        if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault(); event.stopPropagation();
+        const items = current.items.filter(item => !item.disabled);
+        const index = items.indexOf(shadow.activeElement);
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+          : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+        items[next]?.focus({ preventScroll: true });
+      });
+      current.dialog.appendChild(host);
+      if (typeof host.showPopover === 'function') host.showPopover();
+      refreshPresets(current);
+      current.items.find(item => !item.disabled)?.focus({ preventScroll: true });
+      current.phase = 'menu';
+    }
+
+    function openDispatch(current) {
+      if (!enabled() || flow !== current || document.querySelector('dialog[open]')
+          || !visible(current.radial) || !current.radial.contains(current.fleet)
+          || current.fleet.dataset.actionKey !== 'fleet' || current.fleet.dataset.enabled !== 'true'
+          || current.fleet.disabled) { cancel(); return; }
+      current.phase = 'opening';
+      nativeAction(() => current.fleet.click());
+      const dialog = one('#dispatch-dialog');
+      const route = dialog?.querySelector('[data-field="dispatch-route-slot"] .route-header');
+      if (!(dialog instanceof HTMLDialogElement) || !dialog.open || !route) { cancel(); return; }
+      current.dialog = dialog;
+      current.route = route;
+      current.phase = 'dialog';
+      if (!validDialog(current)) { cancel(); return; }
+      current.timer = setTimeout(() => showMenu(current), NATIVE_GUARD_MS);
+    }
+
+    function begin(start, end) {
+      if (!enabled() || document.querySelector('dialog[open]') || !start.canvas.isConnected) return;
+      // Canvas hit-testing stays native. The marker row is shown only for a star.
+      // A fresh context menu lets us reject empty space without collapsing origins.
+      escapeNativeMenus();
+      const context = one('#app > .selection-menu');
+      const markers = context?.querySelector('.selection-menu-markers');
+      const previousRadial = one('#app > .star-actions');
+      if (!context?.hidden || !markers || visible(previousRadial)) return;
+      nativeEvent(start.canvas, new MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true, composed: true, button: 2,
+        clientX: end.clientX, clientY: end.clientY,
+      }));
+      const star = visible(context) && !markers.hidden;
+      escapeNativeMenus();
+      if (!star || !context.hidden || visible(previousRadial)) return;
+      replayClick({ ...start, clientX: end.clientX, clientY: end.clientY }, end, false);
+      const radial = one('#app > .star-actions');
+      const fleet = radial?.querySelector('button.star-action-btn[data-action-key="fleet"]');
+      if (!visible(radial) || !(fleet instanceof HTMLButtonElement)) return;
+      const current = { phase: 'radial', radial, fleet, x: end.clientX, y: end.clientY,
+        host: null, observer: null, timer: null };
+      flow = current;
+      current.observer = new MutationObserver(() => {
+        if (!enabled() || flow !== current) { cancel(); return; }
+        if (current.phase === 'radial') {
+          if (!visible(radial) || document.querySelector('dialog[open]')) cancel();
+        } else if (current.phase === 'dialog' || current.phase === 'menu') {
+          if (!validDialog(current)) cancel();
+          else if (current.phase === 'menu') refreshPresets(current);
+        }
+      });
+      current.observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true,
+        attributeFilter: ['open', 'hidden', 'disabled', 'aria-disabled', 'data-mode', 'data-direction',
+          'data-action-key', 'data-enabled', 'class', 'style'] });
+      current.timer = setTimeout(() => openDispatch(current), NATIVE_GUARD_MS);
+    }
+
+    on(window, 'pointerdown', event => {
+      if (replaying) return;
+      if (inMenu(event)) return;
+      cancel();
+      const canvas = event.target;
+      if (!enabled() || !(canvas instanceof HTMLCanvasElement) || canvas.id !== 'stage'
+          || event.button !== 0 || event.pointerType !== 'mouse' || !event.shiftKey || !plain(event)
+          || document.querySelector('dialog[open]') || document.body.classList.contains('ui-hidden')) return;
+      gesture = { canvas, pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY,
+        shiftKey: event.shiftKey, altKey: event.altKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey };
+      // Pixi receives down on the canvas but up on window capture. Retain down so
+      // its earlier up handler cannot toggle native multiselection for this shortcut.
+      event.stopImmediatePropagation();
+    }, { capture: true });
+    on(window, 'pointermove', event => {
+      if (replaying || !gesture || event.pointerId !== gesture.pointerId) return;
+      if (Math.abs(event.clientX - gesture.clientX) + Math.abs(event.clientY - gesture.clientY) <= 4) return;
+      const start = gesture;
+      gesture = null;
+      pointer(start.canvas, 'pointerdown', start, true);
+      // The current move then reaches Pixi normally, preserving shift-drag/panning.
+    }, { capture: true });
+    on(window, 'pointerup', event => {
+      if (replaying || !gesture || event.pointerId !== gesture.pointerId || event.button !== 0) return;
+      const start = gesture;
+      gesture = null;
+      event.stopImmediatePropagation();
+      if (!enabled() || !event.shiftKey || !plain(event)) { replayClick(start, event, true); return; }
+      if (event.target !== start.canvas) return;
+      suppressClick = { x: event.clientX, y: event.clientY, until: performance.now() + 500 };
+      begin(start, event);
+    }, { capture: true });
+    on(window, 'click', event => {
+      if (replaying) return;
+      if (suppressClick && event.target instanceof HTMLCanvasElement && event.target.id === 'stage'
+          && event.shiftKey && performance.now() < suppressClick.until
+          && Math.hypot(event.clientX - suppressClick.x, event.clientY - suppressClick.y) < 8) {
+        suppressClick = null;
+        event.preventDefault(); event.stopImmediatePropagation(); return;
+      }
+      if (flow && !inMenu(event)) cancel();
+    }, { capture: true });
+    on(window, 'keydown', event => {
+      if (replaying) return;
+      if (event.key === 'Escape' && flow?.host) {
+        event.preventDefault(); event.stopImmediatePropagation(); cancel(); return;
+      }
+      if (!inMenu(event) && !['Shift', 'Control', 'Alt', 'Meta'].includes(event.key)) cancel();
+    }, { capture: true });
+    on(window, 'pointercancel', () => { gesture = null; }, { capture: true });
+    for (const name of ['scroll', 'wheel']) on(window, name, event => { if (!inMenu(event)) cancel(); }, { capture: true });
+    for (const name of ['resize', 'pagehide', 'popstate', 'hashchange']) on(window, name, () => cancel(), { capture: true });
+    on(window, 'blur', () => cancel());
+    return { cancel, destroy() { cancel(); destroyed = true; scope.abort(); } };
+  }
+  // END SHIFT PRESETS
+
   // BEGIN NOTIFIER
   /* Paste createNotifier inside the userscript's IIFE. Required metadata:
    * @grant GM_xmlhttpRequest
@@ -1378,6 +1884,8 @@
     const BROWSER_GAP = 3100;
     const REQUEST_TIMEOUT = 15000;
     const MAX_429_RETRIES = 4;
+    const CREDENTIAL_DEBOUNCE = 400;
+    const EMPTY_DRAFTS = { botToken: '', chatId: '' };
     const EVENT_GROUPS = [
       { label: 'Actividad', enabled: true, entries: [
         ['request.sent', 'Solicitud enviada', '📤'],
@@ -1388,6 +1896,7 @@
         ['game.toast', 'Aviso del juego', '🔔'],
         ['game.reports', 'Informe del juego', '📋'],
         ['game.messages', 'Mensajes sin leer', '💬'],
+        ['game.level_target', 'Objetivo de nivel alcanzado', '🎯'],
       ] },
       { label: 'Problemas', enabled: true, entries: [
         ['request.failed', 'Pedido fallido', '❌'],
@@ -1411,7 +1920,8 @@
       group.entries.map(([type]) => [type, group.enabled])));
     const storageAvailable = typeof gmGet === 'function' && typeof gmSet === 'function';
     const telegramAvailable = storageAvailable && typeof gmRequest === 'function';
-    const defaults = { browserEnabled: false, telegramEnabled: false, botToken: '', chatId: '', events: DEFAULT_EVENTS, eventsExpanded: false };
+    const defaults = { browserEnabled: false, telegramEnabled: false, botToken: '', chatId: '',
+      drafts: EMPTY_DRAFTS, events: DEFAULT_EVENTS, eventsExpanded: false };
     let config = { ...defaults };
     let destroyed = false;
     let storageError = '';
@@ -1428,6 +1938,8 @@
     let activeRequest = null;
     let testSequence = 0;
     let lastTestAt = -Infinity;
+    let draftTimer = null;
+    let autosaveStatus = 'Los ajustes se guardan automáticamente.';
     const browserQueue = [];
     const telegramQueue = [];
     const openNotifications = [];
@@ -1437,46 +1949,89 @@
       browserFailed: 0, telegramFailed: 0, browserDropped: 0, telegramDropped: 0,
       rateRetries: 0, filtered: 0,
     };
-
+  
     function validToken(value) {
       return typeof value === 'string' && /^\d{1,20}:[A-Za-z0-9_-]{20,200}$/.test(value);
     }
-
+  
     function validChat(value) {
       return typeof value === 'string'
         && (/^-?[1-9]\d{0,19}$/.test(value) || /^@[A-Za-z0-9_]{5,64}$/.test(value));
     }
-
+  
     function permission() {
       try { return NativeNotification ? NativeNotification.permission || 'default' : 'unsupported'; }
       catch { return 'unsupported'; }
     }
-
+  
     function configured() {
       return telegramAvailable && validToken(config.botToken) && validChat(config.chatId);
     }
-
+  
+    function validDrafts(value) {
+      return value && typeof value === 'object' && !Array.isArray(value)
+        && typeof value.botToken === 'string' && value.botToken.length <= 221
+        && typeof value.chatId === 'string' && value.chatId.length <= 65;
+    }
+  
     function normalizeConfig(saved) {
-      if (!saved || typeof saved !== 'object') return { ...defaults, events: { ...DEFAULT_EVENTS } };
+      if (!saved || typeof saved !== 'object') return { ...defaults, events: { ...DEFAULT_EVENTS }, drafts: { ...EMPTY_DRAFTS } };
       return {
         browserEnabled: saved.browserEnabled === true,
         telegramEnabled: saved.telegramEnabled === true,
         eventsExpanded: saved.eventsExpanded === true,
         botToken: validToken(saved.botToken) ? saved.botToken : '',
         chatId: validChat(saved.chatId) ? saved.chatId : '',
+        drafts: validDrafts(saved.drafts)
+          ? { botToken: saved.drafts.botToken, chatId: saved.drafts.chatId } : { ...EMPTY_DRAFTS },
         events: Object.fromEntries(EVENT_TYPES.map((type) => [type,
           typeof saved.events?.[type] === 'boolean' ? saved.events[type] : DEFAULT_EVENTS[type]])),
       };
     }
-
+  
+    function sameDrafts(a, b) {
+      return a.botToken === b.botToken && a.chatId === b.chatId;
+    }
+  
+    function credentialDraftState() {
+      const draftToken = config.drafts.botToken.trim();
+      const draftChat = config.drafts.chatId.trim();
+      const botToken = draftToken || config.botToken;
+      const chatId = draftChat || config.chatId;
+      const pending = Boolean(config.drafts.botToken || config.drafts.chatId);
+      let message = '';
+      if (pending) {
+        if (draftToken && !validToken(draftToken)) message = 'Borrador guardado. El token todavía no tiene un formato válido.';
+        else if (draftChat && !validChat(draftChat)) message = 'Borrador guardado. Revisa el Chat ID: número o @canal.';
+        else if (!validToken(botToken) && !validChat(chatId)) message = 'Borrador guardado. Faltan el token y el Chat ID.';
+        else if (!validToken(botToken)) message = 'Borrador guardado. Falta un token válido.';
+        else if (!validChat(chatId)) message = 'Borrador guardado. Falta un Chat ID válido.';
+        else message = 'Borrador guardado. Se aplicará automáticamente al terminar de escribir.';
+      }
+      return { pending, botToken, chatId, valid: validToken(botToken) && validChat(chatId), message };
+    }
+  
+    function cancelDraftTimer() {
+      if (draftTimer !== null) cancelTimer(draftTimer);
+      draftTimer = null;
+    }
+  
+    function restoreDraftFields(force = false) {
+      if (!mounted || (!force && (mounted.editing.size || mounted.editorDirty))) return;
+      // Only unapplied drafts are restored. Saved active credentials never populate inputs.
+      mounted.token.value = config.drafts.botToken;
+      mounted.chat.value = config.drafts.chatId;
+      mounted.editorDirty = false;
+    }
+  
     function eventAllowed(type) {
       return EVENT_TYPES.includes(type) && config.events[type] === true;
     }
-
+  
     function queuedEventAllowed(item) {
       return item.test === true || eventAllowed(item.type);
     }
-
+  
     function dropFilteredQueueItems() {
       for (let index = browserQueue.length - 1; index >= 0; index -= 1) {
         if (!queuedEventAllowed(browserQueue[index])) {
@@ -1500,7 +2055,7 @@
       }
       // A filter only removes unsent items; it never aborts an in-flight request.
     }
-
+  
     function refreshSeen() {
       if (!storageAvailable) return;
       try {
@@ -1515,17 +2070,18 @@
         while (seen.size > MAX_SEEN) seen.delete(seen.keys().next().value);
       } catch { /* Keep this tab's deduplication if the manager cannot be read. */ }
     }
-
+  
     try {
       if (storageAvailable) {
         config = normalizeConfig(gmGet(CONFIG_KEY, null));
+          autosaveStatus = credentialDraftState().message || autosaveStatus;
         refreshSeen();
       }
     } catch {
       config = { ...defaults };
       storageError = 'No se pudo leer la configuración de avisos del gestor.';
     }
-
+  
     // Conservative UTF-16 length limit, preserving complete Unicode code points.
     function plain(value, limit) {
       let text = typeof value === 'string' ? value : '';
@@ -1538,7 +2094,7 @@
       if (/[\uD800-\uDBFF]/.test(text.charAt(end - 1))) end -= 1;
       return text.slice(0, end) + '…';
     }
-
+  
     function keyFor(text) {
       let a = 0x811c9dc5;
       let b = 0x9e3779b9;
@@ -1550,7 +2106,7 @@
       return (a >>> 0).toString(16).padStart(8, '0')
         + (b >>> 0).toString(16).padStart(8, '0');
     }
-
+  
     function remember(key) {
       const timestamp = now();
       for (const [oldKey, at] of seen) {
@@ -1561,13 +2117,13 @@
       try { if (storageAvailable) gmSet(SEEN_KEY, [...seen]); }
       catch { storageError = 'No se pudo guardar la deduplicación; se conserva en esta pestaña.'; }
     }
-
+  
     function closeBrowserNotifications() {
       for (const notification of openNotifications.splice(0)) {
         try { notification.close(); } catch { /* Native implementations may omit close. */ }
       }
     }
-
+  
     function clearBrowserQueue() {
       if (browserTimer !== null) cancelTimer(browserTimer);
       browserTimer = null;
@@ -1575,7 +2131,7 @@
       browserQueue.length = 0;
       closeBrowserNotifications();
     }
-
+  
     function clearTelegramQueue() {
       if (telegramTimer !== null) cancelTimer(telegramTimer);
       telegramTimer = null;
@@ -1590,7 +2146,7 @@
         try { request.control?.abort(); } catch { /* Never expose a token-bearing transport error. */ }
       }
     }
-
+  
     function writeConfig(next) {
       if (!storageAvailable) {
         storageError = 'Faltan GM_getValue/GM_setValue. Revisa los permisos del userscript.';
@@ -1610,11 +2166,12 @@
       config = { ...next };
       dropFilteredQueueItems();
       storageError = '';
+      autosaveStatus = credentialDraftState().message || 'Guardado automáticamente.';
       updateUI();
       try { deps.onSettingsChange?.(); } catch { /* Los avisos no dependen de la copia de seguridad. */ }
       return true;
     }
-
+  
     function refreshConfig() {
       if (destroyed || !storageAvailable) return;
       try {
@@ -1623,30 +2180,36 @@
         const telegramChanged = next.telegramEnabled !== config.telegramEnabled;
         const browserChanged = next.browserEnabled !== config.browserEnabled;
         const eventsChanged = EVENT_TYPES.some((type) => next.events[type] !== config.events[type]);
+        const draftsChanged = !sameDrafts(next.drafts, config.drafts);
         if (!destinationChanged && !telegramChanged && !browserChanged && !eventsChanged
-            && next.eventsExpanded === config.eventsExpanded) return;
+            && !draftsChanged && next.eventsExpanded === config.eventsExpanded) return;
         if (destinationChanged || (config.telegramEnabled && !next.telegramEnabled)) clearTelegramQueue();
         if (config.browserEnabled && !next.browserEnabled) clearBrowserQueue();
         config = next;
         dropFilteredQueueItems();
+        if (draftsChanged || destinationChanged) {
+          cancelDraftTimer();
+          restoreDraftFields();
+        }
         if (destinationChanged || (telegramChanged && next.telegramEnabled)) {
           telegramBlocked = false;
           consecutiveFailures = 0;
           telegramStatus = 'Configuración actualizada desde el gestor.';
         }
         storageError = '';
+        autosaveStatus = credentialDraftState().message || 'Guardado automáticamente.';
         updateUI();
       } catch {
         storageError = 'No se pudo actualizar la configuración desde el gestor.';
       }
     }
-
+  
     function isEnabled() {
       refreshConfig();
       return !destroyed && (config.browserEnabled || config.telegramEnabled)
         && EVENT_TYPES.some((type) => config.events[type]);
     }
-
+  
     function armBrowser() {
       if (destroyed || browserTimer !== null || !browserQueue.length) return;
       browserTimer = later(() => {
@@ -1654,7 +2217,7 @@
         pumpBrowser();
       }, Math.max(0, nextBrowserAt - now()));
     }
-
+  
     function pumpBrowser() {
       refreshConfig();
       dropFilteredQueueItems();
@@ -1686,7 +2249,7 @@
       updateUI();
       armBrowser();
     }
-
+  
     function armTelegram() {
       if (destroyed || telegramTimer !== null || activeRequest || !telegramQueue.length) return;
       telegramTimer = later(() => {
@@ -1694,7 +2257,7 @@
         pumpTelegram();
       }, Math.min(60 * 60 * 1000, Math.max(0, nextTelegramAt - now())));
     }
-
+  
     function retryDelay(response, payload, attempts) {
       let delay = 0;
       const seconds = Number(payload?.parameters?.retry_after);
@@ -1709,7 +2272,7 @@
       // Never retry sooner than a server-provided delay. Invalid/absent delays back off.
       return Math.max(TELEGRAM_GAP, delay || 5000 * (2 ** attempts)) + 250;
     }
-
+  
     function failTelegram(code, transport) {
       counters.telegramFailed += 1;
       consecutiveFailures += 1;
@@ -1731,7 +2294,7 @@
         telegramStatus += ' Guarda la configuración o usa Enviar prueba para reanudar los avisos.';
       }
     }
-
+  
     function pumpTelegram() {
       refreshConfig();
       dropFilteredQueueItems();
@@ -1750,7 +2313,7 @@
       nextTelegramAt = now() + TELEGRAM_GAP;
       telegramStatus = item.test ? 'Enviando la prueba solicitada…' : 'Enviando aviso…';
       updateUI();
-
+  
       function finish(kind, response) {
         if (destroyed || request.settled || activeRequest !== request) return;
         refreshConfig();
@@ -1800,7 +2363,7 @@
         updateUI();
         armTelegram();
       }
-
+  
       // Tampermonkey's fetch mode can ignore its native timeout: keep our own watchdog.
       request.watchdog = later(() => {
         finish('timeout', null);
@@ -1830,7 +2393,7 @@
         finish('network', null);
       }
     }
-
+  
     function emit(event) {
       try {
         if (destroyed || !event || typeof event !== 'object') return false;
@@ -1875,12 +2438,82 @@
         return false;
       }
     }
-
+  
+    function commitCredentialDraft(clearFields = false, expectedDrafts = null) {
+      if (destroyed) return false;
+      cancelDraftTimer();
+      refreshConfig();
+      // A remote import or another tab supersedes the draft captured by an older timer.
+      if (expectedDrafts && !sameDrafts(expectedDrafts, config.drafts)) return false;
+      const draft = credentialDraftState();
+      if (draft.pending && !draft.valid) {
+        autosaveStatus = draft.message;
+        updateUI();
+        return false;
+      }
+      if (draft.pending) {
+        const destinationChanged = draft.botToken !== config.botToken || draft.chatId !== config.chatId;
+        if (!writeConfig({ ...config, botToken: draft.botToken, chatId: draft.chatId, drafts: EMPTY_DRAFTS })) return false;
+        if (destinationChanged) {
+          telegramBlocked = false;
+          consecutiveFailures = 0;
+          telegramStatus = config.telegramEnabled ? 'Activado.' : 'Credenciales listas; Telegram está desactivado.';
+        }
+      }
+      if (clearFields && mounted) {
+        mounted.token.value = '';
+        mounted.chat.value = '';
+        mounted.editorDirty = false;
+      }
+      autosaveStatus = 'Guardado automáticamente.';
+      updateUI();
+      return true;
+    }
+  
+    function scheduleCredentialCommit() {
+      cancelDraftTimer();
+      if (destroyed || !credentialDraftState().pending) return;
+      const expectedDrafts = { ...config.drafts };
+      draftTimer = later(() => {
+        draftTimer = null;
+        commitCredentialDraft(false, expectedDrafts);
+      }, CREDENTIAL_DEBOUNCE);
+    }
+  
+    function saveEditorDraft(schedule = true) {
+      if (destroyed || !mounted) return false;
+      const drafts = { botToken: mounted.token.value, chatId: mounted.chat.value };
+      mounted.editorDirty = true;
+      cancelDraftTimer();
+      refreshConfig();
+      if (!validDrafts(drafts)) {
+        storageError = 'El borrador supera la longitud permitida. Acorta el campo para guardarlo.';
+        updateUI();
+        return false;
+      }
+      // Store unfinished credentials before scheduling promotion. The active pair is untouched.
+      if (!sameDrafts(drafts, config.drafts) && !writeConfig({ ...config, drafts })) return false;
+      if (schedule) scheduleCredentialCommit();
+      return true;
+    }
+  
+    function flushEditorDraft(clearFields) {
+      if (destroyed || !mounted) return false;
+      refreshConfig();
+      const tokenValue = mounted.token.value.trim();
+      const chatValue = mounted.chat.value.trim();
+      const alreadyApplied = !credentialDraftState().pending
+        && (!tokenValue || tokenValue === config.botToken) && (!chatValue || chatValue === config.chatId);
+      if (!alreadyApplied && !saveEditorDraft(false)) return false;
+      return commitCredentialDraft(clearFields, { ...config.drafts });
+    }
+  
     function getDiagnostics() {
       return {
         destroyed,
         storageAvailable,
         storageError,
+        autosave: { status: autosaveStatus, draftStored: credentialDraftState().pending, pending: draftTimer !== null },
         events: { ...config.events },
         browser: {
           enabled: config.browserEnabled, permission: permission(),
@@ -1895,7 +2528,7 @@
         counters: { ...counters },
       };
     }
-
+  
     function updateUI() {
       if (!mounted) return;
       const { root, browser, telegram, permit, token, chat, test, status, eventInputs, eventCount } = mounted;
@@ -1909,7 +2542,8 @@
       if (permit.textContent !== permitText) permit.textContent = permitText;
       token.placeholder = config.botToken ? 'Token guardado; vacío lo conserva' : 'Token del bot';
       chat.placeholder = config.chatId ? 'Chat guardado; vacío lo conserva' : 'ID numérico o @canal';
-      test.disabled = !configured() || !!activeRequest || telegramQueue.some((item) => item.test);
+      token.disabled = chat.disabled = !storageAvailable;
+      test.disabled = !configured() || credentialDraftState().pending || !!activeRequest || telegramQueue.some((item) => item.test);
       for (const [type, input] of eventInputs) {
         input.checked = config.events[type];
         input.disabled = !storageAvailable;
@@ -1926,12 +2560,12 @@
       const telegramLine = 'Telegram: ' + (telegramStatus || (config.telegramEnabled ? 'activado.' : 'desactivado.'));
       const pendingLine = 'En cola: ' + browserQueue.length + ' navegador / ' + telegramQueue.length + ' Telegram.';
       const dropped = counters.browserDropped + counters.telegramDropped;
-      const content = [storageError, browserLine, telegramLine, pendingLine,
+      const content = [storageError, storageError ? '' : autosaveStatus, browserLine, telegramLine, pendingLine,
         dropped ? 'Avisos descartados o cancelados: ' + dropped + '.' : ''].filter(Boolean).join('\n');
       if (status.textContent !== content) status.textContent = content;
       if (root.dataset.telegramBlocked !== String(telegramBlocked)) root.dataset.telegramBlocked = String(telegramBlocked);
     }
-
+  
     function mount(container) {
       refreshConfig();
       if (destroyed || !container?.appendChild) return null;
@@ -1984,8 +2618,8 @@
           </details>
           <label class="notify-field">Token de tu bot<input class="notification-token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="221"></label>
           <label class="notify-field">Chat ID<input class="notification-chat-id" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="65"></label>
-          <p class="notify-note">Los campos vacíos conservan lo guardado. Guardar no envía mensajes. Enviar prueba manda un mensaje al chat guardado.</p>
-          <div class="notify-actions"><button class="notification-save" type="button">Guardar</button><button class="notification-test" type="button">Enviar prueba a Telegram</button></div>
+          <p class="notify-note">Todo se guarda automáticamente. Los campos vacíos conservan las credenciales activas; un borrador incompleto queda guardado para continuar después. Enviar prueba manda un mensaje al chat guardado.</p>
+          <button class="notification-test" type="button">Enviar prueba a Telegram</button>
           <button class="notification-clear" type="button">Borrar credenciales de Telegram</button>
           <p class="notify-status" role="status" aria-live="polite" aria-atomic="true"></p>
         </div>`;
@@ -1997,6 +2631,7 @@
         eventInputs: new Map(EVENT_TYPES.map((type) => [type, query(`[data-notification-event="${type}"]`)])),
         eventCount: query('.notification-events-count'), eventsAll: query('.notification-events-all'),
         eventsNone: query('.notification-events-none'), eventsDetails: query('.notification-events-details'),
+        editing: new Set(), editorDirty: false,
       };
       const ui = mounted;
       ui.eventsDetails.addEventListener('toggle', () => {
@@ -2005,30 +2640,18 @@
         refreshConfig();
         writeConfig({ ...config, eventsExpanded: open });
       });
-
-      function saveFields(enableTelegram) {
-        refreshConfig();
-        if (enableTelegram === undefined) enableTelegram = config.telegramEnabled;
-        const botToken = ui.token.value.trim() || config.botToken;
-        const chatId = ui.chat.value.trim() || config.chatId;
-        if ((botToken && !validToken(botToken)) || (chatId && !validChat(chatId))
-            || (enableTelegram && (!validToken(botToken) || !validChat(chatId)))) {
-          telegramStatus = 'Completa un token válido y un chat ID numérico o @canal; después pulsa Guardar.';
-          updateUI();
-          return false;
-        }
-        if (!writeConfig({ ...config, botToken, chatId, telegramEnabled: enableTelegram })) return false;
-        ui.token.value = '';
-        ui.chat.value = '';
-        telegramBlocked = false;
-        consecutiveFailures = 0;
-        telegramStatus = 'Configuración guardada.';
-        updateUI();
-        armTelegram();
-        return true;
+  
+      for (const field of [ui.token, ui.chat]) {
+        field.addEventListener('focus', () => ui.editing.add(field));
+        field.addEventListener('input', () => { saveEditorDraft(); });
+        field.addEventListener('change', () => { flushEditorDraft(false); });
+        field.addEventListener('blur', (event) => {
+          ui.editing.delete(field);
+          // Moving to the other credential field should not empty the editor.
+          const leavingEditor = event.relatedTarget !== ui.token && event.relatedTarget !== ui.chat;
+          flushEditorDraft(leavingEditor);
+        });
       }
-
-      query('.notification-save').addEventListener('click', () => saveFields());
       for (const [type, input] of ui.eventInputs) {
         input.addEventListener('change', () => {
           const enabled = input.checked;
@@ -2045,17 +2668,16 @@
       ui.telegram.addEventListener('change', () => {
         const desired = ui.telegram.checked;
         refreshConfig();
-        if (desired) saveFields(true);
-        else if (writeConfig({ ...config, telegramEnabled: false })) {
-          telegramStatus = 'Desactivado.';
+        if (writeConfig({ ...config, telegramEnabled: desired })) {
+          telegramStatus = desired ? configured() ? 'Activado.' : 'Activado; completa las credenciales para recibir avisos.' : 'Desactivado.';
+          if (desired) armTelegram();
           updateUI();
         }
       });
       ui.browser.addEventListener('change', () => {
         const desired = ui.browser.checked && permission() === 'granted';
         refreshConfig();
-        writeConfig({ ...config, browserEnabled: desired });
-        browserStatus = desired ? 'Activado.' : 'Desactivado.';
+        if (writeConfig({ ...config, browserEnabled: desired })) browserStatus = desired ? 'Activado.' : 'Desactivado.';
         updateUI();
       });
       ui.permit.addEventListener('click', async () => {
@@ -2085,8 +2707,10 @@
           updateUI();
           return;
         }
-        if (ui.token.value.trim() || ui.chat.value.trim()) {
-          telegramStatus = 'Guarda los cambios de los campos antes de enviar la prueba.';
+        if (credentialDraftState().pending
+            || (ui.token.value.trim() && ui.token.value.trim() !== config.botToken)
+            || (ui.chat.value.trim() && ui.chat.value.trim() !== config.chatId)) {
+          telegramStatus = 'Completa el borrador y espera a que se guarde automáticamente antes de enviar la prueba.';
           updateUI();
           return;
         }
@@ -2108,9 +2732,11 @@
       });
       query('.notification-clear').addEventListener('click', () => {
         refreshConfig();
-        if (writeConfig({ ...config, botToken: '', chatId: '', telegramEnabled: false })) {
+        cancelDraftTimer();
+        if (writeConfig({ ...config, botToken: '', chatId: '', drafts: EMPTY_DRAFTS, telegramEnabled: false })) {
           ui.token.value = '';
           ui.chat.value = '';
+          ui.editorDirty = false;
           telegramBlocked = false;
           consecutiveFailures = 0;
           telegramStatus = 'Credenciales borradas; Telegram desactivado.';
@@ -2118,26 +2744,29 @@
         }
       });
       container.appendChild(root);
+      restoreDraftFields(true);
+      if (credentialDraftState().pending) scheduleCredentialCommit();
       updateUI();
       return root;
     }
-
+  
     function isEventEnabled(type) {
       refreshConfig();
       return !destroyed && eventAllowed(type)
         && ((config.browserEnabled && permission() === 'granted') || (config.telegramEnabled && configured()));
     }
-
+  
     function exportConfig() {
       refreshConfig();
-      return { ...config, events: { ...config.events } };
+      return { ...config, events: { ...config.events }, drafts: { ...config.drafts } };
     }
-
+  
     function validateConfig(value) {
       if (!value || typeof value !== 'object' || Array.isArray(value)
           || typeof value.browserEnabled !== 'boolean' || typeof value.telegramEnabled !== 'boolean'
           || typeof value.botToken !== 'string' || typeof value.chatId !== 'string'
           || (value.botToken && !validToken(value.botToken)) || (value.chatId && !validChat(value.chatId))
+          || (value.drafts !== undefined && !validDrafts(value.drafts))
           || (value.events !== undefined && (!value.events || typeof value.events !== 'object' || Array.isArray(value.events)))
           || EVENT_TYPES.some(type => value.events?.[type] !== undefined && typeof value.events[type] !== 'boolean')
           || (value.eventsExpanded !== undefined && typeof value.eventsExpanded !== 'boolean')) {
@@ -2145,22 +2774,26 @@
       }
       return normalizeConfig(value);
     }
-
+  
     function importConfig(value) {
       const next = validateConfig(value);
       if (!writeConfig(next)) throw new Error('No se pudo guardar la configuración de avisos.');
+      cancelDraftTimer();
+      restoreDraftFields(true);
+      if (mounted && credentialDraftState().pending) scheduleCredentialCommit();
       return true;
     }
-
+  
     function destroy() {
       if (destroyed) return;
       destroyed = true;
+      cancelDraftTimer();
       clearBrowserQueue();
       clearTelegramQueue();
       mounted?.root.remove();
       mounted = null;
     }
-
+  
     return Object.freeze({ emit, isEnabled, isEventEnabled, mount, getDiagnostics, exportConfig, validateConfig, importConfig,
       destroy, get status() { return getDiagnostics(); } });
   }
@@ -2797,6 +3430,374 @@
   }
   // END REPORTS
 
+  // BEGIN LEVEL TARGETS
+  // Constructed levels only. The caller reuses the HUD observer's .b-level snapshot.
+  function createLevelTargets(deps = {}) {
+    const CONFIG_KEY = 'old-light-level-targets:v1';
+    const MAX_LEVEL = 1000000;
+    const MAX_DRAFT = 32;
+    const MAX_ACKNOWLEDGED = 4096;
+    const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const GALAXY = /^[A-Za-z0-9_-]{1,64}$/;
+    const buildings = (deps.buildings || []).map(([id, name]) => [id, name]);
+    if (!buildings.length || buildings.some(([id, name]) =>
+      typeof id !== 'string' || !/^[a-z_]{1,40}$/.test(id) || typeof name !== 'string')) {
+      throw new TypeError('Falta la lista de estructuras para los objetivos.');
+    }
+    const ids = buildings.map(([id]) => id);
+    const send = typeof deps.send === 'function' ? deps.send : () => false;
+    const canNotify = typeof deps.canNotify === 'function' ? deps.canNotify : () => false;
+    const getSnapshot = typeof deps.getSnapshot === 'function' ? deps.getSnapshot : () => null;
+    const gmGet = deps.gmGetValue || (typeof GM_getValue === 'function' ? GM_getValue : null);
+    const gmSet = deps.gmSetValue || (typeof GM_setValue === 'function' ? GM_setValue : null);
+    const later = deps.setTimeout || ((fn, ms) => setTimeout(fn, ms));
+    const cancel = deps.clearTimeout || (id => clearTimeout(id));
+    const timers = new Map();
+    const unsavedDrafts = new Map();
+    let mounted = null;
+    let baseline = null;
+    let latest = null;
+    let destroyed = false;
+    let storageError = false;
+    let emitted = 0;
+    let fieldStatus = '';
+    let config;
+
+    const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+    const validLevel = value => Number.isInteger(value) && value >= 0 && value <= MAX_LEVEL;
+    const defaults = () => ({ schemaVersion: 1, targets: Object.fromEntries(ids.map(id => [id, 0])),
+      drafts: Object.fromEntries(ids.map(id => [id, null])), expanded: true, acknowledged: [] });
+
+    function validKey(key) {
+      if (typeof key !== 'string' || key.length > 180) return false;
+      const [galaxy, system, id, goal, ...rest] = key.split('/');
+      return rest.length === 0 && GALAXY.test(galaxy || '') && UUID.test(system || '') &&
+        ids.includes(id) && /^[1-9]\d{0,6}$/.test(goal || '') && Number(goal) <= MAX_LEVEL;
+    }
+
+    function validateConfig(value = {}) {
+      if (!object(value) || (value.schemaVersion !== undefined && value.schemaVersion !== 1) ||
+          (value.targets !== undefined && !object(value.targets)) ||
+          (value.drafts !== undefined && !object(value.drafts)) ||
+          (value.expanded !== undefined && typeof value.expanded !== 'boolean') ||
+          (value.acknowledged !== undefined && (!Array.isArray(value.acknowledged) ||
+            value.acknowledged.length > MAX_ACKNOWLEDGED || !value.acknowledged.every(validKey)))) {
+        throw new TypeError('La configuración de objetivos de nivel no es válida.');
+      }
+      const next = defaults();
+      for (const id of ids) {
+        const target = value.targets?.[id] === undefined ? 0 : value.targets[id];
+        const draft = value.drafts?.[id] === undefined ? null : value.drafts[id];
+        if (!validLevel(target) || (draft !== null && (typeof draft !== 'string' ||
+            draft.length > MAX_DRAFT || /[\u0000-\u001f\u007f]/.test(draft)))) {
+          throw new TypeError('Un objetivo o su borrador no tiene un formato válido.');
+        }
+        next.targets[id] = target;
+        next.drafts[id] = draft;
+      }
+      next.expanded = value.expanded !== false;
+      next.acknowledged = [...new Set((value.acknowledged || []).map(key => {
+        const parts = key.split('/'); parts[1] = parts[1].toLowerCase(); return parts.join('/');
+      }))];
+      return next;
+    }
+
+    function readStored() {
+      if (typeof gmGet === 'function' && typeof gmSet === 'function') {
+        const value = gmGet(CONFIG_KEY, defaults());
+        if (value && typeof value.then === 'function') throw new TypeError('Se necesita almacenamiento GM síncrono.');
+        return validateConfig(value);
+      }
+      const value = globalThis.localStorage?.getItem(CONFIG_KEY);
+      return validateConfig(value ? JSON.parse(value) : {});
+    }
+
+    function writeStored(next) {
+      if (typeof gmGet === 'function' && typeof gmSet === 'function') {
+        const result = gmSet(CONFIG_KEY, next);
+        if (result && typeof result.then === 'function') throw new TypeError('Se necesita almacenamiento GM síncrono.');
+      } else {
+        if (!globalThis.localStorage) throw new Error('No hay almacenamiento local disponible.');
+        globalThis.localStorage.setItem(CONFIG_KEY, JSON.stringify(next));
+      }
+    }
+
+    try { config = readStored(); }
+    catch (_) { config = defaults(); storageError = true; }
+
+    function normalizedSnapshot(value) {
+      if (!value || !GALAXY.test(value.galaxy || '') || !UUID.test(value.system || '')) return null;
+      const levels = new Map(ids.map(id => {
+        const level = value.levels?.get?.(id);
+        return [id, validLevel(level) ? level : null];
+      }));
+      return { identity: `${value.galaxy}/${value.system.toLowerCase()}`,
+        systemName: typeof value.systemName === 'string'
+          ? value.systemName.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 400) : '',
+        levels };
+    }
+
+    function keyFor(snapshot, id, target) { return `${snapshot.identity}/${id}/${target}`; }
+    function cancelDrafts() {
+      for (const timer of timers.values()) cancel(timer);
+      timers.clear();
+    }
+
+    function refreshConfig() {
+      if (destroyed) return;
+      try {
+        const next = readStored();
+        if (JSON.stringify(next) === JSON.stringify(config)) return;
+        for (const id of ids) {
+          if (next.targets[id] !== config.targets[id] || next.drafts[id] !== config.drafts[id]) {
+            if (timers.has(id)) { cancel(timers.get(id)); timers.delete(id); }
+          }
+          if (next.targets[id] !== config.targets[id]) baseline?.entries.delete(id);
+        }
+        config = next;
+        render();
+      } catch (_) { storageError = true; }
+    }
+
+    function exportConfig() {
+      refreshConfig();
+      return { ...config, targets: { ...config.targets }, drafts: { ...config.drafts, ...Object.fromEntries(unsavedDrafts) },
+        acknowledged: [...config.acknowledged] };
+    }
+
+    function addAcknowledged(list, key) {
+      if (list.includes(key)) return false;
+      list.push(key);
+      if (list.length > MAX_ACKNOWLEDGED) list.splice(0, list.length - MAX_ACKNOWLEDGED);
+      return true;
+    }
+
+    function commit(value, { restoring = false, notifyChange = true } = {}) {
+      if (destroyed) throw new Error('Los objetivos de nivel están cerrados.');
+      const next = validateConfig(value);
+      const changed = ids.filter(id => next.targets[id] !== config.targets[id]);
+      let fresh = null;
+      if (!restoring && changed.length) {
+        try { fresh = normalizedSnapshot(getSnapshot()); } catch (_) { /* no current HUD */ }
+        if (fresh) for (const id of changed) {
+          const target = next.targets[id];
+          const level = fresh.levels.get(id);
+          if (target > 0 && level !== null && level >= target) addAcknowledged(next.acknowledged, keyFor(fresh, id, target));
+        }
+      }
+      try { writeStored(next); }
+      catch (_) { storageError = true; render(); throw new Error('No se pudieron guardar los objetivos de nivel.'); }
+      storageError = false;
+      config = next;
+      for (const [id, draft] of unsavedDrafts) {
+        if (next.drafts[id] === draft) unsavedDrafts.delete(id);
+      }
+      if (restoring) resetObservation();
+      else if (changed.length) {
+        if (fresh && baseline?.identity === fresh.identity) {
+          for (const id of changed) baseline.entries.set(id, { target: next.targets[id], level: fresh.levels.get(id) });
+        } else for (const id of changed) baseline?.entries.delete(id);
+      }
+      render();
+      if (notifyChange) {
+        try { deps.onSettingsChange?.(); } catch (_) { /* settings are already saved */ }
+      }
+      return { ...next, targets: { ...next.targets }, drafts: { ...next.drafts }, acknowledged: [...next.acknowledged] };
+    }
+
+    function importConfig(value) {
+      const next = validateConfig(value);
+      cancelDrafts();
+      fieldStatus = '';
+      const saved = commit(next, { restoring: true });
+      unsavedDrafts.clear();
+      render();
+      return saved;
+    }
+
+    function resetObservation() { baseline = null; latest = null; }
+
+    function observe(value, active) {
+      if (destroyed) return;
+      refreshConfig();
+      const next = normalizedSnapshot(value);
+      latest = next;
+      let enabled = false;
+      try { enabled = canNotify() === true; } catch (_) { /* unavailable notifier */ }
+      if (!active || !enabled || !next) { baseline = null; render(); return; }
+      const nextBaseline = { identity: next.identity,
+        entries: baseline?.identity === next.identity ? new Map(baseline.entries) : new Map() };
+      const seen = new Set(config.acknowledged);
+      const acknowledged = [...config.acknowledged];
+      const events = [];
+      for (const [id, name] of buildings) {
+        const target = config.targets[id];
+        const level = next.levels.get(id);
+        const previous = nextBaseline.entries.get(id);
+        nextBaseline.entries.set(id, { target, level });
+        if (target === 0 || level === null) continue;
+        const key = keyFor(next, id, target);
+        if (seen.has(key)) continue;
+        const first = !previous || previous.target !== target || previous.level === null;
+        if (level < target) continue;
+        // Initial snapshots and newly configured, already completed goals are silent.
+        addAcknowledged(acknowledged, key);
+        seen.add(key);
+        if (!first && previous.level < target) events.push({ type: 'game.level_target',
+          id: `level-target:${key}`, title: 'Old Light', systemName: next.systemName,
+          message: `${name}: objetivo de nivel ${target} alcanzado.\nNivel construido: ${previous.level} → ${level}.` });
+      }
+      if (acknowledged.length !== config.acknowledged.length ||
+          acknowledged.some((key, index) => key !== config.acknowledged[index])) {
+        try { commit({ ...config, acknowledged }, { notifyChange: false }); }
+        catch (_) { return; } // Keep the previous levels so recovery can retry the crossing.
+      }
+      baseline = nextBaseline;
+      for (const event of events) {
+        try { if (send(event) !== false) emitted += 1; } catch (_) { /* notifier cannot interrupt observation */ }
+      }
+      render();
+    }
+
+    function parseDraft(value) {
+      const trimmed = value.trim();
+      if (!trimmed) return 0;
+      if (!/^\d+$/.test(trimmed)) return null;
+      const level = Number(trimmed);
+      return validLevel(level) ? level : null;
+    }
+
+    function promoteDraft(id) {
+      if (timers.has(id)) { cancel(timers.get(id)); timers.delete(id); }
+      refreshConfig();
+      const draft = unsavedDrafts.has(id) ? unsavedDrafts.get(id) : config.drafts[id];
+      if (draft === null) return;
+      const target = parseDraft(draft);
+      if (target === null && !unsavedDrafts.has(id)) return;
+      try {
+        const next = exportConfig();
+        if (target !== null) { next.targets[id] = target; next.drafts[id] = null; }
+        commit(next);
+        unsavedDrafts.delete(id);
+        fieldStatus = target === null ? `Borrador guardado. Escribe un nivel entero entre 0 y ${MAX_LEVEL}.`
+          : 'Objetivos guardados automáticamente.';
+      } catch (_) {
+        unsavedDrafts.set(id, draft);
+        fieldStatus = 'No se pudo guardar el cambio. El borrador sigue en esta ventana; vuelve a editar el campo o sal de él para reintentar.';
+      }
+      render();
+    }
+
+    function render() {
+      if (!mounted) return;
+      if (mounted.root.open !== config.expanded) mounted.root.open = config.expanded;
+      const count = ids.filter(id => config.targets[id] > 0).length;
+      mounted.count.textContent = count ? ` · ${count} activos` : '';
+      for (const id of ids) {
+        const input = mounted.inputs.get(id);
+        const draft = unsavedDrafts.has(id) ? unsavedDrafts.get(id) : config.drafts[id];
+        const value = draft === null ? (config.targets[id] ? String(config.targets[id]) : '') : draft;
+        if (input.value !== value) input.value = value;
+        input.setAttribute('aria-invalid', String(draft !== null && parseDraft(draft) === null));
+        const level = latest?.levels.get(id);
+        mounted.labels.get(id).textContent = `${config.targets[id] ? `Activo: nivel ${config.targets[id]}` : 'Desactivado'}` +
+          (level !== null && level !== undefined ? ` · Actual: ${level}` : '');
+      }
+      mounted.status.textContent = unsavedDrafts.size
+        ? 'El borrador sigue en esta ventana y todavía no se ha guardado. Edita el campo o sal de él para reintentar.'
+        : storageError ? 'No se pudieron guardar los objetivos. Comprueba el almacenamiento local.' : fieldStatus;
+    }
+
+    function mount(container) {
+      if (destroyed) throw new Error('Los objetivos de nivel están cerrados.');
+      mounted?.root.remove();
+      const root = document.createElement('details');
+      root.className = 'level-targets-details';
+      const style = document.createElement('style');
+      style.textContent = '.level-targets-details{margin-top:12px;padding:10px;border:1px solid #304252;border-radius:6px}' +
+        '.level-targets-details summary{font-weight:650;cursor:pointer}' +
+        '.level-targets-details p{font-size:11px;line-height:1.45;color:#aebfd0}' +
+        '.level-target-row{display:grid;grid-template-columns:minmax(0,1fr) 76px;gap:3px 10px;align-items:center;margin-top:10px}' +
+        '.level-target-row label{min-width:0;font-size:12px}' +
+        '.level-target-row input{box-sizing:border-box;width:100%;min-width:0;padding:6px;border:1px solid #526679;border-radius:4px;background:#101923;color:#e5edf5;font:inherit}' +
+        '.level-target-row input[aria-invalid="true"]{border-color:#e9b671}' +
+        '.level-target-row small{grid-column:1/-1;font-size:10px;color:#aebfd0}' +
+        '.level-targets-status:empty{display:none}';
+      const summary = document.createElement('summary');
+      summary.append(document.createTextNode('Objetivos de nivel'));
+      const count = document.createElement('span');
+      summary.append(count);
+      const help = document.createElement('p');
+      help.textContent = 'Elige un nivel por estructura. El aviso se aplica al sistema observado cuando termina la construcción. ' +
+        'Vacío o 0 desactiva el objetivo; los niveles ya alcanzados al activarlo no generan avisos.';
+      root.append(style, summary, help);
+      const inputs = new Map();
+      const labels = new Map();
+      for (const [id, name] of buildings) {
+        const row = document.createElement('div');
+        row.className = 'level-target-row';
+        const label = document.createElement('label');
+        label.textContent = name;
+        const input = document.createElement('input');
+        input.type = 'text'; input.inputMode = 'numeric'; input.maxLength = MAX_DRAFT;
+        input.pattern = '[0-9]*'; input.placeholder = '—'; input.autocomplete = 'off';
+        input.id = `oldlight-level-target-${id}`;
+        input.dataset.levelTarget = id;
+        input.setAttribute('aria-label', `Objetivo de nivel de ${name}`);
+        label.htmlFor = input.id;
+        const active = document.createElement('small');
+        active.dataset.levelTargetStatus = id;
+        input.addEventListener('input', () => {
+          if (timers.has(id)) { cancel(timers.get(id)); timers.delete(id); }
+          const draft = input.value;
+          try {
+            const next = exportConfig();
+            next.drafts[id] = draft;
+            commit(next);
+            fieldStatus = parseDraft(draft) === null
+              ? `Borrador guardado. Escribe un nivel entero entre 0 y ${MAX_LEVEL}.`
+              : 'Borrador guardado; aplicando el objetivo…';
+            if (parseDraft(draft) !== null) timers.set(id, later(() => promoteDraft(id), 400));
+          } catch (_) {
+            unsavedDrafts.set(id, draft);
+            fieldStatus = 'No se pudo guardar el borrador. Se conserva el objetivo anterior.';
+          }
+          render();
+        });
+        input.addEventListener('blur', () => promoteDraft(id));
+        inputs.set(id, input); labels.set(id, active);
+        row.append(label, input, active); root.append(row);
+      }
+      const status = document.createElement('p');
+      status.className = 'level-targets-status'; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+      root.append(status);
+      root.addEventListener('toggle', () => {
+        if (root.open === config.expanded) return;
+        try { commit({ ...exportConfig(), expanded: root.open }); }
+        catch (_) { render(); }
+      });
+      mounted = { root, inputs, labels, count, status };
+      container.append(root);
+      render();
+      return root;
+    }
+
+    function getDiagnostics() {
+      return { configured: ids.filter(id => config.targets[id] > 0).length,
+        acknowledged: config.acknowledged.length, emitted, storageError, observing: !!baseline };
+    }
+
+    function destroy() {
+      if (destroyed) return;
+      cancelDrafts(); resetObservation(); destroyed = true;
+      unsavedDrafts.clear();
+      mounted?.root.remove(); mounted = null;
+    }
+
+    return { mount, observe, exportConfig, validateConfig, importConfig, resetObservation, getDiagnostics, destroy };
+  }
+  // END LEVEL TARGETS
+
   // BEGIN DRIVE BACKUP
   /*
    * Optional userscript fragment. GIS runs only on the companion page.
@@ -2813,6 +3814,11 @@
     const HELPER_URL = 'https://alexx-ftw.github.io/old-light-auto-upgrade/drive.html';
     const HELPER_ORIGIN = 'https://alexx-ftw.github.io';
     const MAX_BYTES = 1024 * 1024;
+    const HEARTBEAT_TIMEOUT = 60000;
+    const OPEN_TIMEOUT = 20000;
+    const CLIENT_ID = /^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$/;
+    const ACCOUNT_EMAIL = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$/;
+    const CAPABILITIES = ['oauth-config', 'account-hint'];
     const encoder = new TextEncoder();
     const LABELS = {
       disconnected: 'Google Drive desconectado.',
@@ -2833,6 +3839,19 @@
       auth_closed: 'Se cerró la autorización de Google.',
       auth_error: 'No se pudo autorizar Google Drive. Comprueba el Client ID y su origen.',
       library_error: 'No se pudo cargar Google Identity Services en la página de copias.',
+      library_loading: 'Cargando la conexión con Google…',
+      library_timeout: 'Google no terminó de cargar. Reintenta desde la ventana de Drive.',
+      auth_timeout: 'La autorización tardó demasiado. Puedes volver a intentarlo.',
+      auth_cancelled: 'Autorización cancelada.',
+      permission_missing: 'Falta conceder el permiso para las copias de esta aplicación.',
+      invalid_client: 'El Client ID de Google no es válido. Revisa la configuración.',
+      auth_origin: 'El Client ID debe autorizar el origen de la página de copias.',
+      renewing: 'Renovando la conexión con Google Drive…',
+      renew_soon: 'La conexión con Google caduca pronto. Puedes renovarla desde su ventana.',
+      switching_account: 'Elige la cuenta de Google que quieres usar.',
+      revoking: 'Retirando el permiso de Google…',
+      revoked: 'Permiso de Google retirado.',
+      revoke_failed: 'No se pudo confirmar la retirada del permiso de Google.',
       bridge_lost: 'Se perdió la conexión con la ventana. Vuelve a abrir Google Drive.',
       timeout: 'La operación tardó demasiado. Comprueba la lista antes de repetir una copia.',
       rate_limit: 'Google ha limitado las solicitudes. La copia automática está detenida.',
@@ -2841,7 +3860,9 @@
       invalid_backup: 'La copia no es válida o supera 1 MiB.',
       busy: 'Espera a que termine la operación actual.',
       failed: 'No se pudo completar la operación. Revisa la ventana de Drive.',
-      config_saved: 'Configuración de Drive guardada. Guardar no inicia una copia.',
+      config_saved: 'Ajustes guardados automáticamente.',
+      draft_saved: 'Borrador guardado. La conexión conserva el Client ID activo hasta que completes uno válido.',
+      invalid_config: 'El ajuste no tiene un formato válido.',
       storage_error: 'No se pudo guardar la configuración de Drive.',
     };
 
@@ -2852,14 +3873,15 @@
 
     let config;
     try {
-      const stored = gmGetValue(STORAGE_KEY, { clientId: '', autoBackup: false });
+      const stored = gmGetValue(STORAGE_KEY, { clientId: '', autoBackup: false,
+        rememberAccount: true, accountHint: '', clientIdDraft: null });
       if (stored && typeof stored.then === 'function') {
         throw new TypeError('createDriveBackup necesita GM_getValue síncrono.');
       }
       config = validateConfig(stored);
     } catch (error) {
       if (error instanceof TypeError && /síncrono/.test(error.message)) throw error;
-      config = { clientId: '', autoBackup: false };
+      config = { clientId: '', autoBackup: false, rememberAccount: true, accountHint: '', clientIdDraft: null };
     }
 
     let destroyed = false;
@@ -2871,6 +3893,16 @@
     let configDeferred = false;
     let suppressChangedUntil = 0;
     let configRevision = 0;
+    let draftTimer = null;
+
+    function validateAccountHint(value) {
+      if (typeof value !== 'string') throw new TypeError('La cuenta recordada debe ser un correo.');
+      const email = value.trim();
+      if (email && (email.length > 254 || !ACCOUNT_EMAIL.test(email))) {
+        throw new TypeError('La cuenta recordada no tiene un formato válido.');
+      }
+      return email;
+    }
 
     function validateConfig(value) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -2878,23 +3910,32 @@
       }
       const clientId = value.clientId === undefined ? '' : value.clientId;
       const autoBackup = value.autoBackup === undefined ? false : value.autoBackup;
-      if (typeof clientId !== 'string' || typeof autoBackup !== 'boolean') {
-        throw new TypeError('Client ID o copia automática inválidos.');
+      const rememberAccount = value.rememberAccount === undefined ? true : value.rememberAccount;
+      const accountHint = validateAccountHint(value.accountHint === undefined ? '' : value.accountHint);
+      const clientIdDraft = value.clientIdDraft === undefined ? null : value.clientIdDraft;
+      if (typeof clientId !== 'string' || typeof autoBackup !== 'boolean' ||
+          typeof rememberAccount !== 'boolean' ||
+          (clientIdDraft !== null && (typeof clientIdDraft !== 'string' || clientIdDraft.length > 300))) {
+        throw new TypeError('La configuración de Google Drive no tiene un formato válido.');
       }
       const trimmed = clientId.trim();
-      if (trimmed && (trimmed.length > 300 ||
-          !/^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$/.test(trimmed))) {
+      if (trimmed && (trimmed.length > 300 || !CLIENT_ID.test(trimmed))) {
         throw new TypeError('El Client ID de Google no tiene un formato válido.');
       }
-      return { clientId: trimmed, autoBackup };
+      return { clientId: trimmed, autoBackup, rememberAccount,
+        accountHint: rememberAccount ? accountHint : '', clientIdDraft };
     }
 
     function exportConfig() {
-      return { clientId: config.clientId, autoBackup: config.autoBackup };
+      return { ...config };
     }
 
     function report(code) {
       if (destroyed) return;
+      if (['config_saved', 'draft_saved', 'invalid_config', 'storage_error'].includes(code)) {
+        inputStatus(code);
+        return;
+      }
       statusCode = Object.hasOwn(LABELS, code) ? code : 'failed';
       if (inputs) inputs.status.textContent = LABELS[statusCode];
       try { onStatus?.({ code: statusCode, message: LABELS[statusCode] }); } catch (_) { /* caller UI */ }
@@ -2902,11 +3943,17 @@
 
     function refreshControls() {
       if (!inputs) return;
-      inputs.client.value = config.clientId;
+      inputs.client.value = config.clientIdDraft === null ? config.clientId : config.clientIdDraft;
       inputs.auto.checked = config.autoBackup;
-      inputs.open.disabled = !config.clientId;
+      inputs.remember.checked = config.rememberAccount;
+      inputs.open.disabled = false;
+      inputs.open.textContent = config.clientId ? 'Abrir Google Drive' : 'Configurar Google Drive';
       inputs.close.disabled = !session;
+      inputs.clear.disabled = !config.clientId && config.clientIdDraft === null;
       inputs.status.textContent = LABELS[statusCode];
+      inputs.active.textContent = config.clientId ? `Client ID activo: ${config.clientId}` : 'Todavía no hay un Client ID activo.';
+      inputs.account.textContent = config.rememberAccount && config.accountHint
+        ? `Cuenta recordada: ${config.accountHint}` : '';
     }
 
     function send(current, message) {
@@ -2923,23 +3970,37 @@
     function sendConfig() {
       if (applying) { configDeferred = true; return; }
       configDeferred = false;
-      send(session, { type: 'config', config: exportConfig(), revision: configRevision });
+      send(session, { type: 'config', config: exportConfig(), revision: configRevision,
+        capabilities: [...CAPABILITIES] });
     }
 
-    function importConfig(value) {
+    function storeConfig(value, { fromBackup = false } = {}) {
       const next = validateConfig(value);
       if (destroyed) throw new Error('El módulo de Drive está cerrado.');
+      if (!fromBackup && next.clientId !== config.clientId) next.accountHint = '';
       const written = gmSetValue(STORAGE_KEY, { ...next });
       if (written && typeof written.then === 'function') {
         throw new TypeError('createDriveBackup necesita GM_setValue síncrono.');
       }
-      const changed = next.clientId !== config.clientId || next.autoBackup !== config.autoBackup;
+      const changed = Object.keys(next).some(key => next[key] !== config[key]);
       if (next.clientId !== config.clientId) configRevision += 1;
       config = next;
       if (!session) report(config.clientId ? 'disconnected' : 'missing_client');
       refreshControls();
       if (changed) sendConfig();
       return exportConfig();
+    }
+
+    // This public API restores an explicit backup, including its optional account hint.
+    // Interactive changes always use storeConfig and clear hints when switching clients.
+    function importConfig(value) {
+      clearTimeout(draftTimer);
+      draftTimer = null;
+      return storeConfig(value, { fromBackup: true });
+    }
+
+    function inputStatus(code) {
+      if (inputs) inputs.inputStatus.textContent = LABELS[code] || LABELS.invalid_config;
     }
 
     function parseBackup(json) {
@@ -2953,6 +4014,7 @@
 
     async function handlePortMessage(current, message) {
       if (destroyed || current !== session || !message || message.protocol !== PROTOCOL) return;
+      current.lastSeen = Date.now();
       if (message.type === 'port-ready' && !current.ready) {
         current.ready = true;
         clearTimeout(current.openTimeout);
@@ -2962,15 +4024,58 @@
       }
       if (!current.ready) return;
       if (message.type === 'ping') { send(current, { type: 'pong' }); return; }
-      if (message.type === 'bye') { closeSession('disconnected'); return; }
+      if (message.type === 'pong') return;
+      if (message.type === 'bye') { closeSession(message.code === 'bridge_lost' ? 'bridge_lost' : 'disconnected'); return; }
       if (message.type === 'status') {
+        if (message.code === 'bridge_lost') { closeSession('bridge_lost'); return; }
         if (typeof message.code === 'string' && Object.hasOwn(LABELS, message.code)) report(message.code);
         return;
       }
-      if (message.type !== 'get-backup' && message.type !== 'apply-backup') return;
+      if (!['get-backup', 'apply-backup', 'set-config', 'remember-account'].includes(message.type)) return;
       if (typeof message.id !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(message.id)) return;
       if (message.revision !== configRevision) {
         send(current, { type: 'reply', id: message.id, ok: false, error: 'expired' });
+        return;
+      }
+      if (message.type === 'set-config' || message.type === 'remember-account') {
+        if (applying) {
+          send(current, { type: 'reply', id: message.id, ok: false, error: 'busy' });
+          return;
+        }
+        let next;
+        try {
+          if (message.type === 'set-config') next = validateConfig(message.config);
+          else {
+            const email = validateAccountHint(message.email);
+            if (!email) throw new TypeError('Falta la cuenta que se quiere recordar.');
+            if (!config.rememberAccount) {
+              send(current, { type: 'reply', id: message.id, ok: true, remembered: false,
+                config: exportConfig(), revision: configRevision, capabilities: [...CAPABILITIES] });
+              return;
+            }
+            next = { ...exportConfig(), accountHint: email };
+          }
+        } catch (_) {
+          send(current, { type: 'reply', id: message.id, ok: false, error: 'invalid_config' });
+          inputStatus('invalid_config');
+          return;
+        }
+        try {
+          // A pending backup snapshot can be invalidated by an intentional client change.
+          // apply-backup remains exclusive so restoration and interactive writes cannot mix.
+          if (message.type === 'set-config') {
+            clearTimeout(draftTimer);
+            draftTimer = null;
+          }
+          storeConfig(next);
+          send(current, { type: 'reply', id: message.id, ok: true,
+            ...(message.type === 'remember-account' ? { remembered: true } : {}),
+            config: exportConfig(), revision: configRevision, capabilities: [...CAPABILITIES] });
+          if (message.type === 'set-config') inputStatus(next.clientIdDraft === null ? 'config_saved' : 'draft_saved');
+        } catch (_) {
+          send(current, { type: 'reply', id: message.id, ok: false, error: 'storage_error' });
+          inputStatus('storage_error');
+        }
         return;
       }
       if (current.serving) {
@@ -3028,7 +4133,7 @@
       const channel = new MessageChannel();
       current.port = channel.port1;
       channel.port1.onmessage = event => { void handlePortMessage(current, event.data); };
-      channel.port1.onmessageerror = () => closeSession('bridge_lost');
+      channel.port1.onmessageerror = () => { if (session === current) closeSession('bridge_lost'); };
       channel.port1.start();
       try {
         // Only the public bootstrap and a private port cross window.postMessage.
@@ -3043,9 +4148,11 @@
 
     function openCompanion() {
       if (destroyed) return;
-      if (!config.clientId) { report('missing_client'); return; }
-      if (session?.popup && !session.popup.closed) {
-        try { session.popup.focus(); } catch (_) { /* focus is best effort */ }
+      const previous = session;
+      const age = previous ? Date.now() - (previous.ready ? previous.lastSeen : previous.openedAt) : Infinity;
+      if (previous?.popup && !previous.popup.closed &&
+          age <= (previous.ready ? HEARTBEAT_TIMEOUT : OPEN_TIMEOUT)) {
+        try { previous.popup.focus(); } catch (_) { /* focus is best effort */ }
         return;
       }
       closeSession();
@@ -3053,7 +4160,8 @@
       crypto.getRandomValues(bytes);
       const nonce = Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
       // The nonce is public session routing data. Settings never enter this URL.
-      const current = { nonce, popup: null, port: null, ready: false, serving: false };
+      const current = { nonce, popup: null, port: null, ready: false, serving: false,
+        openedAt: Date.now(), lastSeen: Date.now() };
       session = current;
       try {
         current.popup = window.open(`${HELPER_URL}#bridge=${nonce}`, '_blank',
@@ -3062,9 +4170,11 @@
       if (!current.popup) { closeSession('popup_blocked'); return; }
       current.openTimeout = setTimeout(() => {
         if (session === current && !current.ready) closeSession('bridge_lost');
-      }, 20000);
+      }, OPEN_TIMEOUT);
       current.closedCheck = setInterval(() => {
-        if (session === current && current.popup.closed) closeSession('disconnected');
+        if (session !== current) return;
+        if (current.popup.closed) closeSession('disconnected');
+        else if (current.ready && Date.now() - current.lastSeen > HEARTBEAT_TIMEOUT) closeSession('bridge_lost');
       }, 1000);
       report('opening');
       refreshControls();
@@ -3085,39 +4195,102 @@
 
     function mount(container) {
       if (destroyed) throw new Error('El módulo de Drive está cerrado.');
+      clearTimeout(draftTimer);
+      draftTimer = null;
       mountNode?.remove();
       const box = element('section', undefined, { className: 'oldlight-drive-config' });
+      box.append(element('style', '.oldlight-drive-config .drive-toggle{display:flex;gap:7px;align-items:flex-start}' +
+        '.oldlight-drive-config .drive-toggle input{flex:none;margin:1px 0 0}' +
+        '.oldlight-drive-config .drive-advanced{margin-top:10px}' +
+        '.oldlight-drive-config .drive-advanced summary{cursor:pointer}' +
+        '.oldlight-drive-config .drive-active-client,.oldlight-drive-config .drive-account{overflow-wrap:anywhere}' +
+        '.oldlight-drive-config .drive-field-status:empty,.oldlight-drive-config .drive-account:empty{display:none}'));
       box.append(element('h4', 'Copia opcional en Google Drive'));
+      const controls = element('div', undefined, { className: 'oldlight-drive-controls' });
+      const open = element('button', 'Configurar Google Drive', { type: 'button' });
+      const close = element('button', 'Desconectar', { type: 'button' });
+      controls.append(open, close);
+      const status = element('p');
+      status.setAttribute('role', 'status');
+      status.setAttribute('aria-live', 'polite');
+      const autoLabel = element('label', undefined, { className: 'drive-toggle' });
+      const auto = element('input', undefined, { type: 'checkbox' });
+      autoLabel.append(auto, document.createTextNode(' Copia automática de los cambios locales'));
+      const rememberLabel = element('label', undefined, { className: 'drive-toggle' });
+      const remember = element('input', undefined, { type: 'checkbox' });
+      rememberLabel.append(remember, document.createTextNode(' Recordar mi cuenta para volver a conectar'));
+      const note = element('p', 'Los ajustes se guardan automáticamente. La copia automática requiere ' +
+        'la ventana de Drive abierta y la autorización vigente.');
+      const advanced = element('details', undefined, { className: 'drive-advanced' });
+      advanced.append(element('summary', 'Configuración avanzada'));
       const clientLabel = element('label', 'Client ID de Google OAuth');
       const client = element('input', undefined, { type: 'text', maxLength: 300,
         autocomplete: 'off', spellcheck: false, placeholder: '…apps.googleusercontent.com' });
       clientLabel.append(client);
-      const autoLabel = element('label');
-      const auto = element('input', undefined, { type: 'checkbox' });
-      autoLabel.append(auto, document.createTextNode(' Copia automática de los cambios locales'));
-      const note = element('p', 'Requiere un Client ID propio con origen autorizado ' + HELPER_ORIGIN +
-        '. La copia automática sólo funciona con la ventana de Drive abierta y la autorización vigente.');
-      const controls = element('div', undefined, { className: 'oldlight-drive-controls' });
-      const save = element('button', 'Guardar configuración', { type: 'button' });
-      const open = element('button', 'Abrir Google Drive', { type: 'button' });
-      const close = element('button', 'Desconectar', { type: 'button' });
-      const status = element('p');
-      status.setAttribute('role', 'status');
-      controls.append(save, open, close);
-      box.append(clientLabel, autoLabel, note, controls, status);
-      save.addEventListener('click', async () => {
-        save.disabled = true;
+      const active = element('p', undefined, { className: 'drive-active-client' });
+      const account = element('p', undefined, { className: 'drive-account' });
+      const setupNote = element('p', 'Necesitas un Client ID Web con este origen autorizado: ' + HELPER_ORIGIN +
+        '. El asistente de la ventana de Drive te guía para obtenerlo.');
+      const clear = element('button', 'Borrar Client ID', { type: 'button' });
+      const inputNote = element('p', 'Al escribir se guarda el borrador; se aplica cuando el Client ID esté completo. ' +
+        'Vaciar el campo conserva la conexión actual. Usa Borrar Client ID para eliminarlo.');
+      const fieldStatus = element('p', undefined, { className: 'drive-field-status' });
+      fieldStatus.setAttribute('role', 'status');
+      fieldStatus.setAttribute('aria-live', 'polite');
+      advanced.append(clientLabel, inputNote, active, account, setupNote, clear);
+      box.append(controls, status, autoLabel, rememberLabel, note, fieldStatus, advanced);
+
+      function flushClientDraft() {
+        clearTimeout(draftTimer);
+        draftTimer = null;
+        const value = client.value.trim();
+        if (!value || value.length > 300 || !CLIENT_ID.test(value)) return;
+        if (config.clientId === value && config.clientIdDraft === null) return;
         try {
-          const next = validateConfig({ clientId: client.value, autoBackup: auto.checked });
-          await importConfig(next);
-          report('config_saved');
+          storeConfig({ ...exportConfig(), clientId: value, clientIdDraft: null });
+          inputStatus('config_saved');
         } catch (_) {
-          report('storage_error');
-        } finally { save.disabled = false; }
+          inputStatus('storage_error');
+        }
+      }
+
+      client.addEventListener('input', () => {
+        clearTimeout(draftTimer);
+        draftTimer = null;
+        const draft = client.value;
+        try {
+          storeConfig({ ...exportConfig(), clientIdDraft: draft });
+          inputStatus('draft_saved');
+          if (CLIENT_ID.test(draft.trim())) {
+            draftTimer = setTimeout(() => {
+              if (!destroyed && inputs?.client === client && client.value === draft) flushClientDraft();
+            }, 400);
+          }
+        } catch (_) { inputStatus('storage_error'); }
       });
-      open.addEventListener('click', openCompanion);
+      client.addEventListener('blur', flushClientDraft);
+      function saveToggles() {
+        try {
+          storeConfig({ ...exportConfig(), autoBackup: auto.checked, rememberAccount: remember.checked });
+          inputStatus('config_saved');
+        } catch (_) {
+          refreshControls();
+          inputStatus('storage_error');
+        }
+      }
+      auto.addEventListener('change', saveToggles);
+      remember.addEventListener('change', saveToggles);
+      clear.addEventListener('click', () => {
+        clearTimeout(draftTimer);
+        draftTimer = null;
+        try {
+          storeConfig({ ...exportConfig(), clientId: '', clientIdDraft: null, accountHint: '' });
+          inputStatus('config_saved');
+        } catch (_) { inputStatus('storage_error'); }
+      });
+      open.addEventListener('click', () => { flushClientDraft(); openCompanion(); });
       close.addEventListener('click', () => closeSession());
-      inputs = { client, auto, open, close, status };
+      inputs = { client, auto, remember, open, close, clear, active, account, status, inputStatus: fieldStatus };
       mountNode = box;
       container.append(box);
       refreshControls();
@@ -3126,6 +4299,8 @@
 
     function destroy() {
       if (destroyed) return;
+      clearTimeout(draftTimer);
+      draftTimer = null;
       closeSession();
       destroyed = true;
       window.removeEventListener('message', onWindowMessage);
@@ -3146,6 +4321,18 @@
     return match ? Number(match[1] || 0) : null;
   }
 
+  function readLevelTargetSnapshot(current) {
+    return {
+      galaxy: location.pathname.match(/^\/game\/galaxy\/([A-Za-z0-9_-]{1,64})(?:\/|$)/)?.[1] || '',
+      system: systemId(),
+      systemName: text(document.querySelector('[data-field="nameplate-name"]')),
+      levels: new Map(current.map(row => {
+        const match = /^Lvl\s+(\d+)$/i.exec(text(row.row.querySelector('.b-level')));
+        return [row.id, match ? Number(match[1]) : null];
+      })),
+    };
+  }
+
   // Observa eventos nuevos del HUD; no reenvía historial al cargar/cambiar de pestaña.
   function createGameEventObserver(send) {
     let observing = false;
@@ -3155,18 +4342,15 @@
 
     function snapshot(current) {
       return {
-        system: systemId(),
-        levels: new Map(current.map(row => {
-          const match = /^Lvl\s+(\d+)$/i.exec(text(row.row.querySelector('.b-level')));
-          return [row.id, match ? Number(match[1]) : null];
-        })),
+        ...readLevelTargetSnapshot(current),
         fleet: new Map(SHIPS.map(([id]) => [id, fleetCounts(id)])),
       };
     }
 
     return function observe(current, active, reportApiAvailable = false) {
-      if (!active) { observing = false; baseline = null; return; }
+      if (!active) { levelTargets.observe(null, false); observing = false; baseline = null; return; }
       const next = snapshot(current);
+      levelTargets.observe(next, !importingBackup);
       const toasts = [...document.querySelectorAll('.toast')];
       if (!observing) {
         observing = true;
@@ -3237,9 +4421,11 @@
   });
   window.addEventListener('storage', event => {
     if (event.key !== KEY && event.key !== null) return;
+    shiftPresets.cancel();
     ui?.cancelPriorityDrag?.();
     ui?.cancelPanelDrag?.();
     settings = readSettings();
+    restoreNumericInputs();
     if (settings.enabled) { error = ''; unconfirmed = 0; }
     schedule();
   });

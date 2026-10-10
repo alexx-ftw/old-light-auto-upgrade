@@ -10,73 +10,109 @@
   const COPY_FORMAT = 'old-light-auto-upgrade-drive-copy';
   const ROOT_FORMAT = 'old-light-auto-upgrade-backup';
   const MAX_BYTES = 1024 * 1024;
+  const AUTH_TIMEOUT = 120000;
+  const LIBRARY_TIMEOUT = 15000;
   const encoder = new TextEncoder();
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   const HASH = /^[0-9a-f]{64}$/;
   const FILE_ID = /^[A-Za-z0-9_-]{1,200}$/;
   const CLIENT_ID = /^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$/;
+  const EMAIL = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$/;
   const STATUS = {
     waiting: 'Esperando al userscript… Abre esta ventana desde el helper de Old Light.',
     bridge_ready: 'El helper está conectado. Pulsa Conectar Google Drive para autorizar tu cuenta.',
-    missing_client: 'Falta tu Client ID. Guárdalo en los ajustes del helper y vuelve a abrir esta ventana.',
-    disconnected: 'Google Drive desconectado.',
+    missing_client: 'Añade tu Client ID en Configuración inicial para conectar Google Drive.',
+    disconnected: 'Sesión desconectada. Puedes volver a conectar cuando quieras.',
     connecting: 'Esperando tu autorización de Google…',
-    connected: 'Google Drive conectado durante esta sesión.',
+    renewing: 'Renovando la conexión con Google Drive…',
+    switching_account: 'Elige la cuenta de Google que quieres usar.',
+    connected: 'Conexión activa con Google Drive.',
+    renew_soon: 'La conexión caduca pronto. Pulsa Renovar conexión para continuar.',
     listing: 'Consultando las últimas copias…',
+    listed: 'Lista de copias actualizada.',
     saving: 'Guardando una copia privada…',
     saved: 'Copia guardada. La configuración anterior se conserva en sus propias copias.',
     unchanged: 'Ya hay una copia idéntica de estos ajustes.',
     restoring: 'Restaurando la copia seleccionada…',
     restored: 'Configuración restaurada en el helper.',
-    expired: 'La autorización ha caducado. Pulsa Conectar Google Drive para continuar.',
+    expired: 'La autorización ha caducado. Pulsa Volver a conectar para continuar.',
     denied: 'No se concedió el permiso de datos de esta aplicación.',
-    popup_blocked: 'El navegador bloqueó la autorización. Vuelve a pulsar Conectar Google Drive.',
-    auth_closed: 'Cerraste la autorización. Puedes volver a conectar cuando quieras.',
-    auth_error: 'No se pudo autorizar. Comprueba que el Client ID es de tipo Web y permite este origen.',
-    library_error: 'No se pudo cargar Google Identity Services. Recarga la ventana e inténtalo de nuevo.',
+    permission_missing: 'Falta conceder el permiso para guardar las copias de esta aplicación.',
+    popup_blocked: 'El navegador bloqueó la autorización. Permite ventanas emergentes aquí y vuelve a conectar.',
+    auth_closed: 'Cerraste la autorización. Puedes volver a intentarlo.',
+    auth_cancelled: 'Autorización cancelada. Puedes volver a intentarlo.',
+    auth_timeout: 'Google no respondió a tiempo. Cierra la ventana de autorización y vuelve a intentarlo.',
+    auth_error: 'No se pudo autorizar. Comprueba el Client ID, su origen y los usuarios de prueba en Google Cloud.',
+    invalid_client: 'Google no reconoce el Client ID. Usa un cliente OAuth de tipo Aplicación web.',
+    auth_origin: 'El cliente OAuth debe permitir exactamente el origen https://alexx-ftw.github.io.',
+    library_loading: 'Cargando la conexión con Google…',
+    library_error: 'No se pudo cargar Google Identity Services. Pulsa Reintentar conexión con Google.',
+    library_timeout: 'Google no terminó de cargar. Comprueba la conexión y pulsa Reintentar conexión con Google.',
     bridge_lost: 'Se perdió el enlace con el helper. Abre una nueva ventana desde Old Light.',
+    revoking: 'Retirando el permiso de Google…',
+    revoked: 'Google confirmó que el permiso de esta aplicación ha sido retirado.',
+    revoke_failed: 'No se pudo confirmar la retirada del permiso. Puedes revisarlo en tu cuenta de Google.',
     timeout: 'La operación tardó demasiado. Actualiza la lista antes de volver a guardar una copia.',
     rate_limit: 'Google ha limitado las solicitudes. Espera y actualiza la lista para reanudar las copias.',
-    api_denied: 'Google rechazó la petición. Comprueba que Drive API esté activada en el proyecto del Client ID y que el permiso siga concedido.',
+    api_denied: 'Google rechazó la petición. Comprueba que Drive API esté activada en el proyecto y que el permiso siga concedido.',
     upload_uncertain: 'No se confirmó el guardado. Actualiza la lista antes de repetir; la copia podría haberse creado.',
     invalid_backup: 'La copia no es válida, su hash no coincide o supera 1 MiB.',
+    invalid_config: 'El ajuste no tiene un formato válido.',
+    storage_error: 'No se pudo guardar el ajuste en el helper. El cambio sigue en el editor para reintentarlo.',
     busy: 'Espera a que termine la operación actual.',
     failed: 'No se pudo completar la operación. Actualiza la lista o vuelve a conectar.',
   };
-
-  const ui = Object.fromEntries(['status', 'connect', 'disconnect', 'automatic', 'save',
-    'refresh', 'backups', 'empty', 'restore'].map(id => [id, document.getElementById(id)]));
+  const CONNECTION_CODES = new Set(['waiting', 'bridge_ready', 'missing_client', 'disconnected', 'connecting',
+    'renewing', 'switching_account', 'connected', 'renew_soon', 'expired', 'denied', 'permission_missing',
+    'popup_blocked', 'auth_closed', 'auth_cancelled', 'auth_timeout', 'auth_error', 'invalid_client', 'auth_origin',
+    'library_loading', 'library_error', 'library_timeout', 'bridge_lost', 'revoking', 'revoked', 'revoke_failed']);
+  const ui = Object.fromEntries(['status', 'connect', 'disconnect', 'automatic', 'save', 'refresh', 'backups',
+    'empty', 'restore', 'account', 'session-status', 'expiry', 'switch-account', 'cancel-auth', 'retry-library',
+    'remember-account', 'auto-backup', 'client-id', 'choose-client-file', 'import-client', 'clear-client',
+    'copy-origin', 'setup', 'setup-status', 'revoke', 'confirm-revoke', 'cancel-revoke', 'revoke-confirmation']
+    .map(id => [id, document.getElementById(id)]));
   const pending = new Map();
   const requests = new Set();
   let port = null;
   let bridgeAlive = false;
-  let config = { clientId: '', autoBackup: false };
+  let config = { clientId: '', autoBackup: false, rememberAccount: true, accountHint: '', clientIdDraft: null };
   let configRevision = 0;
+  let configReady = false;
+  let capabilities = new Set();
+  let configQueue = Promise.resolve();
+  let configWrites = 0;
+  let configSaveFailed = false;
+  let clientDraftTimer = null;
   let token = null;
   let expiresAt = 0;
   let expirationTimer = null;
+  let account = null;
   let generation = 0;
   let authAttempt = 0;
   let authPending = false;
+  let authTimer = null;
+  let revoking = false;
+  let revokeTimer = null;
   let busy = false;
   let dirty = false;
+  let dirtyOwner = '';
   let autoBlocked = false;
   let autoTimer = null;
   let lastSavedHash = '';
   let copies = new Map();
   let statusCode = 'waiting';
+  let connectionCode = 'waiting';
   let heartbeatTimer = null;
   let lastPong = 0;
   let requestCounter = 0;
   let readyTimer = null;
   let bootstrapTimer = null;
   let closed = false;
+  let libraryState = 'idle';
+  let libraryAttempt = 0;
+  let libraryTimer = null;
 
-  function error(code) {
-    const value = new Error(code);
-    value.code = code;
-    return value;
-  }
+  function error(code) { const value = new Error(code); value.code = code; return value; }
 
   function post(message) {
     if (!port || !bridgeAlive || closed) return false;
@@ -86,34 +122,84 @@
 
   function status(code) {
     statusCode = Object.hasOwn(STATUS, code) ? code : 'failed';
-    ui.status.textContent = STATUS[statusCode];
-    post({ type: 'status', code: statusCode });
+    if (CONNECTION_CODES.has(statusCode)) connectionCode = statusCode;
+    else ui.status.textContent = STATUS[statusCode];
+    // The helper understands the stable v1 protocol; 'listed' is local presentation only.
+    post({ type: 'status', code: statusCode === 'listed' ? 'connected' : statusCode });
     render();
   }
 
-  function isAuthorized() {
-    return Boolean(bridgeAlive && config.clientId && token && expiresAt > Date.now());
-  }
+  function isAuthorized() { return Boolean(bridgeAlive && config.clientId && token && expiresAt > Date.now()); }
+  function gisAvailable() { return typeof window.google?.accounts?.oauth2?.initTokenClient === 'function'; }
+  function accountKey(value = account) { return value?.id ? `id:${value.id}` : value?.email ? `email:${value.email.toLowerCase()}` : ''; }
 
-  function gisAvailable() {
-    return typeof window.google?.accounts?.oauth2?.initTokenClient === 'function';
+  function syncConfigControls() {
+    if (configWrites || configSaveFailed) return;
+    if (document.activeElement !== ui['client-id']) ui['client-id'].value = config.clientIdDraft ?? config.clientId;
+    ui['remember-account'].checked = config.rememberAccount;
+    ui['auto-backup'].checked = config.autoBackup;
   }
 
   function render() {
     const authorized = isAuthorized();
-    ui.connect.disabled = !bridgeAlive || !config.clientId || !gisAvailable() || authPending || busy;
-    ui.disconnect.disabled = !bridgeAlive || (!token && !authPending);
-    ui.save.disabled = !authorized || busy || authPending;
-    ui.refresh.disabled = !authorized || busy || authPending;
-    ui.backups.disabled = !authorized || busy || copies.size === 0;
-    ui.restore.disabled = !authorized || busy || !copies.has(ui.backups.value);
+    const editable = bridgeAlive && configReady && capabilities.has('oauth-config');
+    ui.connect.disabled = !bridgeAlive || !config.clientId || !gisAvailable() || authPending || busy || revoking || configWrites > 0;
+    ui.connect.textContent = authorized ? 'Renovar conexión' : account || config.accountHint ? 'Volver a conectar' : 'Conectar Google Drive';
+    ui['switch-account'].disabled = ui.connect.disabled;
+    ui['switch-account'].hidden = !account && !config.accountHint;
+    ui['cancel-auth'].hidden = !authPending;
+    ui['retry-library'].hidden = !['error', 'timeout'].includes(libraryState);
+    ui.disconnect.disabled = !bridgeAlive || revoking || (!token && !authPending && !account);
+    ui.revoke.disabled = !authorized || authPending || busy || revoking || configWrites > 0 || typeof window.google?.accounts?.oauth2?.revoke !== 'function';
+    ui['confirm-revoke'].disabled = ui.revoke.disabled;
+    ui.save.disabled = !authorized || busy || authPending || revoking || configWrites > 0;
+    ui.refresh.disabled = ui.save.disabled;
+    ui.backups.disabled = ui.save.disabled || copies.size === 0;
+    ui.restore.disabled = ui.save.disabled || !copies.has(ui.backups.value);
+    for (const id of ['client-id', 'choose-client-file', 'remember-account', 'auto-backup']) ui[id].disabled = !editable || revoking;
+    ui['clear-client'].disabled = !editable || revoking || (!config.clientId && config.clientIdDraft === null);
+    let connection = STATUS[connectionCode];
+    if (authPending || revoking) connection = STATUS[connectionCode];
+    else if (authorized) {
+      connection = expiresAt - Date.now() <= 300000 ? STATUS.renew_soon : STATUS.connected;
+      if (['auth_closed', 'auth_cancelled', 'auth_timeout', 'denied', 'permission_missing', 'auth_error', 'popup_blocked',
+        'invalid_client', 'auth_origin', 'revoke_failed'].includes(connectionCode)) connection += ` ${STATUS[connectionCode]}`;
+    } else if (bridgeAlive && configReady && !config.clientId) connection = STATUS.missing_client;
+    else if (bridgeAlive && config.clientId && ['loading', 'error', 'timeout'].includes(libraryState)) {
+      connection = STATUS[libraryState === 'loading' ? 'library_loading' : libraryState === 'timeout' ? 'library_timeout' : 'library_error'];
+    }
+    ui['session-status'].textContent = connection;
+    ui.account.textContent = account ? [account.name, account.email].filter(Boolean).join(' · ') || 'Cuenta conectada' :
+      authorized ? 'Cuenta conectada · Google no facilitó su nombre' :
+        config.rememberAccount && config.accountHint ? `Cuenta recordada: ${config.accountHint}` : 'Ninguna cuenta conectada';
+    ui.expiry.textContent = authorized ? `Sesión válida durante unos ${Math.max(1, Math.ceil((expiresAt - Date.now()) / 60000))} min.` :
+      account ? 'La cuenta sigue identificada; necesitas renovar la autorización para usar Drive.' : '';
     ui.automatic.textContent = !config.autoBackup ? 'Copia automática desactivada.' :
       autoBlocked ? 'Copia automática detenida. Actualiza la lista para reanudarla.' :
-      authorized ? 'Copia automática activada mientras esta ventana siga conectada.' :
-      'Copia automática configurada. Requiere conexión y autorización vigentes.';
+        authorized ? dirty ? 'Cambios pendientes. La copia se guardará al terminar de editar.' : 'Copia automática activada mientras esta ventana siga conectada.' :
+          dirty ? 'Cambios pendientes guardados en local. Vuelve a conectar la misma cuenta para copiarlos a Drive.' :
+            'Copia automática configurada. Requiere conexión y autorización vigentes.';
+    syncConfigControls();
   }
 
-  function clearAuth() {
+  function clearCopies() {
+    copies = new Map();
+    ui.backups.replaceChildren();
+    ui.empty.textContent = 'Conecta Google Drive para consultar tus copias.';
+    lastSavedHash = '';
+  }
+
+  function cancelAuth(code = 'auth_cancelled') {
+    if (!authPending) return;
+    authAttempt += 1;
+    authPending = false;
+    clearTimeout(authTimer);
+    authTimer = null;
+    status(code);
+    scheduleAuto();
+  }
+
+  function clearAuth({ keepAccount = false, keepDirty = false } = {}) {
     generation += 1;
     authAttempt += 1;
     authPending = false;
@@ -121,59 +207,93 @@
     expiresAt = 0;
     clearTimeout(expirationTimer);
     clearTimeout(autoTimer);
-    expirationTimer = null;
-    autoTimer = null;
-    dirty = false;
+    clearTimeout(authTimer);
+    clearTimeout(revokeTimer);
+    expirationTimer = autoTimer = authTimer = revokeTimer = null;
+    revoking = false;
+    if (!keepDirty) { dirty = false; dirtyOwner = ''; }
+    if (!keepAccount) account = null;
     for (const controller of requests) controller.abort();
     requests.clear();
-    copies = new Map();
-    ui.backups.replaceChildren();
-    ui.empty.textContent = 'Conecta Google Drive para consultar tus copias.';
-    lastSavedHash = '';
+    clearCopies();
+    ui['revoke-confirmation'].hidden = true;
   }
 
-  function disconnectGoogle(code = 'disconnected') {
-    clearAuth();
-    status(code);
+  function expireToken() {
+    token = null;
+    expiresAt = 0;
+    clearTimeout(expirationTimer);
+    clearTimeout(autoTimer);
+    for (const controller of requests) controller.abort();
+    requests.clear();
+    clearCopies();
+    // A user-initiated renewal may still be waiting for Google when the old token expires.
+    if (!authPending) status('expired');
+    else render();
   }
+
+  function disconnectGoogle(code = 'disconnected') { clearAuth(); autoBlocked = false; status(code); }
 
   function loseBridge() {
     if (!bridgeAlive && !port) return;
+    try { port?.postMessage({ protocol: PROTOCOL, type: 'bye', code: 'bridge_lost' }); } catch (_) { /* closed */ }
     bridgeAlive = false;
     clearAuth();
     clearInterval(heartbeatTimer);
-    for (const item of pending.values()) {
-      clearTimeout(item.timeout);
-      item.reject(error('bridge_lost'));
-    }
+    clearTimeout(clientDraftTimer);
+    for (const item of pending.values()) { clearTimeout(item.timeout); item.reject(error('bridge_lost')); }
     pending.clear();
     try { port?.close(); } catch (_) { /* already closed */ }
     port = null;
     status('bridge_lost');
   }
 
-  function rpc(type, json) {
+  function rpc(type, fields = {}) {
     if (!bridgeAlive) return Promise.reject(error('bridge_lost'));
     const id = `request_${++requestCounter}`;
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        pending.delete(id);
-        reject(error('timeout'));
-      }, 15000);
+      const timeout = setTimeout(() => { pending.delete(id); reject(error('timeout')); }, 15000);
       pending.set(id, { resolve, reject, timeout });
-      if (!post({ type, id, revision: configRevision, ...(json === undefined ? {} : { json }) })) {
-        clearTimeout(timeout);
-        pending.delete(id);
-        reject(error('bridge_lost'));
+      if (!post({ type, id, revision: configRevision, ...fields })) {
+        clearTimeout(timeout); pending.delete(id); reject(error('bridge_lost'));
       }
     });
   }
 
   function validateConfig(value) {
-    if (!value || typeof value !== 'object' || typeof value.clientId !== 'string' ||
+    if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.clientId !== 'string' ||
         typeof value.autoBackup !== 'boolean' || value.clientId.length > 300 ||
-        (value.clientId && !CLIENT_ID.test(value.clientId))) throw error('auth_error');
-    return { clientId: value.clientId, autoBackup: value.autoBackup };
+        (value.clientId && !CLIENT_ID.test(value.clientId))) throw error('invalid_config');
+    const rememberAccount = value.rememberAccount === undefined ? true : value.rememberAccount;
+    const hint = value.accountHint === undefined ? '' : value.accountHint;
+    const draft = value.clientIdDraft === undefined ? null : value.clientIdDraft;
+    if (typeof rememberAccount !== 'boolean' || typeof hint !== 'string' || hint.length > 254 ||
+        (hint && !EMAIL.test(hint)) || (draft !== null && (typeof draft !== 'string' || draft.length > 300))) throw error('invalid_config');
+    return { clientId: value.clientId, autoBackup: value.autoBackup, rememberAccount,
+      accountHint: rememberAccount ? hint : '', clientIdDraft: draft };
+  }
+
+  function receiveConfig(message) {
+    const next = validateConfig(message.config);
+    if (!Number.isSafeInteger(message.revision) || message.revision < 0) throw error('invalid_config');
+    const clientChanged = next.clientId !== config.clientId;
+    const first = !configReady;
+    config = next;
+    configRevision = message.revision;
+    configReady = true;
+    capabilities = new Set(Array.isArray(message.capabilities) ? message.capabilities.filter(value => typeof value === 'string') : []);
+    if (clientChanged) {
+      clearAuth();
+      autoBlocked = false;
+      if (!configWrites) clearTimeout(clientDraftTimer);
+    }
+    if (!config.autoBackup) { dirty = false; dirtyOwner = ''; clearTimeout(autoTimer); }
+    if (first) {
+      ui.setup.open = !config.clientId;
+      if (!capabilities.has('oauth-config')) ui['setup-status'].textContent = 'Actualiza el userscript a la versión 1.3.0 para configurar los ajustes desde esta ventana.';
+    }
+    if (clientChanged || first) status(config.clientId ? 'bridge_ready' : 'missing_client');
+    else render();
   }
 
   function onPortMessage(event) {
@@ -184,40 +304,65 @@
     if (message.type === 'reply') {
       const item = pending.get(message.id);
       if (!item) return;
-      pending.delete(message.id);
-      clearTimeout(item.timeout);
+      pending.delete(message.id); clearTimeout(item.timeout);
       if (message.ok === true) item.resolve(message);
       else item.reject(error(Object.hasOwn(STATUS, message.error) ? message.error : 'failed'));
       return;
     }
     if (message.type === 'config') {
-      try {
-        const next = validateConfig(message.config);
-        if (!Number.isSafeInteger(message.revision) || message.revision < 0) throw error('auth_error');
-        const clientChanged = next.clientId !== config.clientId;
-        config = next;
-        configRevision = message.revision;
-        if (clientChanged) clearAuth();
-        if (!config.autoBackup) { dirty = false; clearTimeout(autoTimer); }
-        if (clientChanged || statusCode === 'waiting') status(config.clientId ? 'bridge_ready' : 'missing_client');
-        else render();
-      } catch (_) { disconnectGoogle('auth_error'); }
+      try { receiveConfig(message); } catch (_) { disconnectGoogle('invalid_config'); }
       return;
     }
-    if (message.type === 'settings-changed' && config.autoBackup && isAuthorized()) {
+    if (message.type === 'settings-changed' && config.autoBackup) {
       dirty = true;
+      dirtyOwner = accountKey();
       scheduleAuto();
+      render();
     }
+  }
+
+  function queueConfig(patch, message = 'Guardado automáticamente.') {
+    if (!bridgeAlive || !capabilities.has('oauth-config')) return Promise.resolve(false);
+    configWrites += 1;
+    ui['setup-status'].textContent = 'Guardando en el helper…';
+    render();
+    const task = configQueue.then(async () => {
+      const value = { ...config, ...patch };
+      if (value.clientId !== config.clientId || !value.rememberAccount) value.accountHint = '';
+      const result = await rpc('set-config', { config: value });
+      configSaveFailed = false;
+      receiveConfig(result);
+      ui['setup-status'].textContent = message;
+      return true;
+    }).catch(caught => {
+      configSaveFailed = true;
+      ui['setup-status'].textContent = STATUS[caught?.code] || STATUS.storage_error;
+      return false;
+    }).finally(() => { configWrites -= 1; render(); scheduleAuto(); });
+    configQueue = task;
+    return task;
+  }
+
+  function flushClientDraft() {
+    clearTimeout(clientDraftTimer);
+    clientDraftTimer = null;
+    const value = ui['client-id'].value.trim();
+    if (!value || !CLIENT_ID.test(value) || value.length > 300) return;
+    if (config.clientId === value && config.clientIdDraft === null) return;
+    void queueConfig({ clientId: value, clientIdDraft: null });
   }
 
   function scheduleAuto() {
     clearTimeout(autoTimer);
-    if (!dirty || !config.autoBackup || !isAuthorized() || autoBlocked || busy) return;
+    if (!dirty || !config.autoBackup || !isAuthorized() || autoBlocked || busy || authPending || revoking || configWrites) return;
     autoTimer = setTimeout(() => {
       autoTimer = null;
-      if (dirty && config.autoBackup && isAuthorized() && !autoBlocked && !busy) {
+      if (dirty && config.autoBackup && isAuthorized() && !autoBlocked && !busy && !authPending && !revoking && !configWrites) {
         dirty = false;
-        void operate(() => saveCopy(true));
+        void operate(async () => {
+          try { await saveCopy(true); }
+          catch (caught) { dirty = true; throw caught; }
+        });
       }
     }, 5000);
   }
@@ -255,7 +400,8 @@
   async function api(path, { method = 'GET', params = {}, body, contentType } = {}) {
     const expected = generation;
     assertCurrent(expected);
-    if (!/^\/(?:upload\/)?drive\/v3\/files(?:\/[A-Za-z0-9_-]+)?$/.test(path)) throw error('failed');
+    if (!/^\/(?:upload\/)?drive\/v3\/files(?:\/[A-Za-z0-9_-]+)?$/.test(path) &&
+        !(path === '/drive/v3/about' && method === 'GET')) throw error('failed');
     const url = new URL(path, 'https://www.googleapis.com');
     for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
     const controller = new AbortController();
@@ -269,9 +415,15 @@
         body, signal: controller.signal,
       });
       assertCurrent(expected);
-      if (response.status === 401) { disconnectGoogle('expired'); throw error('expired'); }
+      if (response.status === 401) { expireToken(); throw error('expired'); }
       if (response.status === 429) throw error('rate_limit');
-      if (response.status === 403) throw error('api_denied');
+      if (response.status === 403) {
+        let reasons = [];
+        try { reasons = JSON.parse(await readLimited(response))?.error?.errors?.map(item => item?.reason) || []; } catch (_) { /* bounded generic error */ }
+        assertCurrent(expected);
+        throw error(reasons.some(reason => ['rateLimitExceeded', 'userRateLimitExceeded'].includes(reason)) ? 'rate_limit' :
+          reasons.includes('insufficientPermissions') ? 'permission_missing' : 'api_denied');
+      }
       if (!response.ok) throw error(method === 'POST' ? 'upload_uncertain' : 'failed');
       const text = await readLimited(response);
       assertCurrent(expected);
@@ -281,10 +433,7 @@
       if (!bridgeAlive) throw error('bridge_lost');
       if (expected !== generation || !isAuthorized()) throw error('expired');
       throw error(method === 'POST' ? 'upload_uncertain' : timedOut ? 'timeout' : 'failed');
-    } finally {
-      clearTimeout(timeout);
-      requests.delete(controller);
-    }
+    } finally { clearTimeout(timeout); requests.delete(controller); }
   }
 
   function parseRoot(json) {
@@ -355,7 +504,7 @@
       'Todavía no hay copias compatibles de esta aplicación.';
     lastSavedHash = eligible[0]?.appProperties.sha256 || '';
     autoBlocked = false;
-    status('connected');
+    status('listed');
   }
 
   async function saveCopy(automatic) {
@@ -419,7 +568,7 @@
     if (actualHash !== envelope.sha256) throw error('invalid_backup');
     dirty = false;
     clearTimeout(autoTimer);
-    await rpc('apply-backup', json);
+    await rpc('apply-backup', { json });
     // The imported configuration may deliberately change the OAuth client ID.
     // Its successful application is still acknowledged even if that clears auth.
     if (!bridgeAlive) throw error('bridge_lost');
@@ -428,14 +577,15 @@
   }
 
   async function operate(task) {
-    if (busy) { status('busy'); return; }
+    if (busy || authPending || revoking) { status('busy'); return; }
+    const expected = generation;
     busy = true;
     render();
     try { await task(); }
     catch (caught) {
       autoBlocked = true;
       const code = caught?.code;
-      status(Object.hasOwn(STATUS, code) ? code : 'failed');
+      if (expected === generation) status(Object.hasOwn(STATUS, code) ? code : 'failed');
     } finally {
       busy = false;
       render();
@@ -443,47 +593,189 @@
     }
   }
 
-  function connectGoogle() {
-    if (!bridgeAlive || !config.clientId || !gisAvailable() || authPending || busy) return;
-    clearAuth();
+  function loadGoogleLibrary() {
+    if (closed || libraryState === 'loading') return;
+    if (gisAvailable()) { libraryState = 'ready'; status(config.clientId ? 'bridge_ready' : 'missing_client'); return; }
+    const attempt = ++libraryAttempt;
+    libraryState = 'loading';
+    clearTimeout(libraryTimer);
+    document.getElementById('google-identity')?.remove();
+    const script = document.createElement('script');
+    script.id = 'google-identity';
+    script.src = 'https://accounts.google.com/gsi/client';
+    script.async = true;
+    function complete(code) {
+      if (closed || attempt !== libraryAttempt || libraryState !== 'loading') return;
+      clearTimeout(libraryTimer);
+      libraryTimer = null;
+      libraryState = code === 'ready' ? 'ready' : code === 'library_timeout' ? 'timeout' : 'error';
+      script.onload = script.onerror = null;
+      if (code === 'ready') status(config.clientId ? 'bridge_ready' : 'missing_client');
+      else status(code);
+    }
+    // Register handlers before inserting the async script: even a cached response is observed.
+    script.onload = () => complete(gisAvailable() ? 'ready' : 'library_error');
+    script.onerror = () => complete('library_error');
+    libraryTimer = setTimeout(() => complete('library_timeout'), LIBRARY_TIMEOUT);
+    status('library_loading');
+    document.head.append(script);
+  }
+
+  function oauthError(response) {
+    const code = response?.error;
+    if (code === 'access_denied') return 'denied';
+    if (['invalid_client', 'unauthorized_client', 'deleted_client'].includes(code)) return 'invalid_client';
+    if (['origin_mismatch', 'redirect_uri_mismatch'].includes(code)) return 'auth_origin';
+    return 'auth_error';
+  }
+
+  async function identifyAccount(expected) {
+    try {
+      const result = await api('/drive/v3/about', { params: { fields: 'user(displayName,emailAddress,permissionId)' } });
+      assertCurrent(expected);
+      const user = result?.user;
+      const name = typeof user?.displayName === 'string' ? user.displayName.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 200) : '';
+      const email = typeof user?.emailAddress === 'string' && user.emailAddress.length <= 254 && EMAIL.test(user.emailAddress)
+        ? user.emailAddress : '';
+      const id = typeof user?.permissionId === 'string' && /^[A-Za-z0-9_-]{1,200}$/.test(user.permissionId) ? user.permissionId : '';
+      return { name, email, id };
+    } catch (caught) {
+      if (caught?.code === 'expired' || caught?.code === 'bridge_lost') throw caught;
+      // Account identity is optional. Never guess a name, email or OAuth sub from another field.
+      return null;
+    }
+  }
+
+  async function initializeSession(expected, previousAccount) {
+    const nextAccount = await identifyAccount(expected);
+    assertCurrent(expected);
+    const previousKey = accountKey(previousAccount);
+    const nextKey = accountKey(nextAccount);
+    account = nextAccount;
+    if (!previousKey || !nextKey || previousKey !== nextKey || (dirtyOwner && dirtyOwner !== nextKey)) {
+      dirty = false;
+      dirtyOwner = '';
+    }
+    if (nextAccount?.email && config.rememberAccount && capabilities.has('account-hint')) {
+      try {
+        await rpc('remember-account', { email: nextAccount.email });
+        assertCurrent(expected);
+      } catch (caught) {
+        if (caught?.code === 'expired' || caught?.code === 'bridge_lost') throw caught;
+        ui['setup-status'].textContent = 'La sesión está conectada, pero no se pudo recordar la cuenta en el helper.';
+      }
+    }
+    assertCurrent(expected);
+    status('connected');
+    await listCopies();
+  }
+
+  function connectGoogle(selectAccount = false) {
+    if (!bridgeAlive || !config.clientId || !gisAvailable() || authPending || busy || revoking || configWrites) return;
     const expected = generation;
     const attempt = ++authAttempt;
+    const previousAccount = account;
+    const hint = config.rememberAccount ? account?.email || config.accountHint : '';
+    const knownAccount = Boolean(account || hint);
     authPending = true;
-    autoBlocked = false;
-    status('connecting');
+    clearTimeout(autoTimer);
+    ui['revoke-confirmation'].hidden = true;
+    status(selectAccount ? 'switching_account' : knownAccount ? 'renewing' : 'connecting');
+    const current = () => bridgeAlive && authPending && expected === generation && attempt === authAttempt;
+    const finish = () => { authPending = false; authAttempt += 1; clearTimeout(authTimer); authTimer = null; };
+    const failed = code => {
+      if (!current()) return;
+      finish();
+      // Cancellation or failure does not discard an existing valid session.
+      status(code);
+      scheduleAuto();
+    };
+    authTimer = setTimeout(() => failed('auth_timeout'), AUTH_TIMEOUT);
     try {
       const client = window.google.accounts.oauth2.initTokenClient({
         client_id: config.clientId, scope: SCOPE, include_granted_scopes: false,
         callback(response) {
-          if (!bridgeAlive || expected !== generation || attempt !== authAttempt) return;
-          authPending = false;
-          if (!response || response.error || typeof response.access_token !== 'string' ||
-              !window.google.accounts.oauth2.hasGrantedAllScopes(response, SCOPE)) {
-            status(response?.error === 'access_denied' ? 'denied' : 'auth_error');
-            return;
+          if (!current()) return;
+          if (response?.error) { failed(oauthError(response)); return; }
+          if (!response || typeof response.access_token !== 'string' || !response.access_token || response.access_token.length > 8192) {
+            failed('auth_error'); return;
           }
+          let granted = false;
+          try { granted = window.google.accounts.oauth2.hasGrantedAllScopes(response, SCOPE); } catch (_) { /* unsupported response */ }
+          if (!granted) { failed('permission_missing'); return; }
           const seconds = Number(response.expires_in);
-          if (!Number.isFinite(seconds) || seconds <= 30) { status('expired'); return; }
+          if (!Number.isFinite(seconds) || seconds <= 30 || seconds > 86400) { failed('auth_error'); return; }
+          finish();
+          generation += 1;
+          for (const controller of requests) controller.abort();
+          requests.clear();
+          clearCopies();
+          clearTimeout(expirationTimer);
           token = response.access_token;
           expiresAt = Date.now() + seconds * 1000 - 30000;
-          expirationTimer = setTimeout(() => disconnectGoogle('expired'), Math.min(expiresAt - Date.now(), 2147483647));
+          expirationTimer = setTimeout(expireToken, Math.min(expiresAt - Date.now(), 2147483647));
+          autoBlocked = false;
+          const acceptedGeneration = generation;
           status('connected');
-          void operate(listCopies);
+          void operate(() => initializeSession(acceptedGeneration, previousAccount));
         },
         error_callback(response) {
-          if (!bridgeAlive || expected !== generation || attempt !== authAttempt) return;
-          authPending = false;
-          const code = response?.type === 'popup_closed' ? 'auth_closed' :
-            response?.type === 'popup_failed_to_open' ? 'popup_blocked' : 'auth_error';
-          status(code);
+          failed(response?.type === 'popup_closed' ? 'auth_closed' : response?.type === 'popup_failed_to_open' ? 'popup_blocked' : 'auth_error');
         },
       });
-      // Must stay directly inside this user click. Never called by a timer.
-      client.requestAccessToken({ prompt: 'select_account' });
-    } catch (_) {
-      authPending = false;
-      status('auth_error');
-    }
+      // Remains directly in this click handler. No timer ever starts authorization.
+      client.requestAccessToken({ prompt: selectAccount || !knownAccount ? 'select_account' : '',
+        ...(!selectAccount && hint ? { login_hint: hint } : {}) });
+    } catch (_) { failed('auth_error'); }
+  }
+
+  function revokeGoogle() {
+    if (!isAuthorized() || authPending || busy || revoking || typeof window.google?.accounts?.oauth2?.revoke !== 'function') return;
+    const expected = generation;
+    const activeToken = token;
+    revoking = true;
+    clearTimeout(autoTimer);
+    ui['revoke-confirmation'].hidden = true;
+    status('revoking');
+    const complete = successful => {
+      if (closed || expected !== generation || !revoking) return;
+      clearTimeout(revokeTimer);
+      revokeTimer = null;
+      revoking = false;
+      if (successful) {
+        clearAuth();
+        autoBlocked = false;
+        status('revoked');
+        if (capabilities.has('oauth-config')) void queueConfig({ accountHint: '' });
+      } else { status('revoke_failed'); scheduleAuto(); }
+    };
+    revokeTimer = setTimeout(() => complete(false), 15000);
+    try { window.google.accounts.oauth2.revoke(activeToken, response => complete(response?.successful === true)); }
+    catch (_) { complete(false); }
+  }
+
+  async function importClientFile() {
+    const file = ui['import-client'].files?.[0];
+    ui['import-client'].value = '';
+    if (!file || !bridgeAlive || !capabilities.has('oauth-config')) return;
+    try {
+      if (file.size > 65536) throw error('invalid_config');
+      const document = JSON.parse(await file.text());
+      const web = document?.web;
+      if (!web || typeof web !== 'object' || typeof web.client_id !== 'string' ||
+          web.client_id.length > 300 || !CLIENT_ID.test(web.client_id)) {
+        ui['setup-status'].textContent = 'El JSON debe ser de un cliente OAuth de tipo Aplicación web.';
+        return;
+      }
+      if (!Array.isArray(web.javascript_origins) || !web.javascript_origins.includes(HELPER_ORIGIN)) {
+        ui['setup-status'].textContent = `Añade ${HELPER_ORIGIN} como origen JavaScript autorizado y descarga de nuevo el JSON.`;
+        return;
+      }
+      clearTimeout(clientDraftTimer);
+      ui['client-id'].value = web.client_id;
+      // Only these public configuration fields leave this function. client_secret is discarded.
+      await queueConfig({ clientId: web.client_id, clientIdDraft: null }, 'Client ID importado y guardado automáticamente.');
+    } catch (_) { ui['setup-status'].textContent = 'No se pudo importar el JSON de Google. Comprueba que sea válido y no supere 64 KiB.'; }
   }
 
   function beginBootstrap() {
@@ -496,10 +788,8 @@
     }
     history.replaceState(null, '', `${location.pathname}${location.search}`);
     const ready = () => {
-      try {
-        // Public bootstrap only. Secrets are never sent by window.postMessage.
-        opener.postMessage({ protocol: PROTOCOL, type: 'ready', nonce }, GAME_ORIGIN);
-      } catch (_) { status('bridge_lost'); }
+      try { opener.postMessage({ protocol: PROTOCOL, type: 'ready', nonce }, GAME_ORIGIN); }
+      catch (_) { status('bridge_lost'); }
     };
     function receivePort(event) {
       const message = event.data;
@@ -518,11 +808,12 @@
       heartbeatTimer = setInterval(() => {
         if (Date.now() - lastPong > 45000) { loseBridge(); return; }
         post({ type: 'ping' });
+        render();
       }, 10000);
       post({ type: 'port-ready' });
-      // All further communication uses the private MessagePort.
       try { window.opener = null; } catch (_) { /* browser may prohibit assignment */ }
       status('bridge_ready');
+      loadGoogleLibrary();
     }
     window.addEventListener('message', receivePort);
     ready();
@@ -534,15 +825,46 @@
     }, 20000);
   }
 
-  ui.connect.addEventListener('click', connectGoogle);
+  ui.connect.addEventListener('click', () => connectGoogle(false));
+  ui['switch-account'].addEventListener('click', () => connectGoogle(true));
+  ui['cancel-auth'].addEventListener('click', () => cancelAuth());
+  ui['retry-library'].addEventListener('click', loadGoogleLibrary);
   ui.disconnect.addEventListener('click', () => disconnectGoogle());
+  ui.revoke.addEventListener('click', () => { ui['revoke-confirmation'].hidden = false; ui['confirm-revoke'].focus(); });
+  ui['confirm-revoke'].addEventListener('click', revokeGoogle);
+  ui['cancel-revoke'].addEventListener('click', () => { ui['revoke-confirmation'].hidden = true; ui.revoke.focus(); });
   ui.save.addEventListener('click', () => { void operate(() => saveCopy(false)); });
   ui.refresh.addEventListener('click', () => { void operate(listCopies); });
   ui.restore.addEventListener('click', () => { void operate(restoreCopy); });
   ui.backups.addEventListener('change', render);
-  const googleScript = document.getElementById('google-identity');
-  googleScript.addEventListener('load', render);
-  googleScript.addEventListener('error', () => status('library_error'));
+  ui['client-id'].addEventListener('input', () => {
+    clearTimeout(clientDraftTimer);
+    const value = ui['client-id'].value;
+    void queueConfig({ clientIdDraft: value }, 'Borrador guardado. La conexión conserva el Client ID activo hasta que completes uno válido.');
+    if (CLIENT_ID.test(value.trim())) clientDraftTimer = setTimeout(() => {
+      if (ui['client-id'].value === value) flushClientDraft();
+    }, 400);
+  });
+  ui['client-id'].addEventListener('blur', flushClientDraft);
+  ui['auto-backup'].addEventListener('change', () => { void queueConfig({ autoBackup: ui['auto-backup'].checked }); });
+  ui['remember-account'].addEventListener('change', () => { void queueConfig({ rememberAccount: ui['remember-account'].checked }); });
+  ui['clear-client'].addEventListener('click', () => {
+    clearTimeout(clientDraftTimer);
+    ui['client-id'].value = '';
+    void queueConfig({ clientId: '', clientIdDraft: null, accountHint: '' });
+  });
+  ui['choose-client-file'].addEventListener('click', () => ui['import-client'].click());
+  ui['import-client'].addEventListener('change', () => { void importClientFile(); });
+  ui['copy-origin'].addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(HELPER_ORIGIN); ui['copy-origin'].textContent = 'Origen copiado'; }
+    catch (_) {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('authorized-origin'));
+      selection.removeAllRanges(); selection.addRange(range);
+      ui['setup-status'].textContent = 'Origen seleccionado. Cópialo con el menú del navegador o el teclado.';
+    }
+  });
   window.addEventListener('beforeunload', () => {
     post({ type: 'bye' });
     closed = true;
@@ -550,6 +872,10 @@
     clearInterval(heartbeatTimer);
     clearInterval(readyTimer);
     clearTimeout(bootstrapTimer);
+    clearTimeout(clientDraftTimer);
+    clearTimeout(libraryTimer);
+    for (const item of pending.values()) { clearTimeout(item.timeout); item.reject(error('bridge_lost')); }
+    pending.clear();
     try { port?.close(); } catch (_) { /* already closed */ }
   });
   beginBootstrap();

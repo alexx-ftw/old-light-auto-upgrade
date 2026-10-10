@@ -1,6 +1,6 @@
 # Old Light Auto Upgrade
 
-Userscript para [Old Light](https://oldlight.io/play) que mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, repone naves hasta los mínimos configurados y envía avisos opcionales al navegador o Telegram. Versión **1.2.0**.
+Userscript para [Old Light](https://oldlight.io/play) que mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, repone naves hasta los mínimos configurados, muestra presets de flota con Shift + clic y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.3.0**.
 
 ## Instalación
 
@@ -40,23 +40,41 @@ La reposición disponible tiene prioridad sobre los edificios. Si no puede encar
 
 Con el modo de naves estacionadas, enviar naves a una misión puede provocar su reposición; cuando regresen, el total puede superar el mínimo. Activa **Contar también las naves en misión** si quieres evitar esa reposición para las misiones contabilizadas por el juego. El script no cancela construcciones ni desguaza naves para reducir excedentes.
 
+## Presets de flota con Shift + clic
+
+Con tus sistemas de origen seleccionados, haz **Shift + clic** sobre un hexágono que contenga un sistema con la acción **Fleet** disponible. El helper abre su despacho y muestra un menú junto al cursor con los presets que tienes guardados en el juego.
+
+Al elegir un preset se aplican sus cantidades al despacho de ese destino. **Confirma el envío con el botón del juego** cuando esté listo; el atajo evita la confirmación automática de los presets incluso si tenías activado el envío rápido nativo. Un cambio de destino o el cierre del despacho invalida el menú. Puedes cerrarlo con **Escape** o haciendo clic fuera.
+
+El toggle de **Shift + clic** en **Flota** activa o desactiva el atajo y se guarda automáticamente. Está activado por defecto; al desactivarlo recuperas la multiselección nativa con Shift. Los clics sin ese modificador mantienen su funcionamiento normal. Los hexágonos vacíos o sin acción Fleet no abren presets de un destino anterior.
+
+Los presets se crean y se administran en el despacho del juego. El helper utiliza sus botones y cantidades actuales.
+
 ## Notificaciones
 
 La pestaña **Avisos** reúne los canales y los filtros de notificaciones. Los dos canales son independientes y están **desactivados por defecto**:
 
 - **Navegador:** pulsa **Permitir avisos del navegador**. Solo ese botón solicita permiso; al concederlo se activa el canal. Después puedes controlarlo con **Avisos del navegador**.
-- **Telegram:** introduce el **token de tu bot** y el **Chat ID**, pulsa **Guardar** y activa **Avisos por Telegram**. **Guardar no envía mensajes**. **Enviar prueba a Telegram** envía una prueba al chat guardado, independientemente de los filtros y sin necesidad de activar el canal.
+- **Telegram:** introduce el **token de tu bot** y el **Chat ID** y activa **Avisos por Telegram**. Los cambios se guardan automáticamente; no hay botón Guardar. **Enviar prueba a Telegram** envía una prueba al chat guardado, independientemente de los filtros y sin necesidad de activar el canal. La prueba se bloquea mientras quedan credenciales incompletas en edición.
 
-El token y el Chat ID se guardan en el almacenamiento del gestor de userscripts, mediante GM, fuera del archivo publicado. Los campos vacíos conservan lo guardado. **Borrar credenciales de Telegram** elimina esos datos y desactiva el canal.
+El token y el Chat ID se guardan en el almacenamiento del gestor de userscripts, mediante GM, fuera del archivo publicado. Cada pulsación guarda un borrador privado; cuando el par de credenciales es válido, se aplica tras **400 ms** sin cambios o al salir del campo. Mientras está incompleto, se conserva la conexión anterior. Los campos vacíos conservan lo guardado. Al recargar, se recuperan los borradores pendientes, sin rellenar los campos con las credenciales activas. **Borrar credenciales de Telegram** elimina tanto las credenciales como los borradores y desactiva el canal.
 
-En **Tipos de notificación** puedes activar o desactivar individualmente los **18 tipos**, agrupados en **Actividad**, **Problemas** y **Ajustes del helper**, o usar **Todos / Ninguno**. Los mismos filtros se aplican a ambos canales que tengas habilitados:
+En **Tipos de notificación** puedes activar o desactivar individualmente los **19 tipos**, agrupados en **Actividad**, **Problemas** y **Ajustes del helper**, o usar **Todos / Ninguno**. Los mismos filtros se aplican a ambos canales que tengas habilitados:
 
-- **Activados por defecto:** solicitudes, confirmaciones de edificios y naves, edificios terminados, cambios de flota, avisos emergentes del juego, informes nuevos con su contenido y aumentos de mensajes sin leer, errores, pedidos rechazados o sin confirmar y **pausas automáticas**.
+- **Activados por defecto:** solicitudes, confirmaciones de edificios y naves, edificios terminados, objetivos de nivel alcanzados, cambios de flota, avisos emergentes del juego, informes nuevos con su contenido y aumentos de mensajes sin leer, errores, pedidos rechazados o sin confirmar y **pausas automáticas**.
 - **Desactivados por defecto:** cambios de edificios marcados, mínimos de naves, modo de contar naves, prioridades, umbral del depósito y **pausa o reanudación manual**.
 
 Cada aviso muestra una sola marca **Old Light**, un encabezado con el icono y tipo de evento, el sistema cuando se puede identificar y el detalle separado. Los cambios de vista del helper no envían avisos. Un cambio de flota se comunica como tal; por sí solo no demuestra que haya terminado una construcción. Los mensajes privados del juego se anuncian por su contador; su contenido no se descarga.
 
 Cada canal tiene su propia cola de avisos **en memoria**, que no se conserva al recargar o cerrar la pestaña. Telegram separa los envíos al menos **3,1 segundos** y, si pide esperar por exceso de solicitudes, respeta ese plazo antes de reintentar. El panel muestra el estado de cada canal.
+
+### Objetivos de nivel por estructura
+
+En **Avisos → Objetivos de nivel**, indica el nivel que quieres alcanzar para cada edificio. **Vacío o 0** desactiva ese objetivo. Por ejemplo, Command Center **10** avisa cuando se observa que ha llegado al nivel **10** o lo ha superado. Puedes activar o desactivar el tipo **Objetivo de nivel alcanzado** y elegir los canales habituales de navegador y Telegram.
+
+Comprueba el nivel construido, no la mejora pendiente en cola. Si el edificio ya había alcanzado el objetivo cuando lo configuraste o al empezar a observarlo, establece una referencia silenciosa. Evita repetir el aviso para la misma galaxia, sistema, estructura y objetivo, incluso al recargar. Los objetivos se aplican a cada sistema mientras lo tienes seleccionado; necesitan una selección única y datos actuales del panel del juego.
+
+Los valores y los borradores se guardan en cada edición. Los objetivos y su estado se incluyen en la exportación, importación y copias de Drive. Cambiar un objetivo no genera una notificación de ajustes.
 
 ### Contenido de los informes
 
@@ -80,11 +98,13 @@ Deja **Structures o Shipyard abierto y la pestaña visible**. Los dos paneles de
 
 Cuando la pestaña está oculta, el cliente del juego aplaza el refresco de sus contadores y **el script no inicia nuevas acciones**. Los avisos dependen de los cambios que lleguen a la interfaz mientras se observa. No ofrece una cobertura completa de eventos del servidor ni actividad continua en segundo plano; al cerrar, suspender o descartar la pestaña, deja de actuar.
 
-La versión **1.2.0** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las construcciones ya encoladas mantienen su orden en el juego.
+La versión **1.3.0** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las construcciones ya encoladas mantienen su orden en el juego.
 
 ## Guardado local, exportación e importación
 
-Todo lo configurable se guarda automáticamente en este navegador: edificios, prioridades, mínimos y modo de flota, umbral del depósito, pausa, posición de la ventana, estado minimizado, pestaña seleccionada, secciones desplegadas, canales y filtros de avisos, credenciales de Telegram y configuración de Drive.
+Todo lo configurable se guarda automáticamente en este navegador, sin botones de Guardar ajustes: edificios, prioridades, mínimos y modo de flota, atajo de presets, objetivos de nivel, umbral del depósito, pausa, posición de la ventana, estado minimizado, pestaña seleccionada, secciones desplegadas, canales y filtros de avisos, credenciales de Telegram y configuración de Drive.
+
+Los campos de texto y números guardan el **borrador en cada cambio**. Los números y las credenciales se aplican cuando son válidos, tras 400 ms sin escribir o al salir del campo. Puedes recargar y continuar una edición incompleta; los valores válidos anteriores siguen activos mientras tanto. Los toggles se aplican inmediatamente; las prioridades y la posición se guardan al terminar el movimiento.
 
 La pestaña **Datos** permite:
 
@@ -93,7 +113,7 @@ La pestaña **Datos** permite:
 
 El archivo contiene el token y Chat ID si los has guardado: consérvalo como una copia privada. Las colas del juego, las notificaciones pendientes, la caché de informes y los permisos de notificación del navegador son estado de ejecución o del navegador y no se transfieren. Al importarlo en otro navegador tendrás que conceder allí el permiso para avisos. La copia de ajustes no guarda una partida ni cambia las construcciones ya encargadas.
 
-Los ajustes del panel usan almacenamiento local del sitio; las credenciales y la configuración de avisos y Drive usan el almacenamiento GM del gestor de userscripts. No se publican dentro del código del repositorio.
+Los ajustes del panel y sus borradores numéricos usan almacenamiento local del sitio; las credenciales, sus borradores, los objetivos de nivel y la configuración de avisos y Drive usan el almacenamiento GM del gestor de userscripts. No se publican dentro del código del repositorio.
 
 ## Copias en Google Drive
 
@@ -101,21 +121,34 @@ La integración es **opcional** y necesita un **Client ID OAuth propio**, de tip
 
 ### Configuración inicial
 
-1. En [Google Cloud Console](https://console.cloud.google.com/), crea o elige tu proyecto y habilita **Google Drive API**.
-2. Configura la pantalla de consentimiento OAuth y, si tu aplicación está en modo de prueba, añade tu cuenta como usuario de prueba.
-3. Crea un **ID de cliente OAuth**, tipo **Aplicación web**, y añade exactamente este **origen JavaScript autorizado**: `https://alexx-ftw.github.io`.
-4. En **Datos → Copia opcional en Google Drive**, pega el Client ID y pulsa **Guardar configuración**.
-5. Pulsa **Abrir Google Drive** y, en la ventana auxiliar, **Conectar Google Drive**. Autoriza tu cuenta y el permiso de datos privados de esta aplicación.
+1. En el helper, abre **Datos → Configurar Google Drive**. Puedes abrir el asistente aunque aún no tengas un Client ID.
+2. Sigue los enlaces de **Configuración inicial** para habilitar **Google Drive API**, configurar el consentimiento y crear un cliente OAuth de tipo **Aplicación web**. Si el proyecto está en pruebas, añade tu cuenta como usuario de prueba.
+3. Añade exactamente este **origen JavaScript autorizado**: `https://alexx-ftw.github.io`. El asistente incluye **Copiar origen**.
+4. Pega el Client ID o pulsa **Importar JSON de Google** y elige el archivo descargado del cliente web. Se comprueba que el JSON autorice ese origen y se conserva únicamente el Client ID; el `client_secret` se descarta. Todo se guarda automáticamente.
+5. Pulsa **Conectar Google Drive** y autoriza tu cuenta y el permiso de datos privados de esta aplicación.
+
+También puedes editar el Client ID en **Datos → Configuración avanzada** dentro del helper. Un borrador incompleto o vacío se guarda sin cortar la conexión vigente. **Borrar Client ID** elimina explícitamente la configuración activa.
+
+### Cuenta y autorización
+
+- La pantalla muestra la cuenta autorizada, si Google proporciona su identidad, y el tiempo aproximado que queda de sesión.
+- **Recordar mi cuenta** guarda únicamente el correo como pista para la siguiente conexión; puedes desactivarlo en cualquier momento. Nunca guarda el token de Google.
+- **Renovar conexión** o **Volver a conectar** reutiliza esa pista de cuenta para evitar selecciones innecesarias. **Cambiar cuenta** abre expresamente el selector.
+- Cerrar, cancelar o denegar una renovación conserva la sesión anterior mientras siga siendo válida. La autorización tiene un límite de espera y descarta respuestas tardías de intentos cancelados.
+- Si Google no carga, aparece **Reintentar conexión con Google**. La autorización siempre empieza con un clic; la reconexión no abre ventanas por su cuenta.
+- **Desconectar esta sesión** elimina el token de esta ventana. **Retirar permiso de Google** pide una confirmación dentro de la página y revoca el acceso de la aplicación; solo muestra éxito cuando Google lo confirma. También ofrece un enlace a los permisos de tu cuenta.
+
+La conexión utiliza el modelo de tokens de Google Identity Services para aplicaciones web, sin servidor propio. Google sigue requiriendo un Client ID registrado y una nueva autorización cuando la sesión caduca; no hay un refresh token oculto ni una conexión permanente prometida.
 
 ### Copias y restauración
 
 - **Guardar copia ahora** crea una copia nueva con fecha, sin reemplazar las anteriores.
 - **Actualizar lista** muestra las **30 copias más recientes**. Selecciona una y pulsa **Restaurar la copia seleccionada** para aplicarla al helper.
-- **Copia automática de los cambios locales** guarda los cambios después de **5 segundos** sin otros cambios, mientras la ventana auxiliar permanezca abierta y su autorización siga vigente. Evita copias automáticas idénticas. Conectar y guardar el Client ID no generan una copia por sí solos; puedes crear la primera con **Guardar copia ahora**.
+- **Copia automática de los cambios locales** guarda los cambios después de **5 segundos** sin otros cambios, mientras la ventana auxiliar permanezca abierta y su autorización siga vigente. Evita copias automáticas idénticas. Conectar, recordar la cuenta y configurar el Client ID no generan una copia por sí solos; puedes crear la primera con **Guardar copia ahora**.
 
 Es respaldo automático de los ajustes locales hacia Drive. La restauración desde Drive siempre se elige manualmente, para que otro navegador no sobrescriba tus cambios en curso.
 
-Solicita únicamente el permiso `drive.appdata`. Las copias se guardan en el espacio privado de la aplicación, que no aparece como archivos normales en Mi unidad; se consultan desde la ventana auxiliar usando el mismo proyecto OAuth y la misma cuenta. El token de Google se conserva solo en memoria en esa ventana y nunca se añade al JSON ni al almacenamiento del userscript. Si caduca, pulsa **Conectar Google Drive** de nuevo.
+Solicita únicamente el permiso `drive.appdata`. Las copias se guardan en el espacio privado de la aplicación, que no aparece como archivos normales en Mi unidad; se consultan desde la ventana auxiliar usando el mismo proyecto OAuth y la misma cuenta. El token de Google se conserva solo en memoria en esa ventana y nunca se añade al JSON ni al almacenamiento del userscript. Si caduca, pulsa **Volver a conectar**. Los cambios locales recibidos durante la caducidad quedan pendientes en esta ventana y se copian tras reconectar la misma cuenta. Si cambias a otra cuenta, se descartan los envíos automáticos pendientes de la anterior; los ajustes permanecen guardados en local y puedes crear una copia manual o continuar editando.
 
 Las copias incluyen la misma configuración y credenciales de Telegram que la exportación local. Se transfieren al puente por un canal privado y a Google por HTTPS. Cada copia tiene un identificador y un hash para comprobar su integridad al restaurarla. No se almacenan copias ni tokens en GitHub.
 
