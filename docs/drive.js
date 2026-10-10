@@ -19,10 +19,10 @@
   const CLIENT_ID = /^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$/;
   const EMAIL = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$/;
   const STATUS = {
-    waiting: 'Esperando al userscript… Abre esta ventana desde el helper de Old Light.',
-    bridge_ready: 'El helper está conectado. Pulsa Conectar Google Drive para autorizar tu cuenta.',
-    missing_client: 'Añade tu Client ID en Configuración inicial para conectar Google Drive.',
-    disconnected: 'Sesión desconectada. Puedes volver a conectar cuando quieras.',
+    waiting: 'Abre esta ventana desde el helper de Old Light para conectar tu cuenta.',
+    bridge_ready: 'Inicia sesión con Google para ver y guardar tus copias.',
+    missing_client: 'La conexión con Google aún no está configurada. Consulta Configuración avanzada.',
+    disconnected: 'Has cerrado la sesión. Puedes iniciar sesión de nuevo cuando quieras.',
     connecting: 'Esperando tu autorización de Google…',
     renewing: 'Renovando la conexión con Google Drive…',
     switching_account: 'Elige la cuenta de Google que quieres usar.',
@@ -35,32 +35,43 @@
     unchanged: 'Ya hay una copia idéntica de estos ajustes.',
     restoring: 'Restaurando la copia seleccionada…',
     restored: 'Configuración restaurada en el helper.',
-    expired: 'La autorización ha caducado. Pulsa Volver a conectar para continuar.',
+    expired: 'La sesión ha caducado. Inicia sesión de nuevo para continuar.',
     denied: 'No se concedió el permiso de datos de esta aplicación.',
     permission_missing: 'Falta conceder el permiso para guardar las copias de esta aplicación.',
     popup_blocked: 'El navegador bloqueó la autorización. Permite ventanas emergentes aquí y vuelve a conectar.',
     auth_closed: 'Cerraste la autorización. Puedes volver a intentarlo.',
     auth_cancelled: 'Autorización cancelada. Puedes volver a intentarlo.',
     auth_timeout: 'Google no respondió a tiempo. Cierra la ventana de autorización y vuelve a intentarlo.',
-    auth_error: 'No se pudo autorizar. Comprueba el Client ID, su origen y los usuarios de prueba en Google Cloud.',
-    invalid_client: 'Google no reconoce el Client ID. Usa un cliente OAuth de tipo Aplicación web.',
-    auth_origin: 'El cliente OAuth debe permitir exactamente el origen https://alexx-ftw.github.io.',
+    auth_error: 'Google no pudo iniciar la sesión. Inténtalo de nuevo o revisa Configuración avanzada.',
+    invalid_client: 'Google no reconoce la conexión de esta aplicación. Revisa Configuración avanzada.',
+    auth_origin: 'Google ha rechazado la conexión desde esta página. Revisa Configuración avanzada.',
     library_loading: 'Cargando la conexión con Google…',
-    library_error: 'No se pudo cargar Google Identity Services. Pulsa Reintentar conexión con Google.',
-    library_timeout: 'Google no terminó de cargar. Comprueba la conexión y pulsa Reintentar conexión con Google.',
+    library_error: 'No se pudo conectar con Google. Pulsa Reintentar conexión.',
+    library_timeout: 'Google no terminó de cargar. Comprueba tu conexión y vuelve a intentarlo.',
     bridge_lost: 'Se perdió el enlace con el helper. Abre una nueva ventana desde Old Light.',
     revoking: 'Retirando el permiso de Google…',
     revoked: 'Google confirmó que el permiso de esta aplicación ha sido retirado.',
     revoke_failed: 'No se pudo confirmar la retirada del permiso. Puedes revisarlo en tu cuenta de Google.',
     timeout: 'La operación tardó demasiado. Actualiza la lista antes de volver a guardar una copia.',
     rate_limit: 'Google ha limitado las solicitudes. Espera y actualiza la lista para reanudar las copias.',
-    api_denied: 'Google rechazó la petición. Comprueba que Drive API esté activada en el proyecto y que el permiso siga concedido.',
+    api_denied: 'Google no ha permitido acceder a las copias. Revisa tu autorización o Configuración avanzada.',
     upload_uncertain: 'No se confirmó el guardado. Actualiza la lista antes de repetir; la copia podría haberse creado.',
-    invalid_backup: 'La copia no es válida, su hash no coincide o supera 1 MiB.',
+    invalid_backup: 'La copia no pudo verificarse o es demasiado grande para restaurarla.',
     invalid_config: 'El ajuste no tiene un formato válido.',
     storage_error: 'No se pudo guardar el ajuste en el helper. El cambio sigue en el editor para reintentarlo.',
     busy: 'Espera a que termine la operación actual.',
     failed: 'No se pudo completar la operación. Actualiza la lista o vuelve a conectar.',
+  };
+  // Technical diagnostics stay in the optional advanced panel, never in the sign-in flow.
+  const TECHNICAL_STATUS = {
+    missing_client: 'Falta un Client ID OAuth de tipo Aplicación web. Abre Drive desde el helper para usar la conexión de la aplicación, si está disponible, o configura aquí tu propio cliente.',
+    auth_error: 'Comprueba el Client ID, el origen JavaScript autorizado y los usuarios de prueba del proyecto de Google Cloud.',
+    invalid_client: 'Google no reconoce el Client ID activo. Debe corresponder a un cliente OAuth de tipo Aplicación web que siga habilitado.',
+    auth_origin: `El cliente OAuth debe permitir exactamente este origen JavaScript: ${HELPER_ORIGIN}.`,
+    library_error: 'No se pudo cargar la biblioteca Google Identity Services desde accounts.google.com.',
+    library_timeout: 'Google Identity Services no terminó de cargar dentro de 15 segundos. Puedes reintentar su carga sin cambiar tu configuración.',
+    api_denied: 'Comprueba que Google Drive API esté activada en el proyecto del Client ID y que el permiso drive.appdata siga concedido.',
+    invalid_backup: 'La copia debe tener un formato compatible, superar la comprobación SHA-256 y no exceder 1 MiB.',
   };
   const CONNECTION_CODES = new Set(['waiting', 'bridge_ready', 'missing_client', 'disconnected', 'connecting',
     'renewing', 'switching_account', 'connected', 'renew_soon', 'expired', 'denied', 'permission_missing',
@@ -69,7 +80,8 @@
   const ui = Object.fromEntries(['status', 'connect', 'disconnect', 'automatic', 'save', 'refresh', 'backups',
     'empty', 'restore', 'account', 'session-status', 'expiry', 'switch-account', 'cancel-auth', 'retry-library',
     'remember-account', 'auto-backup', 'client-id', 'choose-client-file', 'import-client', 'clear-client',
-    'copy-origin', 'setup', 'setup-status', 'revoke', 'confirm-revoke', 'cancel-revoke', 'revoke-confirmation']
+    'copy-origin', 'setup', 'setup-status', 'technical-status', 'preferences-status', 'account-settings-status',
+    'revoke', 'confirm-revoke', 'cancel-revoke', 'revoke-confirmation']
     .map(id => [id, document.getElementById(id)]));
   const pending = new Map();
   const requests = new Set();
@@ -144,7 +156,8 @@
     const authorized = isAuthorized();
     const editable = bridgeAlive && configReady && capabilities.has('oauth-config');
     ui.connect.disabled = !bridgeAlive || !config.clientId || !gisAvailable() || authPending || busy || revoking || configWrites > 0;
-    ui.connect.textContent = authorized ? 'Renovar conexión' : account || config.accountHint ? 'Volver a conectar' : 'Conectar Google Drive';
+    ui.connect.textContent = authorized ? 'Renovar conexión' : 'Iniciar sesión con Google';
+    ui.connect.classList.toggle('secondary', authorized);
     ui['switch-account'].disabled = ui.connect.disabled;
     ui['switch-account'].hidden = !account && !config.accountHint;
     ui['cancel-auth'].hidden = !authPending;
@@ -169,9 +182,13 @@
       connection = STATUS[libraryState === 'loading' ? 'library_loading' : libraryState === 'timeout' ? 'library_timeout' : 'library_error'];
     }
     ui['session-status'].textContent = connection;
+    ui['session-status'].dataset.connected = String(authorized);
+    const technicalCode = bridgeAlive && configReady && !config.clientId ? 'missing_client' : statusCode;
+    ui['technical-status'].textContent = TECHNICAL_STATUS[technicalCode] || '';
+    ui['technical-status'].hidden = !ui['technical-status'].textContent;
     ui.account.textContent = account ? [account.name, account.email].filter(Boolean).join(' · ') || 'Cuenta conectada' :
       authorized ? 'Cuenta conectada · Google no facilitó su nombre' :
-        config.rememberAccount && config.accountHint ? `Cuenta recordada: ${config.accountHint}` : 'Ninguna cuenta conectada';
+        config.rememberAccount && config.accountHint ? `Cuenta recordada: ${config.accountHint}` : 'Sin sesión iniciada';
     ui.expiry.textContent = authorized ? `Sesión válida durante unos ${Math.max(1, Math.ceil((expiresAt - Date.now()) / 60000))} min.` :
       account ? 'La cuenta sigue identificada; necesitas renovar la autorización para usar Drive.' : '';
     ui.automatic.textContent = !config.autoBackup ? 'Copia automática desactivada.' :
@@ -185,7 +202,7 @@
   function clearCopies() {
     copies = new Map();
     ui.backups.replaceChildren();
-    ui.empty.textContent = 'Conecta Google Drive para consultar tus copias.';
+    ui.empty.textContent = 'Inicia sesión para consultar tus copias.';
     lastSavedHash = '';
   }
 
@@ -289,8 +306,7 @@
     }
     if (!config.autoBackup) { dirty = false; dirtyOwner = ''; clearTimeout(autoTimer); }
     if (first) {
-      ui.setup.open = !config.clientId;
-      if (!capabilities.has('oauth-config')) ui['setup-status'].textContent = 'Actualiza el userscript a la versión 1.3.0 para configurar los ajustes desde esta ventana.';
+      if (!capabilities.has('oauth-config')) ui['setup-status'].textContent = 'Actualiza el userscript a la versión 1.4.0 para configurar los ajustes desde esta ventana.';
     }
     if (clientChanged || first) status(config.clientId ? 'bridge_ready' : 'missing_client');
     else render();
@@ -323,8 +339,11 @@
 
   function queueConfig(patch, message = 'Guardado automáticamente.') {
     if (!bridgeAlive || !capabilities.has('oauth-config')) return Promise.resolve(false);
+    const feedback = Object.hasOwn(patch, 'autoBackup') ? ui['preferences-status'] :
+      Object.hasOwn(patch, 'rememberAccount') ? ui['account-settings-status'] : ui['setup-status'];
     configWrites += 1;
-    ui['setup-status'].textContent = 'Guardando en el helper…';
+    feedback.textContent = 'Guardando en el helper…';
+    feedback.classList.remove('save-error');
     render();
     const task = configQueue.then(async () => {
       const value = { ...config, ...patch };
@@ -332,11 +351,12 @@
       const result = await rpc('set-config', { config: value });
       configSaveFailed = false;
       receiveConfig(result);
-      ui['setup-status'].textContent = message;
+      feedback.textContent = message;
       return true;
     }).catch(caught => {
       configSaveFailed = true;
-      ui['setup-status'].textContent = STATUS[caught?.code] || STATUS.storage_error;
+      feedback.textContent = STATUS[caught?.code] || STATUS.storage_error;
+      feedback.classList.add('save-error');
       return false;
     }).finally(() => { configWrites -= 1; render(); scheduleAuto(); });
     configQueue = task;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.3.0
+// @version      1.4.0
 // @description  Mejoras por prioridad, mínimos de naves, presets con Shift + clic, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade

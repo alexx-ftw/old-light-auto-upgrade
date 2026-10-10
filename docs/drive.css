@@ -15,10 +15,11 @@ section, .card { margin-bottom: 16px; padding: 22px; border: 1px solid #283852; 
 .version { font-size: 11px; color: #9bb1d0; border: 1px solid #354a69; border-radius: 20px; padding: 3px 8px; }
 .account { margin: 18px 0 6px; font-weight: 700; overflow-wrap: anywhere; }
 .connection-status { color: #cbdafa; margin: 8px 0; }
+.connection-status[data-connected=true] { color: #b5dfc1; }
 #expiry:empty { display: none; }
 #status { color: #cbdafa; }
 .actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0; }
-button { padding: 11px 15px; border: 1px solid #6d9ddd; border-radius: 8px; font: inherit; font-size: 14px; font-weight: 650; background: #b0d0ff; color: #101a2b; cursor: pointer; }
+button { min-height: 42px; padding: 11px 15px; border: 1px solid #6d9ddd; border-radius: 8px; font: inherit; font-size: 14px; font-weight: 650; background: #b0d0ff; color: #101a2b; cursor: pointer; }
 button.secondary { border-color: #435a7b; background: #1a2b43; color: #deebff; }
 button.text-button { border-color: transparent; background: transparent; color: #b8ccef; }
 button.danger { color: #ffb8b8; }
@@ -32,8 +33,14 @@ option { padding: 8px; }
 .check { display: flex; align-items: flex-start; gap: 9px; margin: 14px 0; line-height: 1.45; }
 .check input { margin: 3px 0 0; flex: none; accent-color: #a1c7ff; }
 .autosave-hint { color: #a7cfb6; font-size: 12px; margin-bottom: 0; }
+.save-error { color: #ffc4ae; }
 #automatic { margin-bottom: 0; }
 summary { cursor: pointer; font-size: 15px; font-weight: 650; }
+summary::marker { color: #91b4e5; }
+.advanced-options, .account-options { background: #0d1626; }
+.card:not([open]) { padding: 17px 22px; }
+.card[open] > summary { margin-bottom: 16px; }
+.diagnostic { margin: 16px 0; padding: 12px; border-left: 3px solid #d3aa64; border-radius: 4px; background: #282333; color: #eadac0; font-size: 13px; overflow-wrap: anywhere; }
 .setup-steps { padding-left: 20px; color: #bfcde2; font-size: 13px; line-height: 1.6; }
 .setup-steps li { margin: 10px 0; }
 .origin { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
@@ -45,4 +52,4 @@ summary { cursor: pointer; font-size: 15px; font-weight: 650; }
 footer { padding: 8px 4px; }
 footer p { margin: 9px 0; }
 a { color: #adcfff; }
-@media (max-width: 420px) { main { padding: 24px 12px; } section, .card { padding: 17px; } .actions > button { width: 100%; } }
+@media (max-width: 420px) { main { padding: 24px 12px; } section, .card { padding: 17px; } .card:not([open]) { padding: 15px 17px; } .actions > button { width: 100%; } }

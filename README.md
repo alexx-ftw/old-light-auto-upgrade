@@ -1,6 +1,6 @@
 # Old Light Auto Upgrade
 
-Userscript para [Old Light](https://oldlight.io/play) que mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, repone naves hasta los mínimos configurados, muestra presets de flota con Shift + clic y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.3.0**.
+Userscript para [Old Light](https://oldlight.io/play) que mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, repone naves hasta los mínimos configurados, muestra presets de flota con Shift + clic y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.4.0**.
 
 ## Instalación
 
@@ -42,9 +42,11 @@ Con el modo de naves estacionadas, enviar naves a una misión puede provocar su 
 
 ## Presets de flota con Shift + clic
 
-Con tus sistemas de origen seleccionados, haz **Shift + clic** sobre un hexágono que contenga un sistema con la acción **Fleet** disponible. El helper abre su despacho y muestra un menú junto al cursor con los presets que tienes guardados en el juego.
+Con tus sistemas de origen seleccionados, haz **Shift + clic** sobre un hexágono que contenga un sistema con la acción **Fleet** disponible. El helper muestra tus presets guardados **junto al menú circular del hexágono**, sin mostrar el panel de despacho.
 
-Al elegir un preset se aplican sus cantidades al despacho de ese destino. **Confirma el envío con el botón del juego** cuando esté listo; el atajo evita la confirmación automática de los presets incluso si tenías activado el envío rápido nativo. Un cambio de destino o el cierre del despacho invalida el menú. Puedes cerrarlo con **Escape** o haciendo clic fuera.
+**Un clic en un preset envía directamente la flota a ese destino**, mediante los controles nativos del juego. El helper comprueba de nuevo el destino, los orígenes y las cantidades antes de confirmar una sola vez; los dobles clics no generan un segundo envío. Si el juego bloquea la orden o exige una decisión especial, como abandonar la protección inicial, muestra su diálogo. Puedes cerrar el menú con **Escape** o haciendo clic fuera.
+
+Con varios sistemas de origen se conserva el despacho por lotes del juego: un origen con menos naves puede enviar una cantidad menor o quedar fuera. El resumen nativo muestra el resultado del lote.
 
 El toggle de **Shift + clic** en **Flota** activa o desactiva el atajo y se guarda automáticamente. Está activado por defecto; al desactivarlo recuperas la multiselección nativa con Shift. Los clics sin ese modificador mantienen su funcionamiento normal. Los hexágonos vacíos o sin acción Fleet no abren presets de un destino anterior.
 
@@ -70,7 +72,7 @@ Cada canal tiene su propia cola de avisos **en memoria**, que no se conserva al 
 
 ### Objetivos de nivel por estructura
 
-En **Avisos → Objetivos de nivel**, indica el nivel que quieres alcanzar para cada edificio. **Vacío o 0** desactiva ese objetivo. Por ejemplo, Command Center **10** avisa cuando se observa que ha llegado al nivel **10** o lo ha superado. Puedes activar o desactivar el tipo **Objetivo de nivel alcanzado** y elegir los canales habituales de navegador y Telegram.
+En **Edificios → Objetivos de nivel**, indica el nivel que quieres alcanzar para cada edificio. **Vacío o 0** desactiva ese objetivo. Por ejemplo, Command Center **10** avisa cuando se observa que ha llegado al nivel **10** o lo ha superado. En **Avisos** puedes activar o desactivar el tipo **Objetivo de nivel alcanzado** y elegir los canales habituales de navegador y Telegram.
 
 Comprueba el nivel construido, no la mejora pendiente en cola. Si el edificio ya había alcanzado el objetivo cuando lo configuraste o al empezar a observarlo, establece una referencia silenciosa. Evita repetir el aviso para la misma galaxia, sistema, estructura y objetivo, incluso al recargar. Los objetivos se aplican a cada sistema mientras lo tienes seleccionado; necesitan una selección única y datos actuales del panel del juego.
 
@@ -78,7 +80,9 @@ Los valores y los borradores se guardan en cada edición. Los objetivos y su est
 
 ### Contenido de los informes
 
-Con **Informe del juego** y al menos un canal activo, consulta los informes nuevos de la galaxia actual y añade los datos disponibles: título y resultado, fecha, origen/destino, flotas y pérdidas, botín, recursos y edificios del sondeo, lealtad, capturas, colonización y cargamentos. Conserva las cantidades desconocidas como `???` y las aproximadas con `~`.
+Con **Informe del juego** y al menos un canal activo, consulta los informes nuevos de la galaxia actual y añade los datos disponibles: resultado, fecha, origen/destino, flotas y pérdidas, botín, recursos y edificios del sondeo, lealtad, capturas, colonización y cargamentos.
+
+Cada informe tiene un encabezado específico, como **🔎 Old Light · Sondeo**, **⚔️ Old Light · Combate** o **🛡️ Old Light · Defensa**. El destino aparece primero y la fecha usa formato de 24 horas con la zona horaria del navegador. En los sondeos omite los tipos de nave con cero exacto, las bajas vacías y el botín vacío; conserva las pérdidas y recursos que sí existan. Agrupa una defensa completamente desconocida como **desconocida**, identifica los tipos con información parcial y mantiene las cantidades aproximadas con **~**, incluido **~0**. Los edificios se presentan como una lista breve por nivel.
 
 La primera comprobación crea una referencia silenciosa. Después revisa la lista cada **25 segundos**; un aumento del contador puede adelantar esa comprobación. Detecta informes aunque los leas enseguida y evita reenviar los mismos identificadores. Al desactivar este tipo o todos sus canales, la siguiente activación vuelve a empezar sin enviar el historial del período desactivado.
 
@@ -98,7 +102,7 @@ Deja **Structures o Shipyard abierto y la pestaña visible**. Los dos paneles de
 
 Cuando la pestaña está oculta, el cliente del juego aplaza el refresco de sus contadores y **el script no inicia nuevas acciones**. Los avisos dependen de los cambios que lleguen a la interfaz mientras se observa. No ofrece una cobertura completa de eventos del servidor ni actividad continua en segundo plano; al cerrar, suspender o descartar la pestaña, deja de actuar.
 
-La versión **1.3.0** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las construcciones ya encoladas mantienen su orden en el juego.
+La versión **1.4.0** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las construcciones ya encoladas mantienen su orden en el juego.
 
 ## Guardado local, exportación e importación
 
@@ -117,28 +121,32 @@ Los ajustes del panel y sus borradores numéricos usan almacenamiento local del 
 
 ## Copias en Google Drive
 
-La integración es **opcional** y necesita un **Client ID OAuth propio**, de tipo aplicación web. No requiere un client secret. La autorización se realiza en [la página de copias](https://alexx-ftw.github.io/old-light-auto-upgrade/drive.html), abierta desde el helper.
+La integración es **opcional** y viene configurada con la aplicación de Google del helper. La autorización se realiza en [la página de copias](https://alexx-ftw.github.io/old-light-auto-upgrade/drive.html), abierta desde el helper.
 
-### Configuración inicial
+### Iniciar sesión
 
-1. En el helper, abre **Datos → Configurar Google Drive**. Puedes abrir el asistente aunque aún no tengas un Client ID.
-2. Sigue los enlaces de **Configuración inicial** para habilitar **Google Drive API**, configurar el consentimiento y crear un cliente OAuth de tipo **Aplicación web**. Si el proyecto está en pruebas, añade tu cuenta como usuario de prueba.
-3. Añade exactamente este **origen JavaScript autorizado**: `https://alexx-ftw.github.io`. El asistente incluye **Copiar origen**.
-4. Pega el Client ID o pulsa **Importar JSON de Google** y elige el archivo descargado del cliente web. Se comprueba que el JSON autorice ese origen y se conserva únicamente el Client ID; el `client_secret` se descarta. Todo se guarda automáticamente.
-5. Pulsa **Conectar Google Drive** y autoriza tu cuenta y el permiso de datos privados de esta aplicación.
+1. En el helper, abre **Datos → Abrir Google Drive**.
+2. Pulsa **Iniciar sesión con Google**, elige tu cuenta y autoriza el permiso de datos privados de esta aplicación.
+3. Usa **Guardar copia ahora**, restaura una copia o activa **Copia automática de los cambios locales**.
 
-También puedes editar el Client ID en **Datos → Configuración avanzada** dentro del helper. Un borrador incompleto o vacío se guarda sin cortar la conexión vigente. **Borrar Client ID** elimina explícitamente la configuración activa.
+No necesitas crear un proyecto, copiar identificadores ni importar un JSON de Google para usar la conexión integrada. Si ya habías configurado tu propio cliente OAuth, se conserva para que puedas seguir accediendo a sus copias. La configuración avanzada y las opciones de cuenta comienzan cerradas.
+
+### Usar tu propio proyecto
+
+**Configuración avanzada** mantiene la opción de introducir un **Client ID OAuth de tipo Aplicación web** o importarlo desde el JSON de Google. Incluye enlaces para activar Google Drive API, configurar el consentimiento y autorizar el origen `https://alexx-ftw.github.io`. Del JSON solo se conserva el identificador público; no se guarda ni utiliza el client secret.
+
+También puedes editarlo en **Datos → Configuración avanzada** dentro del helper. Un borrador incompleto o vacío se guarda sin cortar la conexión vigente. **Borrar Client ID** elimina la configuración activa; al volver a abrir Drive se adopta la conexión integrada. Las copias de proyectos distintos permanecen separadas: conserva tu identificador anterior si quieres volver a ellas.
 
 ### Cuenta y autorización
 
 - La pantalla muestra la cuenta autorizada, si Google proporciona su identidad, y el tiempo aproximado que queda de sesión.
-- **Recordar mi cuenta** guarda únicamente el correo como pista para la siguiente conexión; puedes desactivarlo en cualquier momento. Nunca guarda el token de Google.
+- En **Cuenta y permisos**, **Recordar mi cuenta** guarda únicamente el correo como pista para la siguiente conexión; puedes desactivarlo en cualquier momento. Nunca guarda el token de Google.
 - **Renovar conexión** o **Volver a conectar** reutiliza esa pista de cuenta para evitar selecciones innecesarias. **Cambiar cuenta** abre expresamente el selector.
 - Cerrar, cancelar o denegar una renovación conserva la sesión anterior mientras siga siendo válida. La autorización tiene un límite de espera y descarta respuestas tardías de intentos cancelados.
-- Si Google no carga, aparece **Reintentar conexión con Google**. La autorización siempre empieza con un clic; la reconexión no abre ventanas por su cuenta.
+- Si Google no carga, aparece **Reintentar conexión**. La autorización siempre empieza con un clic; la reconexión no abre ventanas por su cuenta.
 - **Desconectar esta sesión** elimina el token de esta ventana. **Retirar permiso de Google** pide una confirmación dentro de la página y revoca el acceso de la aplicación; solo muestra éxito cuando Google lo confirma. También ofrece un enlace a los permisos de tu cuenta.
 
-La conexión utiliza el modelo de tokens de Google Identity Services para aplicaciones web, sin servidor propio. Google sigue requiriendo un Client ID registrado y una nueva autorización cuando la sesión caduca; no hay un refresh token oculto ni una conexión permanente prometida.
+La conexión utiliza el modelo de tokens de Google Identity Services para aplicaciones web, sin servidor propio. El identificador público de la aplicación ya está incluido; al caducar la sesión, vuelve a iniciar sesión desde la ventana de copias.
 
 ### Copias y restauración
 

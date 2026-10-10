@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.3.0
+// @version      1.4.0
 // @description  Mejoras por prioridad, mínimos de naves, presets con Shift + clic, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -690,6 +690,7 @@
                 data-setting="depot-fill-percent" aria-label="Porcentaje de capacidad para mejorar Resource Depot" aria-describedby="depot-numeric-status">% de capacidad</label>
               <small class="numeric-autosave" id="depot-numeric-status" data-numeric-status="depot" aria-live="polite"></small>
             </details>
+            <div data-field="level-targets"></div>
           </details>
           <details class="settings-page fleet-details" data-page="fleet" id="oldlight-settings-fleet" role="tabpanel" aria-labelledby="oldlight-tab-fleet" open hidden><summary>Mínimos de naves</summary>
             <p class="page-intro">Mínimo por tipo en el sistema seleccionado. 0 desactiva su reposición.</p>
@@ -699,7 +700,7 @@
             <p class="hint">Se descuentan las naves ya en construcción. La reposición disponible tiene prioridad sobre las mejoras.</p>
             <div class="fleet-shortcut">
               <label><input type="checkbox" data-setting="shift-preset-shortcut">Shift + clic: mostrar presets de flota</label>
-              <p class="hint">Elige un preset y confirma el envío en el juego. Desactiva este atajo para usar la multiselección con Shift.</p>
+              <p class="hint">Los presets aparecen junto al menú circular del hexágono. Un clic en uno envía la flota. Desactiva este atajo para usar la multiselección con Shift.</p>
             </div>
           </details>
           <div class="settings-page" data-page="notifications" id="oldlight-settings-notifications" role="tabpanel" aria-labelledby="oldlight-tab-notifications" hidden></div>
@@ -729,6 +730,7 @@
         tabs: [...shadow.querySelectorAll('[data-settings-tab]')],
         pages: [...shadow.querySelectorAll('[data-page]')],
         notificationContainer: shadow.querySelector('[data-page="notifications"]'),
+        levelTargetContainer: shadow.querySelector('[data-field="level-targets"]'),
         conditionsDetails: shadow.querySelector('.conditions-details'),
         backupStatus: shadow.querySelector('[data-field="backup-status"]'),
         exportSettings: shadow.querySelector('[data-action="export-settings"]'),
@@ -913,7 +915,7 @@
         });
       }
       notifier.mount(ui.notificationContainer);
-      levelTargets.mount(ui.notificationContainer);
+      levelTargets.mount(ui.levelTargetContainer);
       if (driveBackup) driveBackup.mount(ui.driveContainer);
       else {
         const unavailable = document.createElement('p');
@@ -923,7 +925,7 @@
       }
       const backupHelp = document.createElement('a');
       backupHelp.className = 'backup-help';
-      backupHelp.textContent = 'Cómo configurar Google Drive';
+      backupHelp.textContent = 'Ayuda sobre las copias en Google Drive';
       backupHelp.href = 'https://github.com/alexx-ftw/old-light-auto-upgrade#copias-en-google-drive';
       backupHelp.target = '_blank';
       backupHelp.rel = 'noopener noreferrer';
@@ -945,7 +947,7 @@
     return {
       format: 'old-light-auto-upgrade-backup',
       schemaVersion: 1,
-      scriptVersion: '1.3.0',
+      scriptVersion: '1.4.0',
       exportedAt: new Date().toISOString(),
       settings: normalizeSettings(settings),
       notifications: notifier.exportConfig(),
@@ -1561,7 +1563,12 @@
   function createShiftPresetMenu({ isEnabled = () => true } = {}) {
     const MENU_ID = 'oldlight-shift-presets-menu';
     const NATIVE_GUARD_MS = 130;
+    const MASK_ATTRIBUTE = 'data-oldlight-preset-preparing';
     const scope = new AbortController();
+    const maskStyle = document.createElement('style');
+    maskStyle.textContent = '#dispatch-dialog[' + MASK_ATTRIBUTE + '] { display:none!important; }'
+      + '#dispatch-dialog[' + MASK_ATTRIBUTE + ']::backdrop { display:none!important; background:transparent!important; }';
+    document.head.appendChild(maskStyle);
     let gesture = null;
     let flow = null;
     let replaying = false;
@@ -1581,31 +1588,65 @@
     };
     const inMenu = event => Boolean(flow?.host && event.composedPath().includes(flow.host));
     const plain = event => !event.altKey && !event.ctrlKey && !event.metaKey;
+    const dialogElement = () => one('#dispatch-dialog');
+    const anchor = radial => radial.style.left + '|' + radial.style.top;
+    const routeElement = dialog => dialog?.querySelector('[data-field="dispatch-route-slot"] .route-header');
+    const routeKey = route => {
+      const cols = route?.querySelectorAll(':scope > .route-header-tile-col');
+      // Include the native star geometry, origin stack and labels. Names alone can collide.
+      return cols?.length === 2 ? [...cols].map(col => col.innerHTML).join('\n') : null;
+    };
+    const unavailable = button => button.disabled || button.getAttribute('aria-disabled') === 'true'
+      || Boolean(button.closest('.dispatch-preset-tile-locked'));
+    const presetKey = button => (button.getAttribute('aria-label') || button.textContent || '')
+      .normalize('NFKC').replace(/\s+/g, ' ').trim();
+    function presetQuantities(button) {
+      const result = { probe: 0, marauder: 0, sentinel: 0, vanguard: 0 };
+      const label = presetKey(button).replace(/^Use\s+/i, '');
+      if (!label) return null;
+      for (const part of label.split(/,\s+(?=\d)/)) {
+        const match = part.match(/^([\d\s,.'’]+)\s+(Probe|Marauder|Sentinel|Vanguard)$/i);
+        const value = match ? Number(match[1].replace(/[^\d]/g, '')) : NaN;
+        if (!Number.isSafeInteger(value) || value <= 0) return null;
+        const type = match[2].toLowerCase();
+        if (result[type]) return null;
+        result[type] = value;
+      }
+      return result;
+    }
+    function quantitiesMatch(dialog, expected) {
+      if (!expected) return false;
+      const inputs = [...dialog.querySelectorAll('[data-field="dispatch-quantities"] input.dispatch-step-input')];
+      for (const [type, amount] of Object.entries(expected)) {
+        const matches = inputs.filter(input => input.getAttribute('aria-label')?.toLowerCase() === 'number of ' + type + ' to send');
+        if (matches.length !== 1 || Number(matches[0].value) !== amount) return false;
+      }
+      return true;
+    }
 
-    function cancel() {
-      gesture = null;
-      const current = flow;
-      flow = null;
-      if (!current) return;
-      clearTimeout(current.timer);
-      current.observer?.disconnect();
-      current.host?.remove();
+    function readPresets() {
+      const dialog = dialogElement();
+      const list = dialog?.querySelector('[data-field="dispatch-presets"]');
+      const buttons = [...list?.querySelectorAll('.dispatch-preset-apply') || []]
+        .filter(button => button instanceof HTMLButtonElement);
+      return {
+        known: buttons.length > 0 || Boolean(list?.querySelector('.dispatch-preset-add, .dispatch-preset-save-text')),
+        records: buttons.map((button, index) => ({
+          key: presetKey(button), label: presetKey(button).replace(/^Use\s+/i, ''),
+          locked: unavailable(button), index,
+        })).filter(record => record.key),
+      };
     }
 
     function nativeAction(action) {
       const previous = replaying;
       replaying = true;
-      try { action(); } finally { replaying = previous; }
+      try { return action(); } finally { replaying = previous; }
     }
-
-    function nativeEvent(target, event) {
-      nativeAction(() => target.dispatchEvent(event));
-    }
-
+    function nativeEvent(target, event) { return nativeAction(() => target.dispatchEvent(event)); }
     function escapeNativeMenus() {
       nativeEvent(document, new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     }
-
     function pointer(target, name, source, modifiers = false) {
       nativeEvent(target, new PointerEvent(name, {
         bubbles: true, cancelable: true, composed: true, pointerId: source.pointerId,
@@ -1615,117 +1656,140 @@
         ctrlKey: modifiers && source.ctrlKey, metaKey: modifiers && source.metaKey,
       }));
     }
-
     function replayClick(start, end, modifiers) {
       pointer(start.canvas, 'pointerdown', start, modifiers);
       pointer(start.canvas, 'pointerup', end, modifiers);
     }
-
+    function unmask(current) {
+      if (!current.maskedDialog) return;
+      const dialog = current.maskedDialog;
+      current.maskedDialog = null;
+      if (current.previousMask === null) dialog.removeAttribute(MASK_ATTRIBUTE);
+      else dialog.setAttribute(MASK_ATTRIBUTE, current.previousMask);
+    }
+    function mask(current, dialog) {
+      current.maskedDialog = dialog;
+      current.previousMask = dialog.getAttribute(MASK_ATTRIBUTE);
+      dialog.setAttribute(MASK_ATTRIBUTE, '');
+    }
+    function cancel() {
+      gesture = null;
+      const current = flow;
+      flow = null;
+      if (!current) return;
+      clearTimeout(current.timer);
+      cancelAnimationFrame(current.frame);
+      current.observer?.disconnect();
+      current.host?.remove();
+      if (current.confirmGuard) window.removeEventListener('click', current.confirmGuard, true);
+      if (current.dialog && current.maskedDialog && current.dialog.open && !current.confirmed) {
+        nativeAction(() => current.dialog.close());
+      }
+      unmask(current);
+    }
+    function handToNative(current, message) {
+      if (flow !== current) return;
+      if (message && current.dialog?.open) {
+        const error = current.dialog.querySelector('[data-field="dispatch-error"]');
+        if (error) { error.textContent = message; error.hidden = false; }
+      }
+      unmask(current);
+      cancel();
+    }
+    function validRadial(current) {
+      return enabled() && flow === current && !document.querySelector('dialog[open]')
+        && visible(current.radial) && current.radial.contains(current.fleet)
+        && current.fleet.dataset.actionKey === 'fleet' && current.fleet.dataset.enabled === 'true'
+        && !current.fleet.disabled;
+    }
     function validDialog(current) {
       return enabled() && flow === current && current.dialog?.isConnected && current.dialog.open
         && current.dialog.dataset.mode === 'dispatch' && current.dialog.dataset.direction === 'forward'
-        && document.querySelectorAll('dialog[open]').length === 1
-        && current.route?.isConnected
-        && current.dialog.querySelector('[data-field="dispatch-route-slot"] .route-header') === current.route;
+        && current.route?.isConnected && routeElement(current.dialog) === current.route;
     }
-
-    function presetButtons(current) {
-      return [...current.dialog.querySelectorAll('[data-field="dispatch-presets"] .dispatch-preset-apply')]
-        .filter(button => button instanceof HTMLButtonElement && visible(button));
-    }
-
-    function unavailable(button) {
-      return button.disabled || button.getAttribute('aria-disabled') === 'true'
-        || Boolean(button.closest('.dispatch-preset-tile-locked'));
-    }
-
-    function applyPreset(current, button) {
-      if (!validDialog(current) || !presetButtons(current).includes(button) || unavailable(button)) {
-        cancel();
-        return;
-      }
-      const dialog = current.dialog;
-      const confirm = dialog.querySelector('[data-field="dispatch-confirm"]');
-      if (!(confirm instanceof HTMLButtonElement) || confirm.hidden) { cancel(); return; }
-      cancel();
-      // The native preset can call confirm.click() when presetAutoSend is enabled.
-      // Intercept that synchronous programmatic click; later manual sends are untouched.
-      const blockAutomaticConfirm = event => {
-        if (event.target !== confirm || event.isTrusted) return;
-        event.preventDefault();
-        event.stopImmediatePropagation();
-      };
-      window.addEventListener('click', blockAutomaticConfirm, true);
-      try { button.click(); } finally {
-        window.removeEventListener('click', blockAutomaticConfirm, true);
-      }
-      if (dialog.open) dialog.querySelector('.dispatch-step-input:not(:disabled)')?.focus({ preventScroll: true });
+    function freshRadial(start, end) {
+      if (document.querySelector('dialog[open]') || !start.canvas.isConnected) return null;
+      escapeNativeMenus();
+      const context = one('#app > .selection-menu');
+      const markers = context?.querySelector('.selection-menu-markers');
+      const previous = one('#app > .star-actions');
+      if (!context?.hidden || !markers || visible(previous)) return null;
+      nativeEvent(start.canvas, new MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true, composed: true, button: 2,
+        clientX: end.clientX, clientY: end.clientY,
+      }));
+      const hasStar = visible(context) && !markers.hidden;
+      escapeNativeMenus();
+      if (!hasStar || !context.hidden || visible(previous)) return null;
+      replayClick({ ...start, clientX: end.clientX, clientY: end.clientY }, end, false);
+      const radial = one('#app > .star-actions');
+      const fleet = radial?.querySelector('button.star-action-btn[data-action-key="fleet"]');
+      return visible(radial) && fleet instanceof HTMLButtonElement ? { radial, fleet } : null;
     }
 
     function place(current) {
-      const rect = current.host.getBoundingClientRect();
-      current.host.style.left = `${Math.max(8, Math.min(current.x + 10, innerWidth - rect.width - 8))}px`;
-      current.host.style.top = `${Math.max(8, Math.min(current.y + 10, innerHeight - rect.height - 8))}px`;
+      if (!current.host?.isConnected || !visible(current.radial)) return;
+      const origin = current.radial.getBoundingClientRect();
+      const rects = [...current.radial.querySelectorAll(':scope > .star-action-btn')]
+        .filter(visible).map(button => button.getBoundingClientRect());
+      if (!rects.length) return;
+      const width = current.host.getBoundingClientRect().width;
+      const height = current.host.getBoundingClientRect().height;
+      const leftEdge = Math.min(...rects.map(rect => rect.left));
+      const rightEdge = Math.max(...rects.map(rect => rect.right));
+      let x = rightEdge + 10;
+      if (x + width > innerWidth - 8) x = leftEdge - width - 10;
+      x = Math.max(8, Math.min(x, innerWidth - width - 8));
+      const y = Math.max(8, Math.min(origin.top - height / 2, innerHeight - height - 8));
+      current.host.style.left = (x - origin.left) + 'px';
+      current.host.style.top = (y - origin.top) + 'px';
     }
-
-    function refreshPresets(current) {
-      if (!validDialog(current)) { cancel(); return; }
-      const buttons = presetButtons(current);
-      const signature = buttons.map(button => `${button.getAttribute('aria-label') || button.textContent}|${unavailable(button)}`);
-      if (current.buttons?.length === buttons.length
-          && buttons.every((button, index) => button === current.buttons[index] && signature[index] === current.signature[index])) return;
-      const hadFocus = current.shadow.activeElement;
-      const selected = current.items.findIndex(item => item === hadFocus);
-      current.buttons = buttons;
+    function renderPresets(current, records, pending = false) {
+      if (flow !== current || !current.host) return;
+      const signature = JSON.stringify(records.map(record => [record.key, record.locked]));
+      if (signature === current.signature && pending === current.pending) return;
       current.signature = signature;
-      current.items = buttons.map((native, index) => {
+      current.pending = pending;
+      current.records = records;
+      const focused = current.items?.indexOf(current.shadow.activeElement) ?? -1;
+      current.items = records.map(record => {
         const item = document.createElement('button');
         item.type = 'button';
         item.setAttribute('role', 'menuitem');
-        item.textContent = (native.getAttribute('aria-label') || native.textContent || `Preset ${index + 1}`).replace(/^Use\s+/i, '').trim();
-        item.disabled = unavailable(native);
+        item.textContent = record.label;
+        item.disabled = record.locked || pending;
         item.addEventListener('click', event => {
-          event.preventDefault(); event.stopPropagation(); applyPreset(current, native);
+          event.preventDefault(); event.stopPropagation(); choosePreset(current, record);
         });
         return item;
       });
       current.list.replaceChildren(...current.items);
-      current.empty.hidden = buttons.length > 0;
+      current.note.textContent = pending ? 'Cargando presets…' : records.length
+        ? 'Clic para enviar' : 'No hay presets guardados.';
       place(current);
-      if (hadFocus) (current.items[selected]?.disabled === false ? current.items[selected]
-        : current.items.find(item => !item.disabled))?.focus({ preventScroll: true });
+      if (focused >= 0) current.items[focused]?.focus({ preventScroll: true });
     }
-
     function showMenu(current) {
-      if (!validDialog(current)) { cancel(); return; }
       const host = document.createElement('div');
       host.id = MENU_ID;
-      host.setAttribute('popover', 'manual');
       const shadow = host.attachShadow({ mode: 'open' });
-      shadow.innerHTML = `<style>
-        :host { position:fixed; inset:auto; margin:0; padding:0; width:264px; max-width:calc(100vw - 16px);
-          border:1px solid #40546a; border-radius:12px; background:#101b27; color:#e8f0f7;
-          box-shadow:0 12px 38px #0009; z-index:2147483647; font:13px/1.4 system-ui,sans-serif; }
-        * { box-sizing:border-box; } section { padding:10px; } h2 { margin:0; font-size:13px; }
-        .target { color:#afc2d4; margin:3px 0 9px; overflow-wrap:anywhere; }
-        [role=menu] { display:grid; gap:4px; max-height:280px; overflow:auto; }
-        button { font:inherit; color:inherit; text-align:left; border:1px solid transparent;
-          border-radius:7px; background:#1b2b3b; padding:9px 10px; cursor:pointer; }
-        button:hover, button:focus-visible { outline:0; border-color:#77acd1; background:#243c51; }
-        button:disabled { opacity:.45; cursor:default; } p { margin:8px 0 0; font-size:11px; color:#9eb2c5; }
-        [hidden] { display:none!important; }
-      </style><section><h2>Presets de flota</h2><div class="target"></div>
-        <div role="menu" aria-label="Presets de flota"></div>
-        <p class="empty" hidden>No hay presets guardados. Puedes crearlos en el diálogo de flota.</p>
-        <p>Aplica las cantidades y revisa el envío en el diálogo.</p></section>`;
+      shadow.innerHTML = '<style>'
+        + ':host{position:absolute;display:block;pointer-events:auto;width:192px;max-width:calc(100vw - 16px);'
+        + 'box-sizing:border-box;border:1px solid #3c5368;border-radius:10px;background:#101b27;'
+        + 'color:#e8f0f7;box-shadow:0 8px 24px #0009;font:12px/1.35 system-ui,sans-serif;padding:8px;z-index:1}'
+        + '*{box-sizing:border-box}h2{margin:0 0 6px;font-size:11px;color:#aabfd0;font-weight:600}'
+        + '[role=menu]{display:grid;gap:4px;max-height:240px;overflow:auto}'
+        + 'button{font:inherit;color:inherit;text-align:left;border:1px solid transparent;border-radius:6px;'
+        + 'background:#1c2e40;padding:7px 9px;cursor:pointer}button:hover,button:focus-visible{outline:0;'
+        + 'border-color:#78b2dc;background:#28465d}button:disabled{opacity:.4;cursor:default}'
+        + 'p{margin:6px 1px 0;color:#9fb5c7;font-size:10px}</style>'
+        + '<h2>Presets de flota</h2><div role="menu" aria-label="Presets de flota"></div><p role="status"></p>';
       current.host = host;
       current.shadow = shadow;
       current.list = shadow.querySelector('[role="menu"]');
-      current.empty = shadow.querySelector('.empty');
+      current.note = shadow.querySelector('[role="status"]');
       current.items = [];
-      shadow.querySelector('.target').textContent = current.route.querySelector('.route-header-tile-col:last-child .route-header-tile-name')?.textContent || '';
       shadow.addEventListener('keydown', event => {
-        // Keep native digit shortcuts from bypassing the guarded preset application.
         if (/^[1-8]$/.test(event.key)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
         if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
         event.preventDefault(); event.stopPropagation();
@@ -1734,67 +1798,169 @@
         const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
           : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
         items[next]?.focus({ preventScroll: true });
+        items[next]?.scrollIntoView({ block: 'nearest' });
       });
-      current.dialog.appendChild(host);
-      if (typeof host.showPopover === 'function') host.showPopover();
-      refreshPresets(current);
-      current.items.find(item => !item.disabled)?.focus({ preventScroll: true });
-      current.phase = 'menu';
+      current.radial.appendChild(host);
+      const presets = readPresets();
+      renderPresets(current, presets.records, !presets.known);
+      current.phase = presets.known ? 'menu' : 'loading';
+      current.frame = requestAnimationFrame(() => {
+        if (flow !== current) return;
+        current.anchor = anchor(current.radial);
+        place(current);
+      });
+      if (!presets.known) current.timer = setTimeout(() => preparePresets(current), NATIVE_GUARD_MS);
     }
 
-    function openDispatch(current) {
-      if (!enabled() || flow !== current || document.querySelector('dialog[open]')
-          || !visible(current.radial) || !current.radial.contains(current.fleet)
-          || current.fleet.dataset.actionKey !== 'fleet' || current.fleet.dataset.enabled !== 'true'
-          || current.fleet.disabled) { cancel(); return; }
+    function preparePresets(current) {
+      if (!validRadial(current) || current.phase !== 'loading') { cancel(); return; }
+      const dialog = dialogElement();
+      if (!(dialog instanceof HTMLDialogElement) || dialog.open) { cancel(); return; }
+      current.phase = 'preparing';
+      let prepared = false;
+      mask(current, dialog);
+      try {
+        // Native Fn returns for an already-open, nonmodal dialog outside its stack.
+        // This prepares the real controls without showModal, focus or a backdrop.
+        dialog.setAttribute('open', '');
+        nativeAction(() => current.fleet.click());
+        if (dialog.open && !dialog.matches(':modal') && dialog.dataset.mode === 'dispatch'
+            && dialog.dataset.direction === 'forward') {
+          current.expectedRoute = routeKey(routeElement(dialog));
+          const presets = readPresets();
+          prepared = Boolean(current.expectedRoute && presets.known);
+        }
+      } catch {
+        prepared = false;
+      } finally {
+        if (dialog.matches(':modal')) {
+          nativeAction(() => dialog.close());
+          prepared = false;
+        } else {
+          dialog.removeAttribute('open');
+          // Run the native close cleanup synchronously. There was no native open/close
+          // operation and no queued close event that could erase a later session's origins.
+          nativeEvent(dialog, new Event('close'));
+        }
+        unmask(current);
+      }
+      if (!prepared || !enabled() || flow !== current) { cancel(); return; }
+      const restored = freshRadial(current.start, current.end);
+      if (!restored) { cancel(); return; }
+      Object.assign(current, restored);
+      current.readyAt = performance.now() + NATIVE_GUARD_MS;
+      current.anchor = null;
+      current.phase = 'menu';
+      current.radial.appendChild(current.host);
+      renderPresets(current, readPresets().records);
+      current.frame = requestAnimationFrame(() => {
+        if (flow !== current) return;
+        current.anchor = anchor(current.radial);
+        place(current);
+      });
+    }
+
+    function choosePreset(current, record) {
+      if (!validRadial(current) || current.phase !== 'menu' || record.locked
+          || !current.records.includes(record)) return;
+      const selected = readPresets().records[record.index];
+      if (!selected || selected.key !== record.key || selected.locked) { cancel(); return; }
+      current.phase = 'choosing';
+      current.selected = record;
+      for (const item of current.items) item.disabled = true;
+      current.note.textContent = 'Preparando envío…';
+      current.timer = setTimeout(() => openForSend(current), Math.max(0, current.readyAt - performance.now()));
+    }
+    function openForSend(current) {
+      if (!validRadial(current) || current.phase !== 'choosing') { cancel(); return; }
+      const dialog = dialogElement();
+      if (!(dialog instanceof HTMLDialogElement) || dialog.open) { cancel(); return; }
       current.phase = 'opening';
-      nativeAction(() => current.fleet.click());
-      const dialog = one('#dispatch-dialog');
-      const route = dialog?.querySelector('[data-field="dispatch-route-slot"] .route-header');
-      if (!(dialog instanceof HTMLDialogElement) || !dialog.open || !route) { cancel(); return; }
       current.dialog = dialog;
-      current.route = route;
-      current.phase = 'dialog';
+      mask(current, dialog);
+      try { nativeAction(() => current.fleet.click()); } catch { cancel(); return; }
+      current.host.remove();
+      current.route = routeElement(dialog);
+      if (!validDialog(current) || document.querySelectorAll('dialog[open]').length !== 1) { cancel(); return; }
+      if (current.expectedRoute && routeKey(current.route) !== current.expectedRoute) {
+        handToNative(current, 'El destino o los sistemas de origen han cambiado. Revisa la ruta antes de enviar.');
+        return;
+      }
+      current.phase = 'ready';
+      current.openedRoute = routeKey(current.route);
+      if (!current.openedRoute) { handToNative(current); return; }
+      current.timer = setTimeout(() => sendPreset(current), NATIVE_GUARD_MS);
+    }
+    function sendPreset(current) {
+      if (!validDialog(current) || current.phase !== 'ready'
+          || document.querySelectorAll('dialog[open]').length !== 1) { cancel(); return; }
+      const buttons = [...current.dialog.querySelectorAll('[data-field="dispatch-presets"] .dispatch-preset-apply')];
+      const preset = buttons[current.selected.index];
+      const confirm = current.dialog.querySelector('[data-field="dispatch-confirm"]');
+      if (!(preset instanceof HTMLButtonElement) || presetKey(preset) !== current.selected.key || unavailable(preset)
+          || !(confirm instanceof HTMLButtonElement) || confirm.hidden) {
+        handToNative(current, 'Ese preset ya no está disponible. Elige uno de los presets actuales.'); return;
+      }
+      const expectedQuantities = presetQuantities(preset);
+      if (!expectedQuantities) { handToNative(current); return; }
+      current.confirmGuard = event => {
+        if (event.target !== confirm) return;
+        if (current.permitConfirm && !current.confirmed) { current.confirmed = true; return; }
+        event.preventDefault(); event.stopImmediatePropagation();
+      };
+      window.addEventListener('click', current.confirmGuard, true);
+      current.phase = 'applying';
+      try { nativeAction(() => preset.click()); } catch { handToNative(current); return; }
+      current.route = routeElement(current.dialog);
       if (!validDialog(current)) { cancel(); return; }
-      current.timer = setTimeout(() => showMenu(current), NATIVE_GUARD_MS);
+      if (routeKey(current.route) !== current.openedRoute) {
+        handToNative(current, 'La ruta ha cambiado. Revisa el destino y los sistemas de origen antes de enviar.'); return;
+      }
+      const error = current.dialog.querySelector('[data-field="dispatch-error"]');
+      if (confirm.disabled || (error && !error.hidden && error.textContent.trim())) {
+        handToNative(current); return;
+      }
+      if (!quantitiesMatch(current.dialog, expectedQuantities)) {
+        handToNative(current, 'No hay suficientes naves para este preset. Revisa las cantidades antes de enviar.'); return;
+      }
+      current.phase = 'submitted';
+      current.permitConfirm = true;
+      try { nativeAction(() => confirm.click()); } finally { current.permitConfirm = false; }
+      if (!current.confirmed) { handToNative(current); return; }
+      // Special native confirmations (e.g. ending beginner protection) remain in charge.
+      if (document.querySelectorAll('dialog[open]').length > 1) handToNative(current);
+      else current.timer = setTimeout(() => handToNative(current), 4000);
     }
 
     function begin(start, end) {
-      if (!enabled() || document.querySelector('dialog[open]') || !start.canvas.isConnected) return;
-      // Canvas hit-testing stays native. The marker row is shown only for a star.
-      // A fresh context menu lets us reject empty space without collapsing origins.
-      escapeNativeMenus();
-      const context = one('#app > .selection-menu');
-      const markers = context?.querySelector('.selection-menu-markers');
-      const previousRadial = one('#app > .star-actions');
-      if (!context?.hidden || !markers || visible(previousRadial)) return;
-      nativeEvent(start.canvas, new MouseEvent('contextmenu', {
-        bubbles: true, cancelable: true, composed: true, button: 2,
-        clientX: end.clientX, clientY: end.clientY,
-      }));
-      const star = visible(context) && !markers.hidden;
-      escapeNativeMenus();
-      if (!star || !context.hidden || visible(previousRadial)) return;
-      replayClick({ ...start, clientX: end.clientX, clientY: end.clientY }, end, false);
-      const radial = one('#app > .star-actions');
-      const fleet = radial?.querySelector('button.star-action-btn[data-action-key="fleet"]');
-      if (!visible(radial) || !(fleet instanceof HTMLButtonElement)) return;
-      const current = { phase: 'radial', radial, fleet, x: end.clientX, y: end.clientY,
-        host: null, observer: null, timer: null };
+      if (!enabled() || document.querySelector('dialog[open]')) return;
+      const found = freshRadial(start, end);
+      if (!found) return;
+      const current = { ...found, start, end: { pointerId: end.pointerId, clientX: end.clientX, clientY: end.clientY },
+        phase: 'radial', readyAt: performance.now() + NATIVE_GUARD_MS, anchor: null, timer: null, frame: null,
+        host: null, observer: null, dialog: null, maskedDialog: null, confirmed: false };
       flow = current;
+      if (!validRadial(current)) { cancel(); return; }
       current.observer = new MutationObserver(() => {
-        if (!enabled() || flow !== current) { cancel(); return; }
-        if (current.phase === 'radial') {
-          if (!visible(radial) || document.querySelector('dialog[open]')) cancel();
-        } else if (current.phase === 'dialog' || current.phase === 'menu') {
-          if (!validDialog(current)) cancel();
-          else if (current.phase === 'menu') refreshPresets(current);
+        if (flow !== current || !enabled()) { cancel(); return; }
+        if (['loading', 'menu', 'choosing'].includes(current.phase)) {
+          if (!validRadial(current) || (current.anchor !== null && anchor(current.radial) !== current.anchor)) {
+            cancel(); return;
+          }
+          if (current.phase === 'menu') renderPresets(current, readPresets().records);
+        } else if (['ready', 'submitted'].includes(current.phase)) {
+          if (!validDialog(current)) { cancel(); return; }
+          const error = current.dialog.querySelector('[data-field="dispatch-error"]');
+          const batch = current.dialog.querySelector('.dispatch-batch-report');
+          if (document.querySelectorAll('dialog[open]').length > 1
+              || (current.phase === 'submitted' && ((error && !error.hidden && error.textContent.trim())
+                || (batch && !batch.hidden)))) handToNative(current);
         }
       });
       current.observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true,
         attributeFilter: ['open', 'hidden', 'disabled', 'aria-disabled', 'data-mode', 'data-direction',
           'data-action-key', 'data-enabled', 'class', 'style'] });
-      current.timer = setTimeout(() => openDispatch(current), NATIVE_GUARD_MS);
+      showMenu(current);
     }
 
     on(window, 'pointerdown', event => {
@@ -1842,7 +2008,7 @@
     on(window, 'keydown', event => {
       if (replaying) return;
       if (event.key === 'Escape' && flow?.host) {
-        event.preventDefault(); event.stopImmediatePropagation(); cancel(); return;
+        event.preventDefault(); event.stopImmediatePropagation(); cancel(); escapeNativeMenus(); return;
       }
       if (!inMenu(event) && !['Shift', 'Control', 'Alt', 'Meta'].includes(event.key)) cancel();
     }, { capture: true });
@@ -1850,7 +2016,7 @@
     for (const name of ['scroll', 'wheel']) on(window, name, event => { if (!inMenu(event)) cancel(); }, { capture: true });
     for (const name of ['resize', 'pagehide', 'popstate', 'hashchange']) on(window, name, () => cancel(), { capture: true });
     on(window, 'blur', () => cancel());
-    return { cancel, destroy() { cancel(); destroyed = true; scope.abort(); } };
+    return { cancel, destroy() { cancel(); destroyed = true; scope.abort(); maskStyle.remove(); } };
   }
   // END SHIFT PRESETS
 
@@ -1916,6 +2082,23 @@
     const EVENT_TYPES = EVENT_GROUPS.flatMap((group) => group.entries.map(([type]) => type));
     const EVENT_META = new Map(EVENT_GROUPS.flatMap((group) =>
       group.entries.map(([type, label, icon]) => [type, { label, icon }])));
+    // Report subtypes change presentation only; all share the existing reports filter.
+    const REPORT_META = new Map([
+      ['probe', { label: 'Sondeo', icon: '🔎' }],
+      ['probe_failed', { label: 'Sondeo fallido', icon: '⚠️' }],
+      ['probe_incoming', { label: 'Sondeo recibido', icon: '📡' }],
+      ['battle', { label: 'Combate', icon: '⚔️' }],
+      ['defense', { label: 'Defensa', icon: '🛡️' }],
+      ['capture_success', { label: 'Sistema capturado', icon: '🚩' }],
+      ['capture_loss', { label: 'Sistema perdido', icon: '⚠️' }],
+      ['colonisation', { label: 'Colonización', icon: '🌌' }],
+      ['colonisation_failed', { label: 'Colonización abortada', icon: '⚠️' }],
+      ['hostility', { label: 'Hostilidad reducida', icon: '⚔️' }],
+      ['salvage', { label: 'Recursos recuperados', icon: '📦' }],
+      ['shipment_delivered', { label: 'Cargamento entregado', icon: '📦' }],
+      ['shipment_received', { label: 'Cargamento recibido', icon: '📦' }],
+      ['territory_raid', { label: 'Incursión en tu territorio', icon: '⚔️' }],
+    ]);
     const DEFAULT_EVENTS = Object.fromEntries(EVENT_GROUPS.flatMap((group) =>
       group.entries.map(([type]) => [type, group.enabled])));
     const storageAvailable = typeof gmGet === 'function' && typeof gmSet === 'function';
@@ -2400,7 +2583,8 @@
         refreshConfig();
         const type = typeof event.type === 'string' ? event.type : '';
         if (!eventAllowed(type)) { counters.filtered += 1; return false; }
-        const meta = EVENT_META.get(type);
+        const meta = (type === 'game.reports' ? REPORT_META.get(event.reportKind) : null)
+          || EVENT_META.get(type);
         const title = `${meta.icon} Old Light · ${meta.label}`;
         const systemName = plain(typeof event.systemName === 'string'
           ? event.systemName.replace(/\s+/g, ' ').trim() : '', 400);
@@ -3111,40 +3295,85 @@
 
     function number(value, round = false) {
       if (!finite(value)) return '';
-      return (round ? Math.round(value) : value).toLocaleString('es-ES', { maximumFractionDigits: 2 });
+      // Group four-digit values too; es-ES otherwise starts grouping at 10 000.
+      return (round ? Math.round(value) : value).toLocaleString('en-US', { maximumFractionDigits: 2 })
+        .replace(/[.,]/g, (separator) => separator === ',' ? '.' : ',');
     }
-    function count(value) {
-      if (!object(value) || value.kind === 'unknown' || !finite(value.quantity)) return '???';
-      return `${value.kind === 'approximate' || value.approximate === true ? '~' : ''}${number(value.quantity)}`;
+    function unknownCount(value) {
+      return !object(value) || !finite(value.quantity)
+        || (value.kind !== undefined && value.kind !== 'exact' && value.kind !== 'approximate');
+    }
+    function exactZero(value) {
+      return object(value) && !unknownCount(value) && value.quantity === 0
+        && value.kind !== 'approximate' && value.approximate !== true;
+    }
+    function emptyFleet(values) {
+      return Array.isArray(values) && values.every(exactZero);
     }
     function fleet(values) {
       if (!Array.isArray(values)) return '';
-      const entries = values.slice(0, 16).filter(object).map((item) => {
-        const name = shipNames[item.type] || clean(item.type, 40) || 'Tipo desconocido';
-        return `${name} ${count(item)}`;
+      if (!values.length) return 'ninguna';
+      const entries = values.slice(0, 16).filter(object);
+      if (!entries.length) return 'sin datos';
+      const visible = entries.filter((entry) => !exactZero(entry));
+      if (!visible.length) return 'ninguna';
+      const known = visible.filter((entry) => !unknownCount(entry));
+      const unknown = visible.filter(unknownCount);
+      const names = [...new Set(unknown.map((entry) => Object.hasOwn(shipNames, entry.type)
+        ? shipNames[entry.type] : clean(entry.type, 40) || 'tipo desconocido'))];
+      if (!known.length && Object.keys(shipNames).every((type) => unknown.some((entry) => entry.type === type))
+          && unknown.every((entry) => Object.hasOwn(shipNames, entry.type))) return 'desconocida';
+      const parts = known.map((entry) => {
+        const name = Object.hasOwn(shipNames, entry.type) ? shipNames[entry.type] : clean(entry.type, 40) || 'Tipo desconocido';
+        const approximate = entry.kind === 'approximate' || entry.approximate === true;
+        return `${approximate ? '~' : ''}${number(entry.quantity)} ${name}`;
       });
-      return entries.join(' · ') || '0';
+      if (names.length) parts.push(`sin datos: ${names.join(', ')}`);
+      return parts.join(' · ');
     }
-    function resources(value, fields) {
+    function resources(value, fields, omitZero = false) {
       if (!object(value)) return '';
-      return fields.filter(([key]) => finite(value[key]))
+      return fields.filter(([key]) => finite(value[key]) && (!omitZero || value[key] !== 0))
         .map(([key, label]) => `${label} ${number(value[key], true)}`).join(' · ');
     }
-    function locationText(value) {
+    function locationText(value, includeOwner = true) {
       if (!object(value)) return '';
       const name = clean(value.name, 150);
       const coordinates = finite(value.q) && finite(value.r) ? `(${value.q}, ${value.r})` : '';
-      const owner = clean(value.ownerName, 100);
+      const owner = includeOwner ? clean(value.ownerName, 100) : '';
       return [name || (coordinates ? '' : 'Desconocido'), coordinates, owner ? `Propietario: ${owner}` : '']
         .filter(Boolean).join(' · ');
+    }
+    function knownLocation(value) {
+      return object(value) && (Boolean(clean(value.name, 150)) || (finite(value.q) && finite(value.r)));
     }
     function dateText(item, detail) {
       const time = item.takenAt ?? stamp(detail?.createdAt);
       if (time === null) return '';
-      try {
-        return new Intl.DateTimeFormat(undefined, { year: 'numeric', month: '2-digit', day: '2-digit',
-          hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short' }).format(new Date(time));
-      } catch { return new Date(time).toISOString(); }
+      const date = new Date(time);
+      const pad = (value) => String(value).padStart(2, '0');
+      // Date's offset is evaluated at the report time, including daylight saving.
+      const offset = -date.getTimezoneOffset();
+      const absolute = Math.abs(offset);
+      const zone = offset === 0 ? 'UTC' : `UTC${offset > 0 ? '+' : '-'}${Math.floor(absolute / 60)}${absolute % 60 ? `:${pad(absolute % 60)}` : ''}`;
+      return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${pad(date.getFullYear() % 100)} · ${pad(date.getHours())}:${pad(date.getMinutes())} ${zone}`;
+    }
+    function reportKind(item, sections, variant) {
+      if (object(sections.probe) || item.verdict === 'Probed') {
+        if (object(sections.incoming)) return 'probe_incoming';
+        return sections.probe?.tier === 0 ? 'probe_failed' : 'probe';
+      }
+      const variants = {
+        capture_success: 'capture_success', capture_loss: 'capture_loss',
+        colonise_success: 'colonisation', colonise_abort: 'colonisation_failed',
+        hostility_damage: 'hostility', dormant_salvage: 'salvage',
+        shipment_delivered: variant.shipmentRole === 'recipient' ? 'shipment_received' : 'shipment_delivered',
+        territory_raid: 'territory_raid',
+      };
+      if (Object.hasOwn(variants, variant.kind)) return variants[variant.kind];
+      if (variant.kind) return 'report'; // Preserve the native title for a new, unknown variant.
+      if (object(sections.battle)) return object(sections.incoming) || sections.battle.targetOwnerKind === 'owned' ? 'defense' : 'battle';
+      return 'report';
     }
 
     function reportEvent(item, detail = null, unavailable = '') {
@@ -3153,59 +3382,84 @@
       const battle = object(sections.battle) ? sections.battle : null;
       const probe = object(sections.probe) ? sections.probe : null;
       const variant = object(detail?.variant) ? detail.variant : {};
+      const kind = reportKind(item, sections, variant);
+      const probing = ['probe', 'probe_failed', 'probe_incoming'].includes(kind);
       const lines = [];
-      if (item.title) lines.push(item.title);
-      if (item.verdict) lines.push(`Resultado: ${item.verdict}`);
-      const date = dateText(item, detail);
-      if (date) lines.push(`Fecha: ${date}`);
-      const from = locationText(route.from), to = locationText(route.to);
+      // Structured endpoints replace the English activity sentence when known.
+      if (item.title && (kind === 'report' || !knownLocation(route.from) || !knownLocation(route.to))) lines.push(item.title);
+      const to = locationText(route.to, false);
+      const from = locationText(route.from, route.from?.ownerKind !== 'owned');
+      if (to) lines.push(`📍 Destino: ${to}`);
+      const owner = clean(route.to?.ownerName, 100);
+      if (owner) lines.push(`Propietario: ${owner}`);
       if (from) lines.push(`Origen: ${from}`);
-      if (to) lines.push(`Destino: ${to}`);
+      const date = dateText(item, detail);
+      if (date) lines.push(`🕒 ${date}`);
+      const verdicts = { Victory: 'Victoria', Defeat: 'Derrota', Draw: 'Empate', Probed: 'Sondeo', Captured: 'Capturado' };
+      if (item.verdict && !(probing && item.verdict === 'Probed')
+          && !(['capture_success', 'capture_loss'].includes(kind) && item.verdict === 'Captured')) {
+        lines.push(`Resultado: ${Object.hasOwn(verdicts, item.verdict) ? verdicts[item.verdict] : item.verdict}`);
+      }
       if (battle) {
-        lines.push('');
+        const battleLines = [];
         for (const [field, label] of [
-          ['attackerShips', 'Flota atacante'], ['attackerLost', 'Pérdidas atacantes'],
-          ['defenderShips', 'Flota defensora'], ['defenderLost', 'Pérdidas defensoras'],
+          ['attackerShips', probing && kind !== 'probe_incoming' ? 'Enviadas' : 'Flota atacante'],
+          ['defenderShips', probing ? 'Defensa' : 'Flota defensora'],
         ]) {
           const text = fleet(battle[field]);
-          if (text) lines.push(`${label}: ${text}`);
+          if (text) battleLines.push(`${label}: ${text}`);
         }
-        const loot = resources(battle.plundered, [['pa', 'Palladium'], ['ir', 'Iridium'], ['credits', 'Créditos']]);
-        if (loot) lines.push(`Botín: ${loot}`);
+        const noAttackerLosses = emptyFleet(battle.attackerLost);
+        const noDefenderLosses = emptyFleet(battle.defenderLost);
+        if (!probing && noAttackerLosses && noDefenderLosses) battleLines.push('Bajas: ninguna.');
+        else {
+          for (const [field, label] of [['attackerLost', 'Bajas atacantes'], ['defenderLost', 'Bajas defensoras']]) {
+            if (probing && emptyFleet(battle[field])) continue;
+            const text = fleet(battle[field]);
+            if (text) battleLines.push(`${label}: ${text}`);
+          }
+        }
+        const loot = resources(battle.plundered, [['pa', 'Palladium'], ['ir', 'Iridium'], ['credits', 'Créditos']], true);
+        if (loot) battleLines.push(`Botín: ${loot}`);
+        else if (!probing) {
+          const knownLoot = resources(battle.plundered, [['pa', 'Palladium'], ['ir', 'Iridium'], ['credits', 'Créditos']]);
+          if (knownLoot) battleLines.push(`Botín: ${knownLoot}`);
+        }
         const loyalty = battle.loyaltyChange;
         if (object(loyalty)) {
           if (finite(loyalty.before) && finite(loyalty.after)) {
-            lines.push(`Lealtad: ${number(loyalty.before)} → ${number(loyalty.after)}`);
-          } else if (finite(loyalty.after)) lines.push(`Lealtad final: ${number(loyalty.after)}`);
-          if (finite(loyalty.damageDealt)) lines.push(`Daño a la lealtad: ${number(loyalty.damageDealt)}`);
-          if (loyalty.captured === true) lines.push(battle.targetOwnerKind === 'owned' ? 'Sistema perdido.' : 'Sistema capturado.');
+            battleLines.push(`Lealtad: ${number(loyalty.before)} → ${number(loyalty.after)}`);
+          } else if (finite(loyalty.after)) battleLines.push(`Lealtad final: ${number(loyalty.after)}`);
+          if (finite(loyalty.damageDealt) && loyalty.damageDealt !== 0) battleLines.push(`Daño a la lealtad: ${number(loyalty.damageDealt)}`);
+          if (loyalty.captured === true) battleLines.push(battle.targetOwnerKind === 'owned' ? 'Sistema perdido.' : 'Sistema capturado.');
         }
-        if (battle.combatDeficit === true) lines.push('Fuerza de combate reducida por déficit de créditos.');
+        if (battle.combatDeficit === true) battleLines.push('Fuerza de combate reducida por déficit de créditos.');
         if (finite(battle.defenderSectorBonusPct) && battle.defenderSectorBonusPct > 0) {
-          lines.push(`Bonificación del defensor: ${number(battle.defenderSectorBonusPct)}%.`);
+          battleLines.push(`Bonificación del defensor: ${number(battle.defenderSectorBonusPct)}%.`);
         }
+        if (battleLines.length) lines.push('', ...battleLines);
       }
       if (probe) {
         lines.push('');
-        if (probe.tier === 0) lines.push('Sondeo: todas las sondas perdidas; no se recuperó información.');
+        if (probe.tier === 0) lines.push('Todas las sondas perdidas. No se recuperó información.');
         else {
-          lines.push(finite(probe.tier) ? `Inteligencia obtenida: nivel ${number(probe.tier)}.` : 'Inteligencia obtenida:');
+          lines.push(finite(probe.tier) ? `📊 Inteligencia · nivel ${number(probe.tier)}` : '📊 Inteligencia obtenida');
           const intel = resources(probe, [['palladium', 'Palladium'], ['iridium', 'Iridium']]);
-          if (intel) lines.push(`Recursos detectados: ${intel}`);
+          if (intel) lines.push(intel);
           if (Array.isArray(probe.buildings) && probe.buildings.length) {
             const buildings = probe.buildings.slice(0, 20).filter(object).map((entry) => {
-              const name = buildingNames[entry.type] || clean(entry.type, 40) || 'Edificio desconocido';
-              const level = finite(entry.level) ? `${entry.approximate === true ? '~' : ''}${number(entry.level)}` : '???';
-              return `${name}: nivel ${level}`;
+              const name = Object.hasOwn(buildingNames, entry.type) ? buildingNames[entry.type] : clean(entry.type, 40) || 'Edificio desconocido';
+              const level = finite(entry.level) ? `${entry.approximate === true ? '~' : ''}${number(entry.level)}` : 'desconocido';
+              return `• ${name} ${level}`;
             });
-            if (buildings.length) lines.push('Edificios detectados:', ...buildings);
+            if (buildings.length) lines.push('', '🏗 Edificios (nivel)', ...buildings);
           }
-          if (Array.isArray(probe.inTransit) && probe.inTransit.length) lines.push(`En tránsito: ${fleet(probe.inTransit)}`);
+          if (Array.isArray(probe.inTransit) && probe.inTransit.length && !emptyFleet(probe.inTransit)) lines.push(`En tránsito: ${fleet(probe.inTransit)}`);
           if (finite(probe.loyalty) && !battle?.loyaltyChange) lines.push(`Lealtad: ${number(probe.loyalty)}`);
         }
       }
       if (object(sections.incoming) && finite(sections.incoming.attackerIntelTier) && sections.incoming.attackerIntelTier > 0) {
-        lines.push(`Información obtenida por el atacante: nivel ${number(sections.incoming.attackerIntelTier)}.`);
+        lines.push('', `Información obtenida por el atacante: nivel ${number(sections.incoming.attackerIntelTier)}.`);
       }
       const variantLines = [];
       if (variant.kind === 'capture_success' && battle?.loyaltyChange?.captured !== true) variantLines.push('Sistema capturado.');
@@ -3240,18 +3494,14 @@
       if (unavailable) lines.push('', `Detalle no disponible: ${unavailable}.`);
       if (!lines.some(Boolean)) lines.push('Se recibió un nuevo informe.');
       let message = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-      // Reserve space for the notifier's heading and system line. Slice without
-      // splitting UTF-16 surrogate pairs; final notifier also enforces 4096.
+      // Leave room for the notifier heading and preserve complete Unicode points.
       if (message.length > 3600) {
         let clipped = message.slice(0, 3560);
         if (/[\uD800-\uDBFF]$/.test(clipped)) clipped = clipped.slice(0, -1);
         message = `${clipped}\n[Resumen recortado]`;
       }
-      const defensive = object(sections.incoming) || variant.kind === 'capture_loss'
-        || battle?.targetOwnerKind === 'owned' || variant.shipmentRole === 'recipient';
-      const context = defensive ? route.to : route.from?.ownerKind === 'owned' ? route.from : null;
       return { type: 'game.reports', id: `report:${item.id}`, title: 'Old Light',
-        systemName: clean(context?.name, 150), message };
+        reportKind: kind, systemName: '', message };
     }
 
     function errorLabel(error) {
@@ -3871,6 +4121,12 @@
       throw new TypeError('Faltan las funciones de almacenamiento o copia.');
     }
 
+    // This public Web Client ID is supplied by the application maintainer.
+    // It is adopted only after the user opens Drive; stored/imported clients keep priority.
+    const defaultClientId = validateConfig({
+      clientId: options.defaultClientId === undefined ? '' : options.defaultClientId,
+    }).clientId;
+
     let config;
     try {
       const stored = gmGetValue(STORAGE_KEY, { clientId: '', autoBackup: false,
@@ -3888,7 +4144,7 @@
     let session = null;
     let mountNode = null;
     let inputs = null;
-    let statusCode = config.clientId ? 'disconnected' : 'missing_client';
+    let statusCode = config.clientId || defaultClientId ? 'disconnected' : 'missing_client';
     let applying = false;
     let configDeferred = false;
     let suppressChangedUntil = 0;
@@ -3947,11 +4203,12 @@
       inputs.auto.checked = config.autoBackup;
       inputs.remember.checked = config.rememberAccount;
       inputs.open.disabled = false;
-      inputs.open.textContent = config.clientId ? 'Abrir Google Drive' : 'Configurar Google Drive';
+      inputs.open.textContent = config.clientId || defaultClientId ? 'Abrir Google Drive' : 'Configurar Google Drive';
       inputs.close.disabled = !session;
       inputs.clear.disabled = !config.clientId && config.clientIdDraft === null;
       inputs.status.textContent = LABELS[statusCode];
-      inputs.active.textContent = config.clientId ? `Client ID activo: ${config.clientId}` : 'Todavía no hay un Client ID activo.';
+      inputs.active.textContent = config.clientId ? `Client ID activo: ${config.clientId}`
+        : defaultClientId ? 'Se utilizará la conexión integrada al abrir Google Drive.' : 'Todavía no hay un Client ID activo.';
       inputs.account.textContent = config.rememberAccount && config.accountHint
         ? `Cuenta recordada: ${config.accountHint}` : '';
     }
@@ -3985,7 +4242,7 @@
       const changed = Object.keys(next).some(key => next[key] !== config[key]);
       if (next.clientId !== config.clientId) configRevision += 1;
       config = next;
-      if (!session) report(config.clientId ? 'disconnected' : 'missing_client');
+      if (!session) report(config.clientId || defaultClientId ? 'disconnected' : 'missing_client');
       refreshControls();
       if (changed) sendConfig();
       return exportConfig();
@@ -4148,6 +4405,17 @@
 
     function openCompanion() {
       if (destroyed) return;
+      if (!config.clientId && defaultClientId) {
+        // Keep explicit clears/imports intact until the user chooses to open Drive.
+        // Persist before opening, so exports retain the actual app whose backups are used.
+        if (applying) { report('busy'); return; }
+        try {
+          storeConfig({ ...exportConfig(), clientId: defaultClientId });
+        } catch (_) {
+          inputStatus('storage_error');
+          return;
+        }
+      }
       const previous = session;
       const age = previous ? Date.now() - (previous.ready ? previous.lastSeen : previous.openedAt) : Infinity;
       if (previous?.popup && !previous.popup.closed &&
@@ -4229,8 +4497,8 @@
       clientLabel.append(client);
       const active = element('p', undefined, { className: 'drive-active-client' });
       const account = element('p', undefined, { className: 'drive-account' });
-      const setupNote = element('p', 'Necesitas un Client ID Web con este origen autorizado: ' + HELPER_ORIGIN +
-        '. El asistente de la ventana de Drive te guía para obtenerlo.');
+      const setupNote = element('p', 'Para usar tu propio proyecto, crea un Client ID Web con este origen autorizado: ' + HELPER_ORIGIN +
+        '. La configuración avanzada de la ventana de Drive incluye los pasos.');
       const clear = element('button', 'Borrar Client ID', { type: 'button' });
       const inputNote = element('p', 'Al escribir se guarda el borrador; se aplica cuando el Client ID esté completo. ' +
         'Vaciar el campo conserva la conexión actual. Usa Borrar Client ID para eliminarlo.');
@@ -4401,7 +4669,9 @@
   if (typeof GM_getValue === 'function' && typeof GM_setValue === 'function') {
     try {
       driveBackup = createDriveBackup({ getBackup: createBackup, applyBackup,
-        gmGetValue: GM_getValue, gmSetValue: GM_setValue });
+        gmGetValue: GM_getValue, gmSetValue: GM_setValue,
+        // Public Google Web client registered for the companion's GitHub Pages origin.
+        defaultClientId: '418130838768-qhd4o520fhi8hojd6t3g43luesr8v0n9.apps.googleusercontent.com' });
     } catch { /* La copia local y la automatización funcionan aunque GM no esté disponible. */ }
   }
 
