@@ -1,6 +1,6 @@
 # Old Light Auto Upgrade
 
-Userscript para [Old Light](https://oldlight.io/play) que mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, repone naves hasta los mínimos configurados, muestra presets de flota con Shift + clic y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.4.0**.
+Userscript para [Old Light](https://oldlight.io/play) que mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, repone naves hasta los mínimos configurados, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.5.0**.
 
 ## Instalación
 
@@ -42,15 +42,32 @@ Con el modo de naves estacionadas, enviar naves a una misión puede provocar su 
 
 ## Presets de flota con Shift + clic
 
-Con tus sistemas de origen seleccionados, haz **Shift + clic** sobre un hexágono que contenga un sistema con la acción **Fleet** disponible. El helper muestra tus presets guardados **junto al menú circular del hexágono**, sin mostrar el panel de despacho.
+Con tus sistemas de origen seleccionados, haz **Shift + clic** sobre un hexágono que contenga un sistema de destino. El helper muestra tus presets guardados **junto al menú circular del hexágono**, sin mostrar el panel de despacho.
 
-**Un clic en un preset envía directamente la flota a ese destino**, mediante los controles nativos del juego. El helper comprueba de nuevo el destino, los orígenes y las cantidades antes de confirmar una sola vez; los dobles clics no generan un segundo envío. Si el juego bloquea la orden o exige una decisión especial, como abandonar la protección inicial, muestra su diálogo. Puedes cerrar el menú con **Escape** o haciendo clic fuera.
+**Un clic en un preset completo envía directamente la flota a ese destino**, mediante los controles nativos del juego. Si faltan naves, ofrece guardar una misión pendiente con las opciones de espera y producción descritas más abajo. El helper comprueba de nuevo el destino, los orígenes y las cantidades antes de confirmar una sola vez; los dobles clics no generan un segundo envío. Si el juego bloquea la orden o exige una decisión especial, como abandonar la protección inicial, muestra su diálogo. Puedes cerrar el menú con **Escape** o haciendo clic fuera.
 
-Con varios sistemas de origen se conserva el despacho por lotes del juego: un origen con menos naves puede enviar una cantidad menor o quedar fuera. El resumen nativo muestra el resultado del lote.
+Con varios sistemas de origen, el envío directo conserva el despacho por lotes del juego cuando todos pueden completar el preset. Si el rango de disponibilidad indica que a alguno le faltan naves, el helper muestra el despacho para revisión. Para programar producción y espera, selecciona un único origen. El resumen nativo muestra el resultado del lote.
 
-El toggle de **Shift + clic** en **Flota** activa o desactiva el atajo y se guarda automáticamente. Está activado por defecto; al desactivarlo recuperas la multiselección nativa con Shift. Los clics sin ese modificador mantienen su funcionamiento normal. Los hexágonos vacíos o sin acción Fleet no abren presets de un destino anterior.
+El toggle de **Shift + clic** en **Flota** activa o desactiva el atajo y se guarda automáticamente. Está activado por defecto; al desactivarlo recuperas la multiselección nativa con Shift. Los clics sin ese modificador mantienen su funcionamiento normal. Los hexágonos vacíos no abren presets de un destino anterior. El selector sigue abierto cuando el mapa tarda en situar el menú circular o lo mueve unos píxeles.
 
-Los presets se crean y se administran en el despacho del juego. El helper utiliza sus botones y cantidades actuales.
+Los presets se crean y se administran en el despacho del juego. El helper recuerda localmente sus cantidades para poder mostrarlos aunque te quedes sin ninguna nave y el juego desactive **Fleet**. Necesita haber leído esos presets al menos una vez con naves disponibles. Antes de cualquier envío vuelve a comprobar el preset en los controles actuales del juego.
+
+### Si faltan naves para un preset
+
+Al elegir un preset que no puedes completar, se muestran las cantidades necesarias, las naves en base, en misión y en construcción. Puedes marcar dos opciones independientes:
+
+- **Producir las naves que faltan:** autoriza al helper a encargar el déficit real cuando lo permitan el astillero y los recursos. Descuenta las naves en base, en misión y ya en construcción. Está desactivado inicialmente.
+- **Enviar automáticamente cuando el preset esté completo:** espera hasta reunir **todas** las cantidades en la base y envía una sola misión al destino elegido. Puedes activarlo sin producir, para esperar al regreso de otras misiones. Está marcado inicialmente; sólo se programa cuando pulsas **Guardar misión pendiente**.
+
+Por ejemplo, un preset de **4 Probe + 2 Marauder**, con **1 Probe en base**, **2 Probe en misión** y **1 Marauder en construcción**, necesita producir **1 Probe + 1 Marauder**. El envío espera a tener los **4 Probe y 2 Marauder en base**. Si las que ya existen bastan para completar el preset, la producción pendiente es cero.
+
+En **Flota → Misiones pendientes** puedes cambiar ambas opciones, pausar, reanudar o cancelar la espera. Cancelar retira la misión del helper; las naves que el juego ya haya aceptado construir siguen en su cola. Si sólo activas producción, el encargo termina cuando reúne la flota y queda preparado para envío manual. No modifica tus mínimos permanentes ni los suma al déficit: utiliza la cantidad mayor de ambos objetivos cuando coinciden.
+
+Cada misión queda vinculada a la **cuenta, galaxia, sistema de origen y coordenadas exactas del destino**. Esta función requiere un **único origen seleccionado** y admite una misión pendiente por origen. Selecciona ese origen, mantén el helper activo y deja **Structures o Shipyard** abierto en una pestaña visible. Si cambias de sistema, la misión espera a que vuelvas. Los despachos inmediatos completos siguen admitiendo el comportamiento nativo por lotes.
+
+Las misiones pendientes se guardan localmente. Tras recargar, el helper puede recuperar el destino mediante los controles del mapa y comprobar de nuevo la ruta antes de enviar; esa recuperación puede desplazar la vista del mapa. Una interacción tuya durante la preparación la interrumpe. Si el juego no permite comprobar el destino o cambia el preset, queda pausada para revisión. También puedes reconectarla seleccionando el mismo destino y preset con **Shift + clic**.
+
+Si un envío queda **sin confirmar**, se detiene y no se repite automáticamente. Comprueba los movimientos del juego antes de usar la opción explícita de reanudación. Las copias locales y de Drive incluyen estas misiones y los presets recordados; **importar una copia deja las misiones pendientes en pausa** para revisarlas antes de reanudar.
 
 ## Notificaciones
 
@@ -94,7 +111,7 @@ Necesita una ruta válida de galaxia, sesión del juego y una pestaña visible c
 
 Usa el botón de la cabecera para **minimizar el panel a una barra compacta o restaurarlo**. Puedes moverlo arrastrando la cabecera, fuera de sus botones. Se guardan la posición, el estado minimizado y la última pestaña elegida; al cambiar el tamaño de la ventana, el panel se ajusta para mantener accesible la cabecera. Estos cambios de vista no envían avisos.
 
-Pulsa **Activo** para pausar tanto las mejoras como la reposición. La pausa puede mantener los avisos del juego si dejas un canal de notificaciones activo. Las preferencias se guardan y se sincronizan entre las pestañas del juego. **Restablecer orden** recupera el orden inicial correspondiente sin cambiar mínimos, edificios marcados ni pausa.
+Pulsa **Activo** para pausar las mejoras, la reposición y las misiones pendientes. La pausa puede mantener los avisos del juego si dejas un canal de notificaciones activo. Las preferencias se guardan y se sincronizan entre las pestañas del juego. **Restablecer orden** recupera el orden inicial correspondiente sin cambiar mínimos, edificios marcados ni pausa.
 
 El script respeta los costes, requisitos y colas del juego. Comparte una única petición pendiente entre edificios y naves, y espera su confirmación antes de enviar otra. Si una orden de naves queda sin confirmar y vence su plazo, **se pausa y pide comprobar la cola** antes de reanudar. Con Web Locks disponible, una sola pestaña controla los clics.
 
@@ -102,11 +119,11 @@ Deja **Structures o Shipyard abierto y la pestaña visible**. Los dos paneles de
 
 Cuando la pestaña está oculta, el cliente del juego aplaza el refresco de sus contadores y **el script no inicia nuevas acciones**. Los avisos dependen de los cambios que lleguen a la interfaz mientras se observa. No ofrece una cobertura completa de eventos del servidor ni actividad continua en segundo plano; al cerrar, suspender o descartar la pestaña, deja de actuar.
 
-La versión **1.4.0** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las construcciones ya encoladas mantienen su orden en el juego.
+La versión **1.5.0** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las construcciones ya encoladas mantienen su orden en el juego.
 
 ## Guardado local, exportación e importación
 
-Todo lo configurable se guarda automáticamente en este navegador, sin botones de Guardar ajustes: edificios, prioridades, mínimos y modo de flota, atajo de presets, objetivos de nivel, umbral del depósito, pausa, posición de la ventana, estado minimizado, pestaña seleccionada, secciones desplegadas, canales y filtros de avisos, credenciales de Telegram y configuración de Drive.
+Todo lo configurable se guarda automáticamente en este navegador, sin botones de Guardar ajustes: edificios, prioridades, mínimos y modo de flota, atajo y catálogo de presets recordados, misiones pendientes, objetivos de nivel, umbral del depósito, pausa, posición de la ventana, estado minimizado, pestaña seleccionada, secciones desplegadas, canales y filtros de avisos, credenciales de Telegram y configuración de Drive.
 
 Los campos de texto y números guardan el **borrador en cada cambio**. Los números y las credenciales se aplican cuando son válidos, tras 400 ms sin escribir o al salir del campo. Puedes recargar y continuar una edición incompleta; los valores válidos anteriores siguen activos mientras tanto. Los toggles se aplican inmediatamente; las prioridades y la posición se guardan al terminar el movimiento.
 
@@ -117,7 +134,7 @@ La pestaña **Datos** permite:
 
 El archivo contiene el token y Chat ID si los has guardado: consérvalo como una copia privada. Las colas del juego, las notificaciones pendientes, la caché de informes y los permisos de notificación del navegador son estado de ejecución o del navegador y no se transfieren. Al importarlo en otro navegador tendrás que conceder allí el permiso para avisos. La copia de ajustes no guarda una partida ni cambia las construcciones ya encargadas.
 
-Los ajustes del panel y sus borradores numéricos usan almacenamiento local del sitio; las credenciales, sus borradores, los objetivos de nivel y la configuración de avisos y Drive usan el almacenamiento GM del gestor de userscripts. No se publican dentro del código del repositorio.
+Los ajustes del panel y sus borradores numéricos usan almacenamiento local del sitio; las credenciales, sus borradores, los objetivos de nivel, las misiones pendientes y la configuración de avisos y Drive usan el almacenamiento GM del gestor de userscripts. No se publican dentro del código del repositorio.
 
 ## Copias en Google Drive
 

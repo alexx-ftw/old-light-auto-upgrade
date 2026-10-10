@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.4.0
-// @description  Mejoras por prioridad, mínimos de naves, presets con Shift + clic, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
+// @version      1.5.0
+// @description  Mejoras por prioridad, mínimos de naves, presets y misiones pendientes, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
 // @supportURL   https://github.com/alexx-ftw/old-light-auto-upgrade/issues
@@ -53,7 +53,15 @@
   if (window.top !== window.self || document.getElementById(HOST_ID)) return;
 
   let settings = readSettings();
-  const shiftPresets = createShiftPresetMenu({ isEnabled: () => settings.shiftPresetShortcut });
+  let missionAdapter = null;
+  let fleetWait = null;
+  let missionTargetResolver = null;
+  const shiftPresets = createShiftPresetMenu({
+    isEnabled: () => settings.shiftPresetShortcut && !missionAdapter?.isBusy(), onPreset: offerPresetMission,
+    readPresetCache: readMissionPresetCache, savePresetCache: saveMissionPresetCache,
+    canUseEmptyFleet: () => missionContext().selectionCount === 1 && SHIPS.every(([id]) => fleetCounts(id)?.parked === 0),
+    captureEmptyTarget: (button, quantities, key) => missionAdapter?.captureRadial(button, quantities, key),
+    onEmptyPreset: offerEmptyPresetMission });
   const notifier = createNotifier({ onSettingsChange: settingsChanged });
   const levelTargets = createLevelTargets({ buildings: BUILDINGS, send: event => notifier.emit(event),
     canNotify: () => notifier.isEventEnabled('game.level_target'),
@@ -86,6 +94,25 @@
   const numericUnsavedEditors = new Set();
   let numericRevision = 0;
 
+  missionTargetResolver = createMissionTargetResolver({ getContext: missionContext, canAct: canOperateMission });
+  missionAdapter = createNativeMissionAdapter({ getContext: missionContext, getFleet: fleetCounts,
+    canAct: canOperateMission, onBusyChange: schedule, onChange: schedule,
+    resolveTarget: (job, options) => missionTargetResolver.resolveTarget(job, options) });
+  fleetWait = createFleetWaitQueue({
+    getContext: missionQueueContext, getFleet: currentMissionFleet,
+    dispatch: async job => {
+      const result = await missionAdapter.dispatch(job);
+      if (result.status === 'sent') emitEvent('request.sent',
+        `Misión enviada: ${job.originName} → ${job.target.label}. ` + SHIPS.filter(([id]) => job.quantities[id] > 0)
+          .map(([id, name]) => `${job.quantities[id]} ${name}`).join(' · '), `mission:${job.id}`, job.originName);
+      else if (result.status === 'uncertain') emitEvent('request.unconfirmed',
+        `No se ha podido confirmar la misión a ${job.target.label}. Comprueba las misiones del juego.`,
+        `mission-uncertain:${job.id}`, job.originName);
+      return result;
+    },
+    onSettingsChange: () => { settingsChanged(); schedule(); },
+  });
+
   function emitEvent(type, message, id, systemName = text(document.querySelector('[data-field="nameplate-name"]'))) {
     notifier.emit({ type, id: id || `${notificationSession}:${++eventSequence}`,
       title: 'Old Light', systemName, message });
@@ -116,6 +143,58 @@
       depot: numericDraftText(value?.depot) };
   }
 
+  function validMissionPresetKey(key) {
+    if (typeof key !== 'string' || !key || key.length > 500
+        || key !== key.normalize('NFKC').replace(/\s+/g, ' ').trim()) return false;
+    const seen = new Set();
+    const parts = key.replace(/^Use\s+/i, '').split(/,\s+(?=\d)/);
+    return parts.length > 0 && parts.every(part => {
+      const match = part.match(/^([\d\s,.'’]+)\s+(Probe|Marauder|Sentinel|Vanguard)$/i);
+      const count = match ? Number(match[1].replace(/[^\d]/g, '')) : NaN;
+      if (!Number.isSafeInteger(count) || count <= 0 || count > 50000 || seen.has(match[2].toLowerCase())) return false;
+      seen.add(match[2].toLowerCase());
+      return true;
+    });
+  }
+
+  function normalizePresetCatalog(value) {
+    const scope = typeof value?.scope === 'string' && /^[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{1,96}$/.test(value.scope)
+      ? value.scope : '';
+    const seen = new Set();
+    const records = scope && Array.isArray(value?.records) ? value.records.slice(0, 64).filter(record => {
+      if (!validMissionPresetKey(record?.key) || typeof record.locked !== 'boolean' || seen.has(record.key)) return false;
+      seen.add(record.key);
+      return true;
+    }).map(({ key, locked }) => ({ key, locked })) : [];
+    return { scope, records };
+  }
+
+  function validPresetCatalog(value) {
+    return value && typeof value === 'object' && !Array.isArray(value)
+      && typeof value.scope === 'string' && Array.isArray(value.records) && value.records.length <= 64
+      && Object.keys(value).every(key => ['scope', 'records'].includes(key))
+      && (value.scope === '' ? value.records.length === 0 : /^[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{1,96}$/.test(value.scope))
+      && value.records.every(record => record && typeof record === 'object' && !Array.isArray(record)
+        && Object.keys(record).every(key => ['key', 'locked'].includes(key))
+        && validMissionPresetKey(record.key) && typeof record.locked === 'boolean')
+      && new Set(value.records.map(record => record.key)).size === value.records.length;
+  }
+
+  function readMissionPresetCache() {
+    if (settings.presetCatalog.scope !== missionContext().scope) return [];
+    return settings.presetCatalog.records.map((record, index) => ({ ...record, index,
+      label: record.key.replace(/^Use\s+/i, '') }));
+  }
+
+  function saveMissionPresetCache(records) {
+    const scope = missionContext().scope;
+    if (!scope) return;
+    const next = normalizePresetCatalog({ scope, records });
+    if (JSON.stringify(next) === JSON.stringify(settings.presetCatalog)) return;
+    settings.presetCatalog = next;
+    saveSettings();
+  }
+
   function validNumericDrafts(value) {
     const object = item => item && typeof item === 'object' && !Array.isArray(item);
     const draft = item => item === null || (typeof item === 'string' && item.length <= MAX_NUMERIC_DRAFT_LENGTH);
@@ -140,6 +219,7 @@
         shipOrder: normalizeOrder(value?.shipOrder, DEFAULT_SHIP_ORDER),
         countAway: value?.countAway === true,
         shiftPresetShortcut: value?.shiftPresetShortcut !== false,
+        presetCatalog: normalizePresetCatalog(value?.presetCatalog),
         fleetExpanded: value?.fleetExpanded === true,
         depotFillPercent: typeof value?.depotFillPercent === 'number' && Number.isFinite(value.depotFillPercent)
           ? Math.min(100, Math.max(1, Math.round(value.depotFillPercent))) : 90,
@@ -698,9 +778,10 @@
             <label class="count-away"><input type="checkbox">Contar también las naves en misión</label>
             <button type="button" class="reset-ships">Restablecer orden de naves</button>
             <p class="hint">Se descuentan las naves ya en construcción. La reposición disponible tiene prioridad sobre las mejoras.</p>
+            <div data-field="fleet-wait"></div>
             <div class="fleet-shortcut">
               <label><input type="checkbox" data-setting="shift-preset-shortcut">Shift + clic: mostrar presets de flota</label>
-              <p class="hint">Los presets aparecen junto al menú circular del hexágono. Un clic en uno envía la flota. Desactiva este atajo para usar la multiselección con Shift.</p>
+              <p class="hint">Los presets aparecen junto al menú circular del hexágono. Un clic envía el preset completo; si faltan naves, puedes esperar o encargar su producción. Desactiva este atajo para usar la multiselección con Shift.</p>
             </div>
           </details>
           <div class="settings-page" data-page="notifications" id="oldlight-settings-notifications" role="tabpanel" aria-labelledby="oldlight-tab-notifications" hidden></div>
@@ -744,6 +825,7 @@
         items: new Map(),
         fleetDetails: shadow.querySelector('.fleet-details'),
         fleetChoices: shadow.querySelector('.fleet-choices'),
+        fleetWaitContainer: shadow.querySelector('[data-field="fleet-wait"]'),
         countAway: shadow.querySelector('.count-away input'),
         shiftPresetShortcut: shadow.querySelector('[data-setting="shift-preset-shortcut"]'),
         resetShips: shadow.querySelector('.reset-ships'),
@@ -916,6 +998,7 @@
       }
       notifier.mount(ui.notificationContainer);
       levelTargets.mount(ui.levelTargetContainer);
+      fleetWait.mount(ui.fleetWaitContainer);
       if (driveBackup) driveBackup.mount(ui.driveContainer);
       else {
         const unavailable = document.createElement('p');
@@ -947,11 +1030,12 @@
     return {
       format: 'old-light-auto-upgrade-backup',
       schemaVersion: 1,
-      scriptVersion: '1.4.0',
+      scriptVersion: '1.5.0',
       exportedAt: new Date().toISOString(),
       settings: normalizeSettings(settings),
       notifications: notifier.exportConfig(),
       levelTargets: levelTargets.exportConfig(),
+      fleetMissions: fleetWait.exportConfig(),
       drive: driveBackup?.exportConfig?.() || { clientId: '', autoBackup: false },
     };
   }
@@ -979,6 +1063,7 @@
           || next.shipMinimums[id] < 0 || next.shipMinimums[id] > MAX_SHIP_MINIMUM)
         || !Number.isInteger(next.depotFillPercent) || next.depotFillPercent < 1 || next.depotFillPercent > 100
         || (next.numericDrafts !== undefined && !validNumericDrafts(next.numericDrafts))
+        || (next.presetCatalog !== undefined && !validPresetCatalog(next.presetCatalog))
         || (next.panelPosition != null && !normalizePanelPosition(next.panelPosition))
         || (next.activeTab !== undefined && !['buildings', 'fleet', 'notifications', 'data'].includes(next.activeTab))) {
       throw backupError('La copia contiene ajustes del helper inválidos.');
@@ -997,23 +1082,28 @@
     let targets;
     try { targets = levelTargets.validateConfig(value.levelTargets === undefined ? {} : value.levelTargets); }
     catch { throw backupError('La copia contiene objetivos de nivel inválidos.'); }
-    return { settings: normalizeSettings(next), notifications, drive, levelTargets: targets };
+    let missions;
+    try { missions = fleetWait.validateConfig(value.fleetMissions === undefined ? {} : value.fleetMissions); }
+    catch { throw backupError('La copia contiene misiones pendientes inválidas.'); }
+    return { settings: normalizeSettings(next), notifications, drive, levelTargets: targets, fleetMissions: missions };
   }
 
   function applyBackup(value) {
+    if (missionAdapter.isBusy()) throw backupError('Espera a que termine el intento de envío antes de importar una copia.');
     const next = validateBackup(value);
     shiftPresets.cancel();
     cancelNumericDraftTimers();
     ui?.cancelPriorityDrag?.();
     ui?.cancelPanelDrag?.();
     const previous = { settings, raw: localStorage.getItem(KEY), notifications: notifier.exportConfig(),
-      drive: driveBackup?.exportConfig?.(), levelTargets: levelTargets.exportConfig() };
+      drive: driveBackup?.exportConfig?.(), levelTargets: levelTargets.exportConfig(), fleetMissionsCheckpoint: fleetWait.backupCheckpoint() };
     importingBackup = true;
     try {
       localStorage.setItem(KEY, JSON.stringify(next.settings));
       notifier.importConfig(next.notifications);
       levelTargets.importConfig(next.levelTargets);
       if (driveBackup) driveBackup.importConfig(next.drive);
+      fleetWait.importConfig(next.fleetMissions);
       settings = next.settings;
       restoreNumericInputs();
       if (settings.enabled) { error = ''; unconfirmed = 0; }
@@ -1028,6 +1118,7 @@
       try { notifier.importConfig(previous.notifications); } catch { restored = false; }
       try { levelTargets.importConfig(previous.levelTargets); } catch { restored = false; }
       try { if (driveBackup && previous.drive) driveBackup.importConfig(previous.drive); } catch { restored = false; }
+      try { fleetWait.restoreCheckpoint(previous.fleetMissionsCheckpoint); } catch { restored = false; }
       settings = previous.settings;
       restoreNumericInputs();
       syncSettingsTabs();
@@ -1341,7 +1432,7 @@
   }
 
   function releaseLeadership() {
-    if (pending || observingNotifications) return;
+    if (pending || observingNotifications || missionAdapter?.isBusy()) return;
     if (releaseLock) releaseLock();
     else leader = false;
   }
@@ -1478,7 +1569,9 @@
     }
     if (!current.length && !ships.length) { releaseLeadership(); show('Selecciona uno de tus sistemas'); return; }
     const maintainFleet = fleetEnabled();
-    if (settings.excluded.length === BUILDINGS.length && !maintainFleet) {
+    const waitingMission = currentMissionJob();
+    const hasWaitingMission = waitingMission?.status === 'waiting';
+    if (settings.excluded.length === BUILDINGS.length && !maintainFleet && !hasWaitingMission) {
       if (observeNotifications) acquireLeadership(); else releaseLeadership();
       show('Marca un edificio o configura un mínimo de naves'); return;
     }
@@ -1486,6 +1579,11 @@
     if (!leader) {
       show(lockError ? 'No se pudo coordinar esta pestaña. Recarga para reintentar.' : 'Esperando control de esta pestaña');
       return;
+    }
+    if (missionAdapter.isBusy()) { show('Preparando la misión pendiente…'); return; }
+    if (hasWaitingMission && !document.querySelector('dialog[open]')) {
+      void fleetWait.tick();
+      if (missionAdapter.isBusy()) { show('Preparando la misión pendiente…'); return; }
     }
     if (now < nextClickAt) {
       show(unconfirmed ? 'Sin respuesta; reintentando en unos segundos…' : 'Esperando actualización del juego…');
@@ -1500,10 +1598,12 @@
     let fleetNotice = '';
     let fleetCandidate = null;
     const activeSystem = systemId();
-    if (maintainFleet) {
+    if (maintainFleet || hasWaitingMission) {
       const fleet = new Map(settings.shipOrder.map(id => [id, fleetCounts(id)]));
+      const missionDemand = fleetWait.productionDemand(missionQueueContext(), fleet);
+      const needed = (id, counts) => Math.max(maintainFleet ? fleetDeficit(id, counts) : 0, missionDemand?.[id] || 0);
       const unknown = !activeSystem || settings.shipOrder.some(id =>
-        settings.shipMinimums[id] > 0 && !fleet.get(id));
+        (settings.shipMinimums[id] > 0 || hasWaitingMission) && !fleet.get(id));
       const full = document.querySelector('[data-field="garrison"].active-garrison-chip--full');
       if (unknown) {
         fleetNotice = 'Naves: selecciona un solo sistema con recuentos disponibles';
@@ -1512,16 +1612,18 @@
       } else {
         const byId = new Map(ships.map(row => [row.id, row]));
         for (const id of settings.shipOrder) {
-          if (!settings.shipMinimums[id]) continue;
+          if (!settings.shipMinimums[id] && !missionDemand?.[id]) continue;
           const counts = fleet.get(id);
-          const deficit = fleetDeficit(id, counts);
+          const deficit = needed(id, counts);
           if (deficit === 0) continue;
           fleetNotice = 'Naves: esperando recursos, desbloqueo o hueco en la cola';
           const row = byId.get(id);
           const quantity = row ? prepareShip(row, deficit) : 0;
           if (!quantity) continue;
           const latest = fleetCounts(id);
-          if (activeSystem !== systemId() || !latest || fleetDeficit(id, latest) < quantity) break;
+          const latestDemand = fleetWait.productionDemand(missionQueueContext(), currentMissionFleet());
+          const latestNeed = latest ? Math.max(maintainFleet ? fleetDeficit(id, latest) : 0, latestDemand?.[id] || 0) : 0;
+          if (activeSystem !== systemId() || !latest || latestNeed < quantity) break;
           fleetCandidate = { ...row, kind: 'ship', quantity, system: activeSystem,
             fleetTotal: fleetTotal(latest), building: latest.building, batches: shipBatches(id),
             feedbackLine: shipFeedbackLine(), target: `×${quantity}` };
@@ -1560,7 +1662,9 @@
   }
 
   // BEGIN SHIFT PRESETS
-  function createShiftPresetMenu({ isEnabled = () => true } = {}) {
+  function createShiftPresetMenu({ isEnabled = () => true, onPreset = null,
+    readPresetCache = () => [], savePresetCache = () => {}, canUseEmptyFleet = () => false,
+    captureEmptyTarget = null, onEmptyPreset = null } = {}) {
     const MENU_ID = 'oldlight-shift-presets-menu';
     const NATIVE_GUARD_MS = 130;
     const MASK_ATTRIBUTE = 'data-oldlight-preset-preparing';
@@ -1624,18 +1728,37 @@
       return true;
     }
 
+    function stockComplete(dialog, expected) {
+      if (!expected) return false;
+      const inputs = [...dialog.querySelectorAll('[data-field="dispatch-quantities"] input.dispatch-step-input')];
+      return Object.entries(expected).every(([type, amount]) => {
+        if (amount === 0) return true;
+        const input = inputs.find(node => node.getAttribute('aria-label')?.toLowerCase() === 'number of ' + type + ' to send');
+        const value = input?.closest('.dispatch-ship-row')?.querySelector('.dispatch-ship-avail')?.textContent
+          ?.normalize('NFKC').replace(/\s+/g, ' ').trim();
+        if (!value || !/^[\d\s,.'’]+(?: to [\d\s,.'’]+)? available$/.test(value)) return false;
+        const minimum = Number(value.replace(/ available$/, '').split(' to ')[0].replace(/[^\d]/g, ''));
+        return Number.isSafeInteger(minimum) && minimum >= amount;
+      });
+    }
+
     function readPresets() {
       const dialog = dialogElement();
       const list = dialog?.querySelector('[data-field="dispatch-presets"]');
       const buttons = [...list?.querySelectorAll('.dispatch-preset-apply') || []]
         .filter(button => button instanceof HTMLButtonElement);
-      return {
-        known: buttons.length > 0 || Boolean(list?.querySelector('.dispatch-preset-add, .dispatch-preset-save-text')),
-        records: buttons.map((button, index) => ({
+      const known = buttons.length > 0 || Boolean(list?.querySelector('.dispatch-preset-add, .dispatch-preset-save-text'));
+      const records = buttons.map((button, index) => ({
           key: presetKey(button), label: presetKey(button).replace(/^Use\s+/i, ''),
           locked: unavailable(button), index,
-        })).filter(record => record.key),
-      };
+        })).filter(record => record.key);
+      if (known) {
+        try { savePresetCache(records); } catch { /* The native menu still works if local saving fails. */ }
+        return { known, records };
+      }
+      let cached = [];
+      try { cached = readPresetCache(); } catch { /* No cache is safer than an unknown preset. */ }
+      return { known: false, records: Array.isArray(cached) ? cached : [] };
     }
 
     function nativeAction(action) {
@@ -1699,8 +1822,10 @@
     function validRadial(current) {
       return enabled() && flow === current && !document.querySelector('dialog[open]')
         && visible(current.radial) && current.radial.contains(current.fleet)
-        && current.fleet.dataset.actionKey === 'fleet' && current.fleet.dataset.enabled === 'true'
-        && !current.fleet.disabled;
+        && current.fleet.dataset.actionKey === 'fleet'
+        && (current.emptyFleet ? canUseEmptyFleet() && current.radial.contains(current.inspect)
+          && current.inspect.dataset.enabled === 'true' && !current.inspect.disabled
+          : current.fleet.dataset.enabled === 'true' && !current.fleet.disabled);
     }
     function validDialog(current) {
       return enabled() && flow === current && current.dialog?.isConnected && current.dialog.open
@@ -1724,7 +1849,8 @@
       replayClick({ ...start, clientX: end.clientX, clientY: end.clientY }, end, false);
       const radial = one('#app > .star-actions');
       const fleet = radial?.querySelector('button.star-action-btn[data-action-key="fleet"]');
-      return visible(radial) && fleet instanceof HTMLButtonElement ? { radial, fleet } : null;
+      const inspect = radial?.querySelector('button.star-action-btn[data-action-key="inspect"]');
+      return visible(radial) && fleet instanceof HTMLButtonElement ? { radial, fleet, inspect } : null;
     }
 
     function place(current) {
@@ -1741,8 +1867,12 @@
       if (x + width > innerWidth - 8) x = leftEdge - width - 10;
       x = Math.max(8, Math.min(x, innerWidth - width - 8));
       const y = Math.max(8, Math.min(origin.top - height / 2, innerHeight - height - 8));
-      current.host.style.left = (x - origin.left) + 'px';
-      current.host.style.top = (y - origin.top) + 'px';
+      const left = (x - origin.left) + 'px';
+      const top = (y - origin.top) + 'px';
+      // This function also runs from the style observer. Avoid observing our
+      // own identical writes indefinitely when the native ticker moves a menu.
+      if (current.host.style.left !== left) current.host.style.left = left;
+      if (current.host.style.top !== top) current.host.style.top = top;
     }
     function renderPresets(current, records, pending = false) {
       if (flow !== current || !current.host) return;
@@ -1764,8 +1894,9 @@
         return item;
       });
       current.list.replaceChildren(...current.items);
-      current.note.textContent = pending ? 'Cargando presets…' : records.length
-        ? 'Clic para enviar' : 'No hay presets guardados.';
+      current.note.textContent = pending ? 'Cargando presets…' : current.emptyMessage || (records.length
+        ? current.emptyFleet ? 'Clic para preparar la espera o producción' : 'Clic para enviar'
+        : current.emptyFleet ? 'Abre una vez los presets de flota con naves disponibles para recordarlos aquí.' : 'No hay presets guardados.');
       place(current);
       if (focused >= 0) current.items[focused]?.focus({ preventScroll: true });
     }
@@ -1802,18 +1933,21 @@
       });
       current.radial.appendChild(host);
       const presets = readPresets();
-      renderPresets(current, presets.records, !presets.known);
-      current.phase = presets.known ? 'menu' : 'loading';
+      // Cached tiles describe quantities, not their destination. Prepare the
+      // native route for every opening before a preset can be selected.
+      renderPresets(current, presets.records, true);
+      current.phase = 'loading';
       current.frame = requestAnimationFrame(() => {
         if (flow !== current) return;
         current.anchor = anchor(current.radial);
         place(current);
       });
-      if (!presets.known) current.timer = setTimeout(() => preparePresets(current), NATIVE_GUARD_MS);
+      current.timer = setTimeout(() => preparePresets(current), NATIVE_GUARD_MS);
     }
 
     function preparePresets(current) {
       if (!validRadial(current) || current.phase !== 'loading') { cancel(); return; }
+      if (current.emptyFleet) { prepareEmptyFleet(current); return; }
       const dialog = dialogElement();
       if (!(dialog instanceof HTMLDialogElement) || dialog.open) { cancel(); return; }
       current.phase = 'preparing';
@@ -1860,11 +1994,46 @@
       });
     }
 
+    function prepareEmptyFleet(current) {
+      const records = readPresets().records;
+      const seed = records.find(record => !record.locked);
+      const quantities = seed && presetQuantities({ getAttribute: () => seed.key });
+      current.phase = 'preparing';
+      if (quantities && typeof captureEmptyTarget === 'function') {
+        try { current.emptyCapture = nativeAction(() => captureEmptyTarget(current.inspect, quantities, seed.key)); }
+        catch { current.emptyCapture = null; }
+      }
+      if (!enabled() || flow !== current) { cancel(); return; }
+      if (seed && !current.emptyCapture?.spec) {
+        current.emptyMessage = current.emptyCapture?.message || 'No se pudo identificar el destino. Vuelve a seleccionarlo.';
+      }
+      const restored = freshRadial(current.start, current.end);
+      if (!restored) { cancel(); return; }
+      Object.assign(current, restored);
+      current.phase = 'menu';
+      current.radial.appendChild(current.host);
+      current.readyAt = performance.now() + NATIVE_GUARD_MS;
+      renderPresets(current, records);
+      if (!current.emptyCapture?.spec) for (const item of current.items) item.disabled = true;
+      current.frame = requestAnimationFrame(() => {
+        if (flow === current) { current.anchor = anchor(current.radial); place(current); }
+      });
+    }
+
     function choosePreset(current, record) {
       if (!validRadial(current) || current.phase !== 'menu' || record.locked
           || !current.records.includes(record)) return;
       const selected = readPresets().records[record.index];
       if (!selected || selected.key !== record.key || selected.locked) { cancel(); return; }
+      if (current.emptyFleet) {
+        const quantities = presetQuantities({ getAttribute: () => record.key });
+        if (!current.emptyCapture?.spec || !quantities || typeof onEmptyPreset !== 'function') return;
+        const capture = { spec: { ...current.emptyCapture.spec, quantities,
+          target: { ...current.emptyCapture.spec.target, presetKey: record.key } }, handle: null };
+        cancel();
+        nativeAction(() => onEmptyPreset({ quantities, presetKey: record.key, capture, shortage: true }));
+        return;
+      }
       current.phase = 'choosing';
       current.selected = record;
       for (const item of current.items) item.disabled = true;
@@ -1917,10 +2086,17 @@
         handToNative(current, 'La ruta ha cambiado. Revisa el destino y los sistemas de origen antes de enviar.'); return;
       }
       const error = current.dialog.querySelector('[data-field="dispatch-error"]');
+      const shortage = !quantitiesMatch(current.dialog, expectedQuantities) || !stockComplete(current.dialog, expectedQuantities);
+      if (typeof onPreset === 'function') {
+        let offered = false;
+        try { offered = nativeAction(() => onPreset({ dialog: current.dialog, quantities: expectedQuantities,
+          presetKey: presetKey(preset), shortage })) === true; } catch { /* Preserve the native dialog. */ }
+        if (offered) { handToNative(current); return; }
+      }
       if (confirm.disabled || (error && !error.hidden && error.textContent.trim())) {
         handToNative(current); return;
       }
-      if (!quantitiesMatch(current.dialog, expectedQuantities)) {
+      if (shortage) {
         handToNative(current, 'No hay suficientes naves para este preset. Revisa las cantidades antes de enviar.'); return;
       }
       current.phase = 'submitted';
@@ -1936,7 +2112,9 @@
       if (!enabled() || document.querySelector('dialog[open]')) return;
       const found = freshRadial(start, end);
       if (!found) return;
-      const current = { ...found, start, end: { pointerId: end.pointerId, clientX: end.clientX, clientY: end.clientY },
+      const emptyFleet = (found.fleet.disabled || found.fleet.dataset.enabled !== 'true')
+        && typeof captureEmptyTarget === 'function' && typeof onEmptyPreset === 'function' && canUseEmptyFleet();
+      const current = { ...found, emptyFleet, start, end: { pointerId: end.pointerId, clientX: end.clientX, clientY: end.clientY },
         phase: 'radial', readyAt: performance.now() + NATIVE_GUARD_MS, anchor: null, timer: null, frame: null,
         host: null, observer: null, dialog: null, maskedDialog: null, confirmed: false };
       flow = current;
@@ -1944,10 +2122,21 @@
       current.observer = new MutationObserver(() => {
         if (flow !== current || !enabled()) { cancel(); return; }
         if (['loading', 'menu', 'choosing'].includes(current.phase)) {
-          if (!validRadial(current) || (current.anchor !== null && anchor(current.radial) !== current.anchor)) {
+          if (!validRadial(current)) {
             cancel(); return;
           }
-          if (current.phase === 'menu') renderPresets(current, readPresets().records);
+          // Pixi can position the radial after our first animation frame, or
+          // continue a small camera animation without changing its target.
+          // Position is presentation; the prepared route identifies the target.
+          const nextAnchor = anchor(current.radial);
+          if (nextAnchor !== current.anchor) {
+            current.anchor = nextAnchor;
+            place(current);
+          }
+          if (current.phase === 'menu') {
+            renderPresets(current, readPresets().records);
+            if (current.emptyFleet && !current.emptyCapture?.spec) for (const item of current.items) item.disabled = true;
+          }
         } else if (['ready', 'submitted'].includes(current.phase)) {
           if (!validDialog(current)) { cancel(); return; }
           const error = current.dialog.querySelector('[data-field="dispatch-error"]');
@@ -2019,6 +2208,1656 @@
     return { cancel, destroy() { cancel(); destroyed = true; scope.abort(); maskStyle.remove(); } };
   }
   // END SHIFT PRESETS
+
+  // BEGIN NATIVE MISSION ADAPTER
+// Native UI adapter for a single-origin deferred fleet mission.
+// No network methods are used: all dispatches pass through the game's buttons.
+function createNativeMissionAdapter({
+  getContext, getFleet, canAct = () => true, onBusyChange = () => {},
+  onChange = () => {}, resolveTarget = null,
+} = {}) {
+  const SHIPS = ['probe', 'marauder', 'sentinel', 'vanguard'];
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const SCOPE = /^[A-Za-z0-9_-]{1,64}\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const MASK = 'data-oldlight-mission-preparing';
+  const GUARD_MS = 130;
+  const SETTLE_MS = 8000;
+  const captures = new WeakMap();
+  const attached = new Map();
+  const attempted = new Set();
+  const lifetime = new AbortController();
+  const style = document.createElement('style');
+  style.textContent = `dialog[${MASK}] {display:none!important}dialog[${MASK}]::backdrop {display:none!important;background:transparent!important}`;
+  document.head.append(style);
+  let active = null;
+  let capturing = false;
+  let destroyed = false;
+
+  const clean = value => String(value ?? '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+  const keyOf = button => clean(button?.getAttribute('aria-label') || button?.textContent);
+  const unavailable = button => !(button instanceof HTMLButtonElement) || button.disabled
+    || button.getAttribute('aria-disabled') === 'true'
+    || Boolean(button.closest('.dispatch-preset-tile-locked'));
+  const nativeDialog = () => {
+    const nodes = document.querySelectorAll('#dispatch-dialog');
+    return nodes.length === 1 && nodes[0] instanceof HTMLDialogElement ? nodes[0] : null;
+  };
+  const route = dialog => dialog?.querySelector('[data-field="dispatch-route-slot"] .route-header');
+  const columns = dialog => [...route(dialog)?.querySelectorAll(':scope > .route-header-tile-col') || []];
+  const routeKey = dialog => {
+    const cols = columns(dialog);
+    return cols.length === 2 ? cols.map(col => col.innerHTML).join('\n') : null;
+  };
+  const inform = value => { try { onChange(value); } catch (_) {} };
+  const busyChanged = () => { try { onBusyChange(Boolean(active || capturing)); } catch (_) {} };
+
+  function context() {
+    let value;
+    try { value = getContext?.(); } catch (_) { return null; }
+    if (!value || !SCOPE.test(value.scope || '') || !UUID.test(value.originId || '')
+        || value.selectionCount !== 1) return null;
+    const originName = clean(value.originName);
+    if (!originName || originName.length > 400 || /^\d+ systems selected$/i.test(originName)) return null;
+    return { scope: value.scope, originId: value.originId.toLowerCase(), originName, selectionCount: 1 };
+  }
+
+  function quantities(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+        || Object.keys(value).some(key => !SHIPS.includes(key))) return null;
+    const result = {};
+    for (const type of SHIPS) {
+      const amount = value[type] ?? 0;
+      if (!Number.isSafeInteger(amount) || amount < 0 || amount > 50000) return null;
+      result[type] = amount;
+    }
+    return SHIPS.some(type => result[type] > 0) ? result : null;
+  }
+
+  function presetAmounts(button) {
+    const result = Object.fromEntries(SHIPS.map(type => [type, 0]));
+    const label = keyOf(button).replace(/^Use\s+/i, '');
+    if (!label) return null;
+    for (const part of label.split(/,\s+(?=\d)/)) {
+      const match = /^([\d\s,.'’]+)\s+(Probe|Marauder|Sentinel|Vanguard)$/i.exec(part);
+      const amount = match ? Number(match[1].replace(/[^\d]/g, '')) : NaN;
+      if (!Number.isSafeInteger(amount) || amount <= 0 || amount > 50000) return null;
+      const type = match[2].toLowerCase();
+      if (result[type]) return null;
+      result[type] = amount;
+    }
+    return quantities(result);
+  }
+
+  function sameAmounts(left, right) {
+    return Boolean(left && right && SHIPS.every(type => left[type] === right[type]));
+  }
+
+  function exactCounts() {
+    const result = {};
+    for (const type of SHIPS) {
+      let value;
+      try { value = getFleet?.(type); } catch (_) { return null; }
+      if (!value || !['parked', 'away', 'building'].every(key =>
+        Number.isSafeInteger(value[key]) && value[key] >= 0)) return null;
+      result[type] = { parked: value.parked, away: value.away, building: value.building };
+    }
+    return result;
+  }
+
+  function enough(expected) {
+    const counts = exactCounts();
+    return Boolean(counts && SHIPS.every(type => counts[type].parked >= expected[type]));
+  }
+
+  function coordinate(value) {
+    return value && Number.isSafeInteger(value.q) && Number.isSafeInteger(value.r)
+      && Math.abs(value.q) <= 10000000 && Math.abs(value.r) <= 10000000
+      ? { q: value.q, r: value.r } : null;
+  }
+
+  const sameCoordinate = (left, right) => Boolean(left && right && left.q === right.q && left.r === right.r);
+
+  function inspectCoordinate(inspector) {
+    if (!(inspector instanceof HTMLDialogElement)
+        || !inspector.matches('.info-modal[data-content-type="inspect"]')) return null;
+    const copy = inspector.querySelector('.inspect-copy-coord');
+    let text = copy?.getAttribute('aria-label')?.replace(/^(?:Copy|Copied) coordinates\s+/i, '')
+      || copy?.textContent || '';
+    if (!text) {
+      const label = [...inspector.querySelectorAll('.inspect-facts dt')]
+        .find(node => clean(node.textContent) === 'Coordinates');
+      text = label?.nextElementSibling?.textContent || '';
+    }
+    const match = /^\s*(-?\d+)\s*,\s*(-?\d+)\s*$/.exec(text);
+    return match ? coordinate({ q: Number(match[1]), r: Number(match[2]) }) : null;
+  }
+
+  function specOf(job) {
+    const value = job?.spec || job;
+    const requested = quantities(value?.quantities);
+    const point = coordinate(value?.target?.coordinate);
+    const key = clean(value?.target?.presetKey);
+    const routeSignature = value?.target?.routeKey;
+    if (!value || !SCOPE.test(value.scope || '') || !UUID.test(value.originId || '')
+        || !requested || !point || !key || key.length > 2000
+        || typeof routeSignature !== 'string' || routeSignature.length > 200000) return null;
+    return { scope: value.scope, originId: value.originId.toLowerCase(),
+      originName: clean(value.originName).slice(0, 400),
+      target: { coordinate: point, routeKey: routeSignature, presetKey: key,
+        label: clean(value.target.label).slice(0, 400) }, quantities: requested };
+  }
+
+  function signature(spec) {
+    return JSON.stringify([spec.scope, spec.originId, spec.target.coordinate,
+      spec.target.routeKey, spec.target.presetKey, spec.quantities]);
+  }
+
+  function attemptKey(job) {
+    const claimedAt = Number.isSafeInteger(job?.claimedAt) && job.claimedAt >= 0
+      ? job.claimedAt : null;
+    // The durable queue creates a fresh claim only after an explicit review of
+    // an uncertain send. Retrying that same claim must never send twice.
+    return JSON.stringify([job?.id, claimedAt]);
+  }
+
+  function sameContext(spec) {
+    const current = context();
+    return Boolean(current && current.scope === spec.scope && current.originId === spec.originId);
+  }
+
+  function result(status, message) { return { status, message }; }
+  function failure(message) { return { spec: null, handle: null, message }; }
+  function readyToAct() { try { return !destroyed && canAct() !== false; } catch (_) { return false; } }
+
+  function resetPreparedDialog(dialog) {
+    // A prepared dialog never entered the native modal stack. Do not queue a
+    // delayed close event that could erase a later dispatch's native origins.
+    if (dialog.open) dialog.removeAttribute('open');
+    dialog.dispatchEvent(new Event('close'));
+  }
+
+  function maskedInspector(click, allowedDialog = null) {
+    const modals = [...document.querySelectorAll('dialog.info-modal')];
+    if (!modals.length || modals.some(modal => modal.open)
+        || [...document.querySelectorAll('dialog[open]')].some(dialog => dialog !== allowedDialog)) {
+      throw new Error('Cierra los diálogos del juego antes de preparar esta misión.');
+    }
+    const previousFocus = document.activeElement;
+    const saved = modals.map(modal => ({ modal, mask: modal.getAttribute(MASK),
+      content: modal.dataset.contentType, body: modal.querySelector('.info-modal-body')?.firstChild }));
+    let opened = null;
+    try {
+      for (const { modal } of saved) { modal.setAttribute(MASK, 'inspect'); modal.setAttribute('open', ''); }
+      click();
+      const changed = saved.filter(({ modal, content, body }) => modal.dataset.contentType === 'inspect'
+        && (content !== 'inspect' || modal.querySelector('.info-modal-body')?.firstChild !== body));
+      if (changed.length !== 1) throw new Error('No se pudo identificar el destino del despacho.');
+      opened = changed[0].modal;
+      const point = inspectCoordinate(opened);
+      if (!point) throw new Error('El juego no ha mostrado unas coordenadas válidas para el destino.');
+      const action = opened.querySelector('.inspect-actions > button.inspect-action-btn');
+      return { coordinate: point, label: clean(opened.querySelector('.inspect-system-name-text')?.textContent),
+        isActive: !opened.querySelector('.info-modal-trailing .info-modal-header-btn'),
+        action: unavailable(action) ? null : action };
+    } finally {
+      for (const { modal, mask, content, body } of saved) {
+        modal.removeAttribute('open');
+        const changed = modal === opened || modal.dataset.contentType !== content
+          || modal.querySelector('.info-modal-body')?.firstChild !== body;
+        if (changed) modal.dispatchEvent(new Event('close'));
+        if (mask === null) modal.removeAttribute(MASK); else modal.setAttribute(MASK, mask);
+      }
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected && document.activeElement !== previousFocus) {
+        try { previousFocus.focus({ preventScroll: true }); } catch (_) {}
+      }
+    }
+  }
+
+  function makeCapture(current, requested, presetKey, target, binding) {
+    const spec = specOf({ ...current, quantities: requested,
+      target: { ...target, presetKey: clean(presetKey) } });
+    if (!spec || !sameContext(spec) || !exactCounts()) return failure('El sistema de origen ha cambiado. Selecciona un solo sistema y vuelve a intentarlo.');
+    const handle = binding ? {} : null;
+    if (handle) captures.set(handle, { spec, ...binding });
+    inform({ type: 'captured', spec });
+    return { spec, handle };
+  }
+
+  function capture(dialog, requestedInput, presetKey) {
+    if (destroyed || active || capturing) return failure('Ya hay una misión en preparación.');
+    const current = context(), requested = quantities(requestedInput);
+    if (!current || !requested || !exactCounts()) return failure('La misión diferida necesita un único sistema de origen con recuentos exactos.');
+    const cols = columns(dialog), originalRoute = routeKey(dialog);
+    if (!(dialog instanceof HTMLDialogElement) || dialog !== nativeDialog() || !dialog.open
+        || dialog.dataset.mode !== 'dispatch' || dialog.dataset.direction !== 'forward'
+        || cols.length !== 2 || !originalRoute
+        || /^\d+ systems selected$/i.test(clean(cols[0].querySelector('.route-header-tile-name')?.textContent))) {
+      return failure('Abre un despacho desde un único sistema antes de guardar la misión.');
+    }
+    const sourceButton = cols[0].querySelector('button.route-header-hex-clickable');
+    const button = cols[1].querySelector('button.route-header-hex-clickable');
+    const preset = [...dialog.querySelectorAll('[data-field="dispatch-presets"] .dispatch-preset-apply')]
+      .find(node => keyOf(node) === clean(presetKey) && sameAmounts(presetAmounts(node), requested));
+    if (unavailable(sourceButton) || unavailable(button) || unavailable(preset)) return failure('El preset o el destino ya no está disponible.');
+    capturing = true; busyChanged();
+    try {
+      const source = maskedInspector(() => sourceButton.click(), dialog);
+      if (!source.isActive) return failure('El origen del despacho ya no es tu sistema activo. Vuelve a abrir el preset.');
+      const endpoint = maskedInspector(() => button.click(), dialog);
+      if (routeKey(dialog) !== originalRoute) return failure('La ruta ha cambiado durante la preparación.');
+      return makeCapture(current, requested, presetKey, { routeKey: originalRoute,
+        label: endpoint.label || clean(cols[1].querySelector('.route-header-tile-name')?.textContent),
+        coordinate: endpoint.coordinate }, { kind: 'inspect', button });
+    } catch (error) { return failure(error.message || 'No se pudo preparar el destino de la misión.'); }
+    finally { capturing = false; busyChanged(); }
+  }
+
+  function captureInspect(inspector, requestedInput, presetKey) {
+    if (destroyed || active || capturing) return failure('Ya hay una misión en preparación.');
+    const current = context(), requested = quantities(requestedInput), point = inspectCoordinate(inspector);
+    if (!current || !requested || !point || !exactCounts()) return failure('La misión diferida necesita un único origen y las coordenadas del destino.');
+    if (!inspector.querySelector('.info-modal-trailing .info-modal-header-btn')) return failure('El destino es tu sistema activo. Elige otro sistema para enviar la misión.');
+    const action = inspector.querySelector('.inspect-actions > button.inspect-action-btn');
+    return makeCapture(current, requested, presetKey, { routeKey: '', coordinate: point,
+      label: clean(inspector.querySelector('.inspect-system-name-text')?.textContent) },
+    unavailable(action) ? null : { kind: 'dispatch', button: action });
+  }
+
+  function captureRadial(inspectButton, requestedInput, presetKey) {
+    if (destroyed || active || capturing) return failure('Ya hay una misión en preparación.');
+    const current = context(), requested = quantities(requestedInput);
+    const radial = inspectButton?.closest('.star-actions');
+    if (!current || !requested || !exactCounts()) return failure('La misión diferida necesita un único sistema de origen con recuentos exactos.');
+    if (unavailable(inspectButton) || !radial?.isConnected || inspectButton.dataset.actionKey !== 'inspect'
+        || inspectButton.dataset.enabled !== 'true' || getComputedStyle(radial).display === 'none') {
+      return failure('Vuelve a seleccionar el destino en el mapa.');
+    }
+    capturing = true; busyChanged();
+    try {
+      const endpoint = maskedInspector(() => inspectButton.click());
+      if (endpoint.isActive) return failure('El destino es tu sistema activo. Elige otro sistema para enviar la misión.');
+      // The radial button reads the current radial target on every invocation.
+      // Keep only the coordinates, never retain this mutable button as a handle.
+      // This identity-only capture can be paired with another cached preset.
+      return makeCapture(current, requested, presetKey, { routeKey: '',
+        label: endpoint.label, coordinate: endpoint.coordinate }, null);
+    } catch (error) { return failure(error.message || 'No se pudo identificar el destino del mapa.'); }
+    finally { capturing = false; busyChanged(); }
+  }
+
+  function attach(jobId, captured) {
+    if (destroyed || typeof jobId !== 'string' || !jobId || jobId.length > 128) return false;
+    const spec = specOf(captured?.spec), binding = captured?.handle ? captures.get(captured.handle) : null;
+    if (!spec || (binding && signature(binding.spec) !== signature(spec))) return false;
+    if (binding) attached.set(jobId, binding); else attached.delete(jobId);
+    inform({ type: 'attached', jobId, connected: Boolean(binding) });
+    return true;
+  }
+
+  function connected(job) {
+    const spec = specOf(job), binding = attached.get(job?.id);
+    return Boolean(!destroyed && spec && !attempted.has(attemptKey(job))
+      && ((binding && signature(binding.spec) === signature(spec)) || typeof resolveTarget === 'function'));
+  }
+
+  function delay(ms, operation) {
+    return new Promise((resolve, reject) => {
+      const abort = () => { clearTimeout(timer); reject(new Error(operation.reason || 'Preparación cancelada.')); };
+      const timer = setTimeout(() => { operation.controller.signal.removeEventListener('abort', abort); resolve(); }, ms);
+      if (operation.controller.signal.aborted) abort();
+      else operation.controller.signal.addEventListener('abort', abort, { once: true });
+    });
+  }
+
+  function validOperation(operation) {
+    return active === operation && !operation.controller.signal.aborted && readyToAct() && sameContext(operation.spec);
+  }
+
+  function assertOperation(operation) {
+    if (!validOperation(operation)) throw new Error(operation.reason || 'El origen, la selección o el estado del helper ha cambiado.');
+  }
+
+  function readError(dialog) {
+    const error = dialog?.querySelector('[data-field="dispatch-error"]');
+    return error && !error.hidden ? clean(error.textContent) : '';
+  }
+
+  function singleNativeRoute(dialog) {
+    const cols = columns(dialog);
+    return cols.length === 2 && !/^\d+ systems selected$/i.test(clean(cols[0].querySelector('.route-header-tile-name')?.textContent));
+  }
+
+  function inputsMatch(dialog, requested) {
+    const inputs = [...dialog.querySelectorAll('[data-field="dispatch-quantities"] input.dispatch-step-input')];
+    return SHIPS.every(type => {
+      const matches = inputs.filter(input => clean(input.getAttribute('aria-label')).toLowerCase() === `number of ${type} to send`);
+      return matches.length === 1 && Number(matches[0].value) === requested[type];
+    });
+  }
+
+  function restoreMask(operation) {
+    if (!operation.dialog) return;
+    if (operation.previousMask === null) operation.dialog.removeAttribute(MASK);
+    else operation.dialog.setAttribute(MASK, operation.previousMask);
+  }
+
+  function expose(operation, message) {
+    operation.keepDialog = true;
+    restoreMask(operation);
+    if (message && operation.dialog?.open && !readError(operation.dialog)) {
+      const error = operation.dialog.querySelector('[data-field="dispatch-error"]');
+      if (error) { error.textContent = message; error.hidden = false; }
+    }
+  }
+
+  async function actionFor(operation, binding) {
+    if (binding?.kind === 'inspect') {
+      const endpoint = maskedInspector(() => binding.button.click());
+      if (!sameCoordinate(endpoint.coordinate, operation.spec.target.coordinate)) throw new Error('El destino ya no coincide con la misión guardada.');
+      return endpoint.action;
+    }
+    if (binding?.kind === 'dispatch') return unavailable(binding.button) ? null : binding.button;
+    if (typeof resolveTarget !== 'function') return null;
+    const resolved = await resolveTarget(operation.job, { signal: operation.controller.signal });
+    try {
+      assertOperation(operation);
+      const inspector = resolved?.inspector;
+      if (!sameCoordinate(inspectCoordinate(inspector), operation.spec.target.coordinate)) throw new Error('No se ha podido recuperar el destino guardado.');
+      const action = inspector.querySelector('.inspect-actions > button.inspect-action-btn');
+      return unavailable(action) ? null : action;
+    } finally { if (typeof resolved?.cleanup === 'function') await resolved.cleanup(); }
+  }
+
+  async function dispatch(job) {
+    const spec = specOf(job), jobId = job?.id;
+    if (destroyed || !spec || typeof jobId !== 'string') return result('paused', 'La misión guardada no tiene un origen, destino o preset válido.');
+    const claim = attemptKey(job);
+    if (attempted.has(claim)) return result('uncertain', 'Esta misión ya pasó al juego. Comprueba sus movimientos antes de volver a enviarla.');
+    if (active || capturing) return result('waiting', 'Hay otra misión en preparación.');
+    if (!readyToAct()) return result('waiting', 'Esperando a que el helper pueda actuar.');
+    if (!sameContext(spec)) return result('waiting', `Selecciona ${spec.originName || 'el sistema de origen'} para continuar esta misión.`);
+    if (!enough(spec.quantities)) return result('waiting', 'Esperando a que todas las naves del preset estén en base.');
+    let binding = attached.get(jobId);
+    if (binding && signature(binding.spec) !== signature(spec)) return result('paused', 'La misión ha cambiado. Reconecta el preset y el destino antes de continuar.');
+    if (!binding && typeof resolveTarget !== 'function') return result('paused', 'Misión guardada. Reconecta su destino con Shift + clic y el mismo preset para reanudarla.');
+    if (document.querySelector('dialog[open]')) return result('waiting', 'Cierra los diálogos del juego para continuar la misión.');
+    const operation = { job, jobId, spec, controller: new AbortController(), dialog: null,
+      previousMask: null, confirmed: false, permitConfirm: false, keepDialog: false,
+      closed: false, reason: '', guard: null };
+    active = operation; busyChanged();
+    let outcome;
+    try {
+      const action = await actionFor(operation, binding);
+      // Let previously queued native close handlers finish before opening a new
+      // dispatch session, otherwise they may clear the new native origin list.
+      await delay(0, operation);
+      assertOperation(operation);
+      if (unavailable(action) || !enough(spec.quantities)) return outcome = result('waiting', 'El juego todavía no permite preparar la flota completa.');
+      const dialog = nativeDialog();
+      if (!dialog || document.querySelector('dialog[open]')) throw new Error('Hay otro diálogo del juego abierto. Se ha pausado la preparación.');
+      operation.dialog = dialog; operation.previousMask = dialog.getAttribute(MASK);
+      const oldRoute = route(dialog);
+      dialog.setAttribute(MASK, 'dispatch'); dialog.setAttribute('open', '');
+      action.click();
+      if (!dialog.open || dialog.dataset.mode !== 'dispatch' || dialog.dataset.direction !== 'forward'
+          || route(dialog) === oldRoute || !singleNativeRoute(dialog)) throw new Error('El juego no ha abierto un despacho de un único origen.');
+      await delay(GUARD_MS, operation);
+      assertOperation(operation);
+      const openedRoute = routeKey(dialog);
+      if (!openedRoute || (spec.target.routeKey && openedRoute !== spec.target.routeKey)) throw new Error('La ruta ha cambiado. Reconecta el destino antes de enviar.');
+      const endpoint = columns(dialog)[1].querySelector('button.route-header-hex-clickable');
+      if (unavailable(endpoint)) throw new Error('No se puede comprobar el destino del despacho.');
+      const identity = maskedInspector(() => endpoint.click(), dialog);
+      if (!sameCoordinate(identity.coordinate, spec.target.coordinate)) throw new Error('Las coordenadas del destino no coinciden con la misión.');
+      assertOperation(operation);
+      if (!enough(spec.quantities)) return outcome = result('waiting', 'Las naves disponibles han cambiado; se esperará al preset completo.');
+      const preset = [...dialog.querySelectorAll('[data-field="dispatch-presets"] .dispatch-preset-apply')]
+        .find(button => keyOf(button) === spec.target.presetKey && sameAmounts(presetAmounts(button), spec.quantities));
+      const confirm = dialog.querySelector('[data-field="dispatch-confirm"]');
+      if (unavailable(preset) || !(confirm instanceof HTMLButtonElement) || confirm.hidden) throw new Error('El preset guardado ya no está disponible. Vuelve a seleccionarlo.');
+      operation.guard = event => {
+        if (event.target !== confirm) return;
+        if (operation.permitConfirm && !operation.confirmed) {
+          operation.confirmed = true; attempted.add(claim); return;
+        }
+        event.preventDefault(); event.stopImmediatePropagation();
+      };
+      window.addEventListener('click', operation.guard, true);
+      preset.click();
+      assertOperation(operation);
+      if (routeKey(dialog) !== openedRoute || !singleNativeRoute(dialog)) throw new Error('La ruta ha cambiado al aplicar el preset.');
+      if (!enough(spec.quantities) || !inputsMatch(dialog, spec.quantities)) return outcome = result('waiting', 'El preset aún no está completo. Se esperará sin enviar una flota parcial.');
+      const error = readError(dialog);
+      if (confirm.disabled || error) { expose(operation); return outcome = result('paused', error || 'El juego no permite enviar esta misión. Revisa el despacho.'); }
+      const onClose = () => { operation.closed = true; };
+      dialog.addEventListener('close', onClose, { once: true, signal: operation.controller.signal });
+      operation.permitConfirm = true;
+      try { confirm.click(); } finally { operation.permitConfirm = false; }
+      if (!operation.confirmed) throw new Error('El juego no aceptó el clic de envío.');
+      const started = performance.now();
+      while (performance.now() - started < SETTLE_MS) {
+        if (operation.controller.signal.aborted) throw new Error(operation.reason || 'Se ha interrumpido la espera de confirmación.');
+        const other = [...document.querySelectorAll('dialog[open]')].find(node => node !== dialog);
+        const nativeError = readError(dialog);
+        if (other || nativeError) {
+          expose(operation);
+          return outcome = result('uncertain', other
+            ? 'El juego requiere una confirmación especial. Resuélvela en su diálogo; la misión no se reenviará automáticamente.'
+            : `${nativeError} Comprueba la misión en el juego antes de reintentar.`);
+        }
+        if (!dialog.open && operation.closed) return outcome = result('sent', 'El juego ha aceptado el envío de la misión.');
+        await delay(25, operation);
+      }
+      expose(operation);
+      return outcome = result('uncertain', 'No se ha recibido una confirmación clara del juego. Comprueba sus movimientos antes de volver a enviar.');
+    } catch (error) {
+      if (operation.confirmed) {
+        expose(operation);
+        return outcome = result('uncertain', `${error.message || 'Envío sin confirmar.'} Comprueba sus movimientos antes de reintentar.`);
+      }
+      return outcome = result('paused', error.message || 'No se pudo preparar la misión.');
+    } finally {
+      if (operation.guard) window.removeEventListener('click', operation.guard, true);
+      if (operation.dialog && !operation.keepDialog && operation.dialog.open) resetPreparedDialog(operation.dialog);
+      restoreMask(operation);
+      operation.controller.abort();
+      if (active === operation) active = null;
+      busyChanged(); inform({ type: 'dispatch', jobId, result: outcome });
+    }
+  }
+
+  function cancel(jobId = null, message = 'Preparación cancelada.') {
+    if (!active || (jobId !== null && active.jobId !== jobId)) return false;
+    active.reason = message;
+    active.controller.abort();
+    return true;
+  }
+
+  function detach(jobId) {
+    cancel(jobId, 'Se ha retirado esta misión de la cola.');
+    const removed = attached.delete(jobId);
+    inform({ type: 'detached', jobId });
+    return removed;
+  }
+
+  function destroy() {
+    if (destroyed) return;
+    destroyed = true; cancel(null, 'El helper se ha detenido.');
+    attached.clear(); lifetime.abort(); style.remove();
+  }
+
+  for (const eventName of ['pointerdown', 'keydown', 'wheel']) {
+    window.addEventListener(eventName, event => {
+      if (active && event.isTrusted) cancel(active.jobId, 'Has interactuado con el juego durante la preparación.');
+    }, { capture: true, signal: lifetime.signal });
+  }
+  return { capture, captureInspect, captureRadial, attach, dispatch, connected, detach, cancel, destroy,
+    isBusy: () => Boolean(active || capturing) };
+}
+  // END NATIVE MISSION ADAPTER
+
+  // BEGIN MISSION TARGET RESOLVER
+// Recover a saved destination through the native map and Inspector controls.
+// This resolver never builds ships, changes the active system, or submits fleets.
+function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
+  const MASK = 'data-oldlight-target-preparing';
+  const POINTER_ID = 2147483647;
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const SCOPE = /^[A-Za-z0-9_-]{1,64}\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let current = null;
+  let destroyed = false;
+  const clean = value => String(value ?? '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+  const one = selector => {
+    const nodes = document.querySelectorAll(selector);
+    return nodes.length === 1 ? nodes[0] : null;
+  };
+  const displayed = element => Boolean(element?.isConnected && !element.hidden
+    && !element.closest('[hidden]') && element.getClientRects().length
+    && getComputedStyle(element).display !== 'none');
+  const enabledButton = element => element instanceof HTMLButtonElement && !element.disabled
+    && element.getAttribute('aria-disabled') !== 'true';
+  const sameCoordinate = (left, right) => Boolean(left && right && left.q === right.q && left.r === right.r);
+  function coordinate(value) {
+    return value && Number.isSafeInteger(value.q) && Number.isSafeInteger(value.r)
+      && Math.abs(value.q) <= 10000000 && Math.abs(value.r) <= 10000000
+      ? { q: value.q, r: value.r } : null;
+  }
+  function inspectCoordinate(root) {
+    const copy = root?.querySelector('.inspect-copy-coord');
+    let value = copy?.getAttribute('aria-label')?.replace(/^(?:Copy|Copied) coordinates\s+/i, '')
+      || copy?.textContent || '';
+    if (!value) {
+      const label = [...root?.querySelectorAll('.inspect-facts dt') || []]
+        .find(node => clean(node.textContent) === 'Coordinates');
+      value = label?.nextElementSibling?.textContent || '';
+    }
+    const match = /^\s*(-?\d+)\s*,\s*(-?\d+)\s*$/.exec(value);
+    return match ? coordinate({ q: Number(match[1]), r: Number(match[2]) }) : null;
+  }
+  function jobSpec(job) {
+    const value = job?.spec || job;
+    const point = coordinate(value?.target?.coordinate);
+    return value && SCOPE.test(value.scope || '') && UUID.test(value.originId || '') && point
+      ? { scope: value.scope, originId: value.originId.toLowerCase(), coordinate: point } : null;
+  }
+  function contextMatches(spec) {
+    let value;
+    try { value = getContext?.(); } catch (_) { return false; }
+    return Boolean(value && value.scope === spec.scope && UUID.test(value.originId || '')
+      && value.originId.toLowerCase() === spec.originId && value.selectionCount === 1);
+  }
+  function assertOperation(operation) {
+    if (destroyed || current !== operation || operation.controller.signal.aborted) {
+      throw new Error(operation.reason || 'Se ha cancelado la recuperación del destino.');
+    }
+    let permitted = false;
+    try { permitted = canAct() !== false; } catch (_) {}
+    if (!permitted) throw new Error('El helper está pausado. No se ha recuperado el destino.');
+    if (!contextMatches(operation.spec)) {
+      throw new Error('El origen, la cuenta o la selección han cambiado. Selecciona un único sistema de origen para reanudar.');
+    }
+    if (performance.now() > operation.deadline) throw new Error('El mapa no ha permitido recuperar el destino a tiempo. Vuelve a intentarlo.');
+    const foreign = [...document.querySelectorAll('dialog[open]')].find(dialog => !operation.dialogs.has(dialog));
+    if (foreign) throw new Error('El juego ha abierto otro diálogo. Ciérralo antes de recuperar esta misión.');
+  }
+  function mask(operation, node) {
+    if (!operation.masks.has(node)) operation.masks.set(node, {
+      value: node.getAttribute(MASK), inert: node.getAttribute('inert'),
+    });
+    node.setAttribute(MASK, '');
+    node.setAttribute('inert', '');
+  }
+  function restoreMask(operation, node) {
+    const saved = operation.masks.get(node);
+    if (!saved) return;
+    if (saved.value === null) node.removeAttribute(MASK); else node.setAttribute(MASK, saved.value);
+    if (saved.inert === null) node.removeAttribute('inert'); else node.setAttribute('inert', saved.inert);
+    operation.masks.delete(node);
+  }
+  function prepareDialog(operation, dialog) {
+    assertOperation(operation);
+    if (!(dialog instanceof HTMLDialogElement) || dialog.open) throw new Error('Hay un diálogo del juego abierto. Se ha pausado la recuperación.');
+    operation.dialogs.set(dialog, { content: dialog.dataset.contentType,
+      body: dialog.querySelector('.info-modal-body')?.firstChild, used: false });
+    mask(operation, dialog);
+    // Native Fn leaves an already-open nonmodal dialog outside its stack.
+    dialog.setAttribute('open', '');
+  }
+  function releaseDialog(operation, dialog) {
+    const saved = operation.dialogs.get(dialog);
+    if (!saved) return;
+    operation.dialogs.delete(dialog);
+    // The normal path never invokes showModal/close, so no delayed close event
+    // can clear the native state of the adapter's next dispatch.
+    if (dialog.matches(':modal')) {
+      const settled = new Promise(resolve => {
+        const finish = () => { clearTimeout(timer); dialog.removeEventListener('close', finish); resolve(); };
+        const timer = setTimeout(finish, 1000);
+        dialog.addEventListener('close', finish, { once: true });
+        dialog.close();
+      });
+      operation.closeWaits.push(settled);
+    } else {
+      dialog.removeAttribute('open');
+      const changed = saved.used || dialog.dataset.contentType !== saved.content
+        || dialog.querySelector('.info-modal-body')?.firstChild !== saved.body;
+      if (changed) dialog.dispatchEvent(new Event('close'));
+    }
+    restoreMask(operation, dialog);
+  }
+  function finish(operation) {
+    if (operation.finished) return operation.finished;
+    // Cleanup is synchronous on the regular nonmodal path and starts before a
+    // trusted user event continues to the game's own event handlers.
+    operation.listeners.abort();
+    operation.observer?.disconnect();
+    for (const dialog of [...operation.dialogs.keys()]) releaseDialog(operation, dialog);
+    if (operation.nativeMenus) {
+      const foreign = document.querySelector('dialog[open]');
+      if (!foreign) document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    }
+    for (const node of [...operation.masks.keys()]) restoreMask(operation, node);
+    operation.style.remove();
+    if (operation.previousFocus instanceof HTMLElement && operation.previousFocus.isConnected
+        && document.activeElement !== operation.previousFocus) {
+      try { operation.previousFocus.focus({ preventScroll: true }); } catch (_) {}
+    }
+    if (current === operation) current = null;
+    operation.finished = Promise.all(operation.closeWaits).then(() => undefined);
+    return operation.finished;
+  }
+  function abort(operation, message) {
+    if (operation.controller.signal.aborted) return;
+    operation.reason = message;
+    operation.controller.abort();
+    void finish(operation);
+  }
+  function waitFor(operation, read, message, timeout = 5000) {
+    const until = Math.min(operation.deadline, performance.now() + timeout);
+    return new Promise((resolve, reject) => {
+      let timer = null;
+      const done = (error, value) => {
+        clearTimeout(timer);
+        operation.controller.signal.removeEventListener('abort', aborted);
+        error ? reject(error) : resolve(value);
+      };
+      const aborted = () => done(new Error(operation.reason || 'Se ha cancelado la recuperación del destino.'));
+      const check = () => {
+        try {
+          assertOperation(operation);
+          const value = read();
+          if (value) { done(null, value); return; }
+          if (performance.now() >= until) { done(new Error(message)); return; }
+          timer = setTimeout(check, 25);
+        } catch (error) { done(error); }
+      };
+      operation.controller.signal.addEventListener('abort', aborted, { once: true });
+      check();
+    });
+  }
+  function pause(operation, milliseconds) {
+    const until = performance.now() + milliseconds;
+    return waitFor(operation, () => performance.now() >= until, 'La recuperación del destino se ha interrumpido.', milliseconds + 100);
+  }
+  function center(element) {
+    const rect = element.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) throw new Error('El mapa no tiene una superficie disponible.');
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  }
+  function pointerClick(operation, element, point, captureCompatibility = false) {
+    assertOperation(operation);
+    const descriptor = Object.getOwnPropertyDescriptor(element, 'setPointerCapture');
+    const realCapture = element.setPointerCapture;
+    let patched = false;
+    if (captureCompatibility) {
+      if (typeof realCapture !== 'function' || (descriptor && descriptor.configurable === false)) {
+        throw new Error('El mapa no admite la selección automática. Reconecta el destino desde el juego.');
+      }
+      // A synthetic pointer has no OS capture record. Only this element and
+      // this synchronous helper gesture tolerate that one browser exception.
+      Object.defineProperty(element, 'setPointerCapture', { configurable: true, writable: true,
+        value(pointerId) {
+          try { return Reflect.apply(realCapture, this, [pointerId]); }
+          catch (error) {
+            if (this === element && pointerId === POINTER_ID && error?.name === 'NotFoundError') return;
+            throw error;
+          }
+        } });
+      patched = true;
+    }
+    try {
+      for (const type of ['pointerdown', 'pointerup']) element.dispatchEvent(new PointerEvent(type, {
+        bubbles: true, cancelable: true, composed: true, pointerId: POINTER_ID,
+        pointerType: 'mouse', isPrimary: true, button: 0, buttons: type === 'pointerdown' ? 1 : 0,
+        clientX: point.x, clientY: point.y,
+      }));
+    } finally {
+      if (patched) {
+        if (descriptor) Object.defineProperty(element, 'setPointerCapture', descriptor);
+        else delete element.setPointerCapture;
+      }
+    }
+    assertOperation(operation);
+  }
+  function escapeMenus(operation) {
+    assertOperation(operation);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  }
+  function freshRadial(operation, stage) {
+    assertOperation(operation);
+    if (!(stage instanceof HTMLCanvasElement) || !stage.isConnected) throw new Error('El mapa principal ya no está disponible.');
+    const menu = one('#app > .selection-menu');
+    const markers = menu?.querySelector('.selection-menu-markers');
+    const radial = one('#app > .star-actions');
+    if (!menu || !markers || !radial) throw new Error('El juego no ofrece los controles nativos para recuperar el destino.');
+    mask(operation, menu); mask(operation, radial);
+    escapeMenus(operation);
+    const point = center(stage);
+    stage.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, composed: true,
+      button: 2, clientX: point.x, clientY: point.y }));
+    operation.nativeMenus = true;
+    const hasStar = displayed(menu) && !markers.hidden;
+    escapeMenus(operation);
+    if (!hasStar) return null;
+    pointerClick(operation, stage, point);
+    const inspect = radial.querySelector('button.star-action-btn[data-action-key="inspect"]');
+    return displayed(radial) && enabledButton(inspect) && inspect.dataset.enabled === 'true' ? { radial, inspect } : null;
+  }
+  async function openInspector(operation, button) {
+    assertOperation(operation);
+    const candidates = [...document.querySelectorAll('dialog.info-modal')];
+    if (!candidates.length) throw new Error('El juego todavía no ha preparado el Inspector.');
+    for (const dialog of candidates) prepareDialog(operation, dialog);
+    button.click();
+    assertOperation(operation);
+    const opened = candidates.filter(dialog => {
+      const saved = operation.dialogs.get(dialog);
+      return dialog.dataset.contentType === 'inspect'
+        && (dialog.dataset.contentType !== saved.content || dialog.querySelector('.info-modal-body')?.firstChild !== saved.body);
+    });
+    if (opened.length !== 1 || opened[0].matches(':modal')) throw new Error('No se pudo abrir el Inspector del destino sin interferir con el juego.');
+    const inspector = opened[0];
+    operation.dialogs.get(inspector).used = true;
+    for (const dialog of candidates) if (dialog !== inspector) releaseDialog(operation, dialog);
+    await waitFor(operation, () => inspectCoordinate(inspector), 'El Inspector no ha mostrado las coordenadas del destino.', 2000);
+    return inspector;
+  }
+  async function resolveTarget(job, { signal } = {}) {
+    if (destroyed) throw new Error('El helper se ha detenido.');
+    if (current) throw new Error('Ya se está recuperando el destino de otra misión.');
+    const spec = jobSpec(job);
+    if (!spec || !contextMatches(spec)) throw new Error('Selecciona el único sistema de origen de la misión antes de recuperar su destino.');
+    if (signal?.aborted) throw new Error('La recuperación del destino se ha cancelado.');
+    if (document.querySelector('dialog[open]')) throw new Error('Cierra los diálogos del juego antes de recuperar el destino.');
+    if (displayed(one('#app > .star-actions')) || displayed(one('#app > .selection-menu'))) {
+      throw new Error('Cierra el menú del mapa antes de recuperar esta misión.');
+    }
+    const operation = { spec, controller: new AbortController(), listeners: new AbortController(),
+      masks: new Map(), dialogs: new Map(), closeWaits: [], previousFocus: document.activeElement,
+      deadline: performance.now() + 15000, reason: '', nativeMenus: false, finished: null,
+      style: document.createElement('style'), observer: null };
+    operation.style.textContent = `[${MASK}] {opacity:0!important;pointer-events:none!important}[${MASK}]::backdrop{opacity:0!important;background:transparent!important}`;
+    document.head.append(operation.style);
+    current = operation;
+    const options = { capture: true, signal: operation.listeners.signal };
+    for (const name of ['pointerdown', 'keydown', 'wheel']) window.addEventListener(name, event => {
+      if (event.isTrusted) abort(operation, 'Has interactuado con el juego. La recuperación del destino se ha pausado.');
+    }, options);
+    for (const name of ['resize', 'pagehide', 'blur', 'popstate', 'hashchange']) window.addEventListener(name,
+      event => { if (name !== 'blur' || event.target === window) abort(operation,
+        'La vista del juego ha cambiado. Vuelve a recuperar el destino.'); }, options);
+    if (signal) signal.addEventListener('abort', () => abort(operation, 'La recuperación del destino se ha cancelado.'),
+      { once: true, signal: operation.listeners.signal });
+    operation.observer = new MutationObserver(() => {
+      try { assertOperation(operation); } catch (error) { abort(operation, error.message); }
+    });
+    operation.observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true,
+      attributeFilter: ['open'] });
+    try {
+      assertOperation(operation);
+      const mapButton = one('#galaxy-map-btn');
+      const mapDialog = one('#galaxy-map-modal');
+      const viewport = one('#galaxy-map-viewport');
+      if (!enabledButton(mapButton) || !(mapDialog instanceof HTMLDialogElement) || !(viewport instanceof HTMLElement)) {
+        throw new Error('El mapa global no está disponible. Reconecta el destino desde el juego.');
+      }
+      prepareDialog(operation, mapDialog);
+      operation.dialogs.get(mapDialog).used = true;
+      mapButton.click();
+      if (mapDialog.matches(':modal')) throw new Error('No se pudo preparar el mapa sin abrir un diálogo visible.');
+      const input = await waitFor(operation, () => {
+        const node = viewport.querySelector('input.gmap-search-input');
+        return node instanceof HTMLInputElement && !node.disabled ? node : null;
+      }, 'El mapa global no ha cargado. Vuelve a intentar la conexión del destino.', 7000);
+      input.value = `${spec.coordinate.q}, ${spec.coordinate.r}`;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      const text = `Go to ${spec.coordinate.q}, ${spec.coordinate.r}`;
+      const matches = [...viewport.querySelectorAll('.gmap-search-item[role="option"]')]
+        .filter(node => clean(node.textContent) === text);
+      if (matches.length !== 1) throw new Error('El buscador del mapa no ha reconocido las coordenadas guardadas.');
+      assertOperation(operation); matches[0].click();
+      pointerClick(operation, viewport, center(viewport), true);
+      const info = mapDialog.querySelector('.galaxy-map-info');
+      if (!displayed(info) || !sameCoordinate(inspectCoordinate(info), spec.coordinate)) {
+        throw new Error('No hay una estrella verificable en las coordenadas guardadas. No se ha preparado ninguna misión.');
+      }
+      const jump = info.querySelector('button.galaxy-map-info-jump');
+      if (!enabledButton(jump)) throw new Error('El mapa no permite volver al destino guardado.');
+      assertOperation(operation); jump.click();
+      // The prepared map was outside Fn's stack, so native In() deliberately
+      // has nothing to close. Release only our own nonmodal preparation.
+      releaseDialog(operation, mapDialog);
+      const stage = one('#stage');
+      const locateDeadline = Math.min(operation.deadline, performance.now() + 6000);
+      while (performance.now() < locateDeadline) {
+        const found = freshRadial(operation, stage);
+        if (!found) { await pause(operation, 150); continue; }
+        let anchor = '', stableAt = performance.now();
+        await waitFor(operation, () => {
+          const next = found.radial.style.left + '|' + found.radial.style.top;
+          if (next !== anchor) { anchor = next; stableAt = performance.now(); }
+          return displayed(found.radial) && performance.now() - stableAt >= 170;
+        }, 'La cámara del mapa sigue moviéndose. Vuelve a recuperar el destino.', Math.max(100, locateDeadline - performance.now()));
+        // Re-hit-test after the camera settles; the first selected star may
+        // have been underneath the centre while the camera was still moving.
+        const settled = freshRadial(operation, stage);
+        if (!settled) { await pause(operation, 150); continue; }
+        await pause(operation, 130);
+        const inspector = await openInspector(operation, settled.inspect);
+        if (sameCoordinate(inspectCoordinate(inspector), spec.coordinate)) {
+          assertOperation(operation);
+          return { inspector, cleanup: () => finish(operation) };
+        }
+        releaseDialog(operation, inspector);
+        await pause(operation, 100);
+      }
+      throw new Error('El Inspector no coincide con las coordenadas guardadas. Reconecta el destino para continuar.');
+    } catch (error) {
+      await finish(operation);
+      throw error;
+    }
+  }
+  function cancel(message = 'Se ha cancelado la recuperación del destino.') {
+    if (!current) return false;
+    abort(current, message); return true;
+  }
+  function destroy() { destroyed = true; cancel('El helper se ha detenido.'); }
+  return { resolveTarget, cancel, destroy, isBusy: () => Boolean(current) };
+}
+  // END MISSION TARGET RESOLVER
+
+  // BEGIN FLEET WAIT QUEUE
+  // Adapters own all game interaction. This module only persists intent and plans deficits.
+  function createFleetWaitQueue(deps = {}) {
+    const KEY = 'old-light-fleet-wait:v1';
+    const SHIPS = ['probe', 'marauder', 'sentinel', 'vanguard'];
+    const NAMES = { probe: 'Probe', marauder: 'Marauder', sentinel: 'Sentinel', vanguard: 'Vanguard' };
+    const STATES = ['waiting', 'paused', 'sending', 'sent', 'uncertain'];
+    const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const SCOPE = /^[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{1,96}$/;
+    const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/;
+    const MAX_JOBS = 32;
+    const MAX_BYTES = 160 * 1024;
+    const MAX_QUANTITY = 1000000;
+    const MAX_TIME = 8640000000000000;
+    const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+    const copy = value => JSON.parse(JSON.stringify(value));
+    const zeros = () => Object.fromEntries(SHIPS.map(id => [id, 0]));
+    const defaults = () => ({ schemaVersion: 1, jobs: [] });
+    const now = () => {
+      const value = deps.now ? deps.now() : Date.now();
+      if (!Number.isSafeInteger(value) || value < 0 || value > MAX_TIME) throw new Error('Reloj no válido.');
+      return value;
+    };
+    const gmGet = deps.gmGetValue || (typeof GM_getValue === 'function' ? GM_getValue : null);
+    const gmSet = deps.gmSetValue || (typeof GM_setValue === 'function' ? GM_setValue : null);
+    const checkpoints = new WeakMap();
+    const retryAfter = new Map();
+    const encoder = typeof globalThis.TextEncoder === 'function' ? new globalThis.TextEncoder() : null;
+    let config = null;
+    let readError = false;
+    let storageError = false;
+    let notice = '';
+    let mounted = null;
+    let renderKey = '';
+    let destroyed = false;
+    let running = false;
+    let idSequence = 0;
+
+    function keys(value, allowed) {
+      return object(value) && Object.keys(value).every(key => allowed.includes(key));
+    }
+
+    function label(value, maximum, optional = false) {
+      if (optional && value === undefined) return '';
+      if (typeof value !== 'string' || value.length > maximum || (!optional && !value.trim()) ||
+          /[\u0000-\u001f\u007f]/.test(value)) throw new TypeError('Texto de misión no válido.');
+      return value;
+    }
+
+    function quantities(value, allowZero = false) {
+      if (!keys(value, SHIPS)) throw new TypeError('Tipos de nave no válidos.');
+      const result = zeros();
+      for (const id of SHIPS) {
+        const amount = value[id] === undefined ? 0 : value[id];
+        if (!Number.isInteger(amount) || amount < 0 || amount > MAX_QUANTITY) {
+          throw new TypeError('Cantidades de nave no válidas.');
+        }
+        result[id] = amount;
+      }
+      if (!allowZero && !SHIPS.some(id => result[id] > 0)) throw new TypeError('El preset está vacío.');
+      return result;
+    }
+
+    function target(value) {
+      if (!keys(value, ['routeKey', 'label', 'coordinate', 'presetKey']) || typeof value.routeKey !== 'string' ||
+          (value.routeKey !== '' && !value.routeKey.trim()) || value.routeKey.length > 32768 || /[\u0000\u007f]/.test(value.routeKey)) {
+        throw new TypeError('Destino de misión no válido.');
+      }
+      const result = { routeKey: value.routeKey, label: label(value.label, 500),
+        presetKey: label(label(value.presetKey, 500).normalize('NFKC').replace(/\s+/g, ' ').trim(), 500) };
+      if (value.coordinate !== undefined) {
+        if (!keys(value.coordinate, ['q', 'r']) || !['q', 'r'].every(key =>
+          Number.isSafeInteger(value.coordinate[key]) && Math.abs(value.coordinate[key]) <= 1000000000)) {
+          throw new TypeError('Coordenadas de misión no válidas.');
+        }
+        result.coordinate = { q: value.coordinate.q, r: value.coordinate.r };
+      }
+      if (value.routeKey === '' && !result.coordinate) throw new TypeError('Faltan las coordenadas del destino.');
+      return result;
+    }
+
+    function spec(value) {
+      if (!keys(value, ['scope', 'originId', 'originName', 'target', 'quantities', 'produce', 'autoSend']) ||
+          !SCOPE.test(value.scope || '') || !UUID.test(value.originId || '') ||
+          typeof value.produce !== 'boolean' || typeof value.autoSend !== 'boolean') {
+        throw new TypeError('Configuración de misión no válida.');
+      }
+      return { scope: value.scope, originId: value.originId.toLowerCase(),
+        originName: label(value.originName, 400), target: target(value.target),
+        quantities: quantities(value.quantities), produce: value.produce, autoSend: value.autoSend };
+    }
+
+    function validateConfig(value = {}) {
+      if (!keys(value, ['schemaVersion', 'jobs']) ||
+          (value.schemaVersion !== undefined && value.schemaVersion !== 1) ||
+          (value.jobs !== undefined && (!Array.isArray(value.jobs) || value.jobs.length > MAX_JOBS))) {
+        throw new TypeError('La cola de misiones no es válida.');
+      }
+      const identities = new Set();
+      const ids = new Set();
+      const jobs = (value.jobs || []).map(item => {
+        if (!keys(item, ['id', 'scope', 'originId', 'originName', 'target', 'quantities', 'produce',
+          'autoSend', 'status', 'createdAt', 'updatedAt', 'claimedAt', 'sentAt', 'message', 'needsReview']) ||
+            !ID.test(item.id || '') || ids.has(item.id) || !STATES.includes(item.status) ||
+            (item.needsReview !== undefined && typeof item.needsReview !== 'boolean')) {
+          throw new TypeError('Un pendiente de misión no es válido.');
+        }
+        const clean = spec({ scope: item.scope, originId: item.originId, originName: item.originName,
+          target: item.target, quantities: item.quantities, produce: item.produce, autoSend: item.autoSend });
+        const identity = clean.scope + '/' + clean.originId;
+        if (identities.has(identity)) throw new TypeError('Hay más de una misión pendiente para el mismo origen.');
+        for (const field of ['createdAt', 'updatedAt']) {
+          if (!Number.isSafeInteger(item[field]) || item[field] < 0 || item[field] > MAX_TIME) {
+            throw new TypeError('Fecha de misión no válida.');
+          }
+        }
+        if (item.updatedAt < item.createdAt) throw new TypeError('Fechas de misión desordenadas.');
+        for (const field of ['claimedAt', 'sentAt']) {
+          if (item[field] !== null && (!Number.isSafeInteger(item[field]) || item[field] < item.createdAt ||
+              item[field] > item.updatedAt)) throw new TypeError('Fecha de envío no válida.');
+        }
+        if (['sending', 'sent', 'uncertain'].includes(item.status) && item.claimedAt === null) {
+          throw new TypeError('Falta la marca de intento de envío.');
+        }
+        if ((item.status === 'sent') !== (item.sentAt !== null)) throw new TypeError('Confirmación de misión no válida.');
+        if (item.needsReview && !['paused', 'sending', 'uncertain'].includes(item.status)) {
+          throw new TypeError('El envío sin confirmar necesita revisión antes de reanudar.');
+        }
+        ids.add(item.id);
+        identities.add(identity);
+        return { id: item.id, ...clean, status: item.status, createdAt: item.createdAt,
+          updatedAt: item.updatedAt, claimedAt: item.claimedAt, sentAt: item.sentAt,
+          message: label(item.message, 500, true), needsReview: item.needsReview === true || item.status === 'uncertain' };
+      });
+      const normalized = { schemaVersion: 1, jobs };
+      const serialized = JSON.stringify(normalized);
+      let bytes = encoder ? encoder.encode(serialized).byteLength : 0;
+      if (!encoder) for (const character of serialized) {
+          const code = character.codePointAt(0);
+          bytes += code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
+          if (bytes > MAX_BYTES) break;
+      }
+      if (bytes > MAX_BYTES) throw new TypeError('La cola de misiones es demasiado grande para incluirla en una copia.');
+      return normalized;
+    }
+
+    function syncResult(value) {
+      if (value && typeof value.then === 'function') throw new Error('El guardado local debe ser síncrono.');
+      return value;
+    }
+
+    function cloneRaw(value) {
+      if (typeof globalThis.structuredClone === 'function') return globalThis.structuredClone(value);
+      if (value === null || typeof value !== 'object') return value;
+      if (Array.isArray(value)) return value.map(cloneRaw);
+      const result = {};
+      for (const key of Object.keys(value)) Object.defineProperty(result, key,
+        { value: cloneRaw(value[key]), enumerable: true, writable: true, configurable: true });
+      return result;
+    }
+
+    function readRaw() {
+      if (typeof deps.load === 'function') return { kind: 'value', value: cloneRaw(syncResult(deps.load())) };
+      if (typeof gmGet === 'function' && typeof gmSet === 'function') {
+        return { kind: 'value', value: cloneRaw(syncResult(gmGet(KEY, defaults()))) };
+      }
+      if (!globalThis.localStorage) throw new Error('No hay almacenamiento local disponible.');
+      return { kind: 'text', value: globalThis.localStorage.getItem(KEY) };
+    }
+
+    function configFromRaw(raw) {
+      return validateConfig(raw.kind === 'text' ? raw.value === null ? {} : JSON.parse(raw.value) : raw.value ?? {});
+    }
+
+    function readStored() { return configFromRaw(readRaw()); }
+
+    function writeRaw(raw) {
+      if (raw.kind === 'text') {
+        if (!globalThis.localStorage) throw new Error('No hay almacenamiento local disponible.');
+        if (raw.value === null) globalThis.localStorage.removeItem(KEY);
+        else globalThis.localStorage.setItem(KEY, raw.value);
+        return;
+      }
+      const safe = cloneRaw(raw.value);
+      if (typeof deps.save === 'function') {
+        if (syncResult(deps.save(safe)) === false) throw new Error('No se pudo confirmar el guardado.');
+      } else if (typeof gmGet === 'function' && typeof gmSet === 'function') {
+        if (syncResult(gmSet(KEY, safe)) === false) throw new Error('No se pudo confirmar el guardado.');
+      } else {
+        if (!globalThis.localStorage) throw new Error('No hay almacenamiento local disponible.');
+        globalThis.localStorage.setItem(KEY, JSON.stringify(safe));
+      }
+    }
+
+    function writeStored(next) {
+      writeRaw({ kind: 'value', value: copy(next) });
+    }
+
+    function refreshConfig() {
+      if (destroyed) return false;
+      try {
+        const next = readStored();
+        const changed = JSON.stringify(next) !== JSON.stringify(config);
+        config = next;
+        readError = false;
+        if (changed) render();
+        return true;
+      } catch (_) {
+        readError = true;
+        storageError = true;
+        notice = 'No se pudo leer la cola guardada. Las misiones pendientes están detenidas.';
+        render();
+        return false;
+      }
+    }
+
+    function ensureReady() {
+      if (destroyed) throw new Error('La cola de misiones está cerrada.');
+      if (!refreshConfig() || !config) throw new Error('No se puede usar una cola guardada inválida.');
+    }
+
+    function commit(value) {
+      if (destroyed) throw new Error('La cola de misiones está cerrada.');
+      const next = validateConfig(value);
+      try { writeStored(next); }
+      catch (_) {
+        storageError = true;
+        notice = 'No se pudo guardar el cambio. No se enviará ninguna misión sin guardar antes su estado.';
+        render();
+        throw new Error('No se pudo guardar la cola de misiones.');
+      }
+      config = next;
+      const retainedIds = new Set(next.jobs.map(job => job.id));
+      for (const id of retryAfter.keys()) if (!retainedIds.has(id)) retryAfter.delete(id);
+      readError = false;
+      storageError = false;
+      notice = '';
+      render();
+      try { deps.onSettingsChange?.(); } catch (_) { /* Intent is already persisted. */ }
+      return copy(next);
+    }
+
+    function timestamp(job) { return Math.max(now(), job?.updatedAt || 0); }
+
+    function changeJob(id, transform) {
+      ensureReady();
+      const job = config.jobs.find(item => item.id === id);
+      if (!job) throw new Error('La misión pendiente ya no existe.');
+      const result = transform(copy(job));
+      if (result === null) return commit({ ...config, jobs: config.jobs.filter(item => item.id !== id) });
+      result.updatedAt = timestamp(job);
+      return commit({ ...config, jobs: config.jobs.map(item => item.id === id ? result : item) });
+    }
+
+    function queue(value) {
+      ensureReady();
+      const clean = spec(value);
+      if (!clean.produce && !clean.autoSend) throw new Error('Activa la producción o el envío cuando se complete la flota.');
+      const existing = config.jobs.find(item => item.scope === clean.scope && item.originId === clean.originId);
+      if (existing && existing.status !== 'sent') throw new Error('Este origen ya tiene una misión pendiente. Cancélala antes de sustituirla.');
+      const retained = config.jobs.filter(item => item !== existing);
+      if (retained.length >= MAX_JOBS) throw new Error('Se ha alcanzado el límite de misiones pendientes.');
+      const time = now();
+      const random = globalThis.crypto?.randomUUID?.();
+      let id = random || 'fleet-' + time.toString(36) + '-' + (++idSequence).toString(36);
+      while (config.jobs.some(item => item.id === id)) id = 'fleet-' + time.toString(36) + '-' + (++idSequence).toString(36);
+      const job = { id, ...clean, status: 'waiting', createdAt: time, updatedAt: time,
+        claimedAt: null, sentAt: null, message: '', needsReview: false };
+      commit({ ...config, jobs: [...retained, job] });
+      return copy(job);
+    }
+
+    function update(id, patch) {
+      if (!keys(patch, ['produce', 'autoSend']) || Object.values(patch).some(value => typeof value !== 'boolean')) {
+        throw new TypeError('Opciones de misión no válidas.');
+      }
+      return changeJob(id, job => {
+        if (['sending', 'sent'].includes(job.status)) throw new Error('El envío de esta misión ya se ha iniciado.');
+        const next = { ...job, ...patch };
+        if (!next.produce && !next.autoSend && next.status === 'waiting') next.status = 'paused';
+        return next;
+      });
+    }
+
+    function reconnect(id, value) {
+      const refreshedTarget = target(value);
+      return changeJob(id, job => {
+        if (!['waiting', 'paused'].includes(job.status) || job.needsReview) {
+          throw new Error('Comprueba primero si esta misión llegó a enviarse.');
+        }
+        const previous = job.target.coordinate;
+        const next = refreshedTarget.coordinate;
+        if (!previous || !next || previous.q !== next.q || previous.r !== next.r ||
+            job.target.presetKey !== refreshedTarget.presetKey) {
+          throw new Error('El destino o el preset no coincide con la misión guardada.');
+        }
+        return { ...job, target: refreshedTarget };
+      });
+    }
+
+    function pause(id, message = '') {
+      const cleanMessage = label(message, 500, true);
+      return changeJob(id, job => {
+        if (['sending', 'sent'].includes(job.status)) throw new Error('El envío de esta misión ya se ha iniciado.');
+        if (job.status === 'uncertain') throw new Error('Comprueba primero si esta misión llegó a enviarse.');
+        return { ...job, status: 'paused', message: cleanMessage };
+      });
+    }
+
+    function resume(id) {
+      return changeJob(id, job => {
+        if (!['waiting', 'paused'].includes(job.status) || job.needsReview) throw new Error('Comprueba primero si esta misión llegó a enviarse.');
+        if (!job.produce && !job.autoSend) throw new Error('Activa la producción o el envío antes de reanudar.');
+        return { ...job, status: 'waiting', message: '' };
+      });
+    }
+
+    function acknowledge(id, { notSent = false } = {}) {
+      if (notSent !== true) throw new Error('Debes confirmar que la misión no se envió antes de reintentar.');
+      return changeJob(id, job => {
+        if (job.status !== 'uncertain' && !job.needsReview) throw new Error('La misión no tiene un envío sin confirmar.');
+        if (!job.produce && !job.autoSend) throw new Error('Activa la producción o el envío antes de reanudar.');
+        return { ...job, status: 'waiting', message: '', needsReview: false };
+      });
+    }
+
+    function cancel(id) {
+      return changeJob(id, job => {
+        if (job.status === 'sending') throw new Error('Espera a que termine el intento de envío.');
+        return null;
+      });
+    }
+
+    function productionPlan(job, fleet) {
+      const required = quantities(job?.quantities);
+      if (!fleet || typeof fleet !== 'object') return null;
+      const parked = zeros(), away = zeros(), building = zeros(), missing = zeros(), production = zeros();
+      for (const id of SHIPS) {
+        const counts = typeof fleet.get === 'function' ? fleet.get(id) : fleet[id];
+        if (!object(counts) || !['parked', 'away', 'building'].every(key =>
+          Number.isSafeInteger(counts[key]) && counts[key] >= 0) ||
+            !Number.isSafeInteger(counts.parked + counts.away + counts.building)) return null;
+        parked[id] = counts.parked;
+        away[id] = counts.away;
+        building[id] = counts.building;
+        missing[id] = Math.max(0, required[id] - counts.parked);
+        production[id] = Math.max(0, required[id] - counts.parked - counts.away - counts.building);
+      }
+      return { ready: SHIPS.every(id => missing[id] === 0), missing, production, parked, away, building };
+    }
+
+    function context(value) {
+      if (!object(value) || !SCOPE.test(value.scope || '') || !UUID.test(value.originId || '')) return null;
+      return { scope: value.scope, originId: value.originId.toLowerCase(), active: value.active === true, canAct: value.canAct === true };
+    }
+
+    function currentContext() {
+      try { return context(deps.getContext?.()); } catch (_) { return null; }
+    }
+
+    function currentFleet(job) {
+      try { return deps.getFleet?.(copy(job)); } catch (_) { return null; }
+    }
+
+    function matches(job, value) { return value && job.scope === value.scope && job.originId === value.originId; }
+
+    function getJobFor(value) {
+      ensureReady();
+      const current = context(value);
+      const job = config.jobs.find(item => matches(item, current));
+      return job ? copy(job) : null;
+    }
+
+    function productionDemand(value, fleet) {
+      if (destroyed || !refreshConfig()) return null;
+      const current = context(value);
+      if (!current?.active || !current.canAct) return null;
+      const job = config.jobs.find(item => matches(item, current) && item.status === 'waiting' && item.produce && !item.needsReview);
+      if (!job) return null;
+      const plan = productionPlan(job, fleet);
+      if (plan?.ready && !job.autoSend) {
+        try { finishPreparation(job.id); } catch (_) { /* No side effect after failed persistence. */ }
+        return null;
+      }
+      return plan ? { ...plan.production } : null;
+    }
+
+    function finishPreparation(id) {
+      return changeJob(id, job => ({ ...job, produce: false, status: 'paused',
+        message: 'Flota completa; preparada para envío manual.' }));
+    }
+
+    async function tick() {
+      if (destroyed || running || !refreshConfig()) return null;
+      const current = currentContext();
+      if (!current?.active || !current.canAct) { render(); return null; }
+      const job = config.jobs.find(item => matches(item, current) && item.status === 'waiting');
+      if (!job || !productionPlan(job, currentFleet(job))?.ready) { render(); return null; }
+      if (!job.autoSend) {
+        if (job.produce) try { finishPreparation(job.id); } catch (_) { /* Keep intent paused on save failure. */ }
+        return null;
+      }
+      if ((retryAfter.get(job.id) || 0) > now()) return null;
+      if (typeof deps.dispatch !== 'function' || job.needsReview) return null;
+      running = true;
+      let claim;
+      try {
+        const claimTime = Math.max(timestamp(job), (job.claimedAt ?? -1) + 1);
+        claim = { ...job, status: 'sending', updatedAt: claimTime, claimedAt: claimTime, message: '' };
+        commit({ ...config, jobs: config.jobs.map(item => item.id === job.id ? claim : item) });
+        // A settings callback, another tab, or an origin change can invalidate the claim.
+        if (destroyed || !refreshConfig()) return null;
+        const saved = config.jobs.find(item => item.id === claim.id);
+        if (saved?.status !== 'sending' || saved.claimedAt !== claim.claimedAt) return null;
+        const latestContext = currentContext();
+        if (!matches(saved, latestContext) || !latestContext.active || !latestContext.canAct ||
+            !productionPlan(saved, currentFleet(saved))?.ready) {
+          retryAfter.set(saved.id, now() + 1000);
+          changeJob(saved.id, item => ({ ...item, status: 'waiting', message: 'Esperando la flota y el origen correctos.' }));
+          return null;
+        }
+        let result;
+        try { result = await deps.dispatch(copy(saved)); }
+        catch (_) { result = { status: 'uncertain', message: 'No se pudo confirmar el envío. Comprueba las misiones del juego.' }; }
+        if (destroyed || !refreshConfig()) return null;
+        const active = config.jobs.find(item => item.id === claim.id);
+        if (active?.status !== 'sending' || active.claimedAt !== claim.claimedAt) return null;
+        const status = ['sent', 'waiting', 'paused', 'uncertain'].includes(result?.status) ? result.status : 'uncertain';
+        let message = '';
+        try { message = label(result?.message, 500, true); } catch (_) { /* Do not persist unbounded adapter data. */ }
+        if (status === 'uncertain' && !message) message = 'No se pudo confirmar el envío. Comprueba las misiones del juego.';
+        const finishedAt = timestamp(active);
+        const finished = { ...active, status, updatedAt: finishedAt, message,
+          sentAt: status === 'sent' ? finishedAt : null, needsReview: status === 'uncertain' };
+        // Autosave schedules another core pass. A known no-order result must
+        // wait for the regular observer/interval instead of spinning microtasks.
+        if (status === 'waiting') retryAfter.set(active.id, now() + 1000);
+        else retryAfter.delete(active.id);
+        commit({ ...config, jobs: config.jobs.map(item => item.id === active.id ? finished : item) });
+        return copy(finished);
+      } catch (_) {
+        // In particular, a failed final save leaves the durable sending claim in place.
+        render();
+        return null;
+      } finally { running = false; }
+    }
+
+    function exportConfig() { ensureReady(); return copy(config); }
+
+    function backupCheckpoint() {
+      if (destroyed) throw new Error('La cola de misiones está cerrada.');
+      const raw = readRaw();
+      let valid = null;
+      try { valid = configFromRaw(raw); } catch (_) { /* Explicit backup import can repair corrupt storage. */ }
+      const token = Object.freeze({});
+      checkpoints.set(token, { raw, valid });
+      return token;
+    }
+
+    function restoreCheckpoint(token) {
+      if (destroyed) throw new Error('La cola de misiones está cerrada.');
+      const checkpoint = token && checkpoints.get(token);
+      if (!checkpoint) throw new TypeError('El punto de recuperación de misiones no es válido.');
+      if (checkpoint.valid) importConfig(checkpoint.valid, { source: 'rollback' });
+      else {
+        // Only opaque snapshots created by this instance can restore invalid raw data.
+        // The invalid queue is restored intact and remains unable to dispatch or produce.
+        writeRaw(checkpoint.raw);
+        config = null;
+        readError = true;
+        storageError = true;
+        notice = 'Se ha restaurado la cola anterior, que no se puede leer. Las misiones pendientes están detenidas.';
+        render();
+        try { deps.onSettingsChange?.(); } catch (_) { /* Original raw data is already restored. */ }
+      }
+      checkpoints.delete(token);
+      return true;
+    }
+
+    function importConfig(value, { source = 'import' } = {}) {
+      if (!['import', 'rollback'].includes(source)) throw new TypeError('Origen de restauración no válido.');
+      const next = validateConfig(value);
+      const time = now();
+      for (const job of next.jobs) {
+        if (job.status === 'sent') continue;
+        job.updatedAt = Math.max(time, job.updatedAt);
+        if (source === 'import') {
+          job.needsReview = job.needsReview || ['sending', 'uncertain'].includes(job.status);
+          job.status = 'paused';
+          job.message = job.needsReview ? 'Importada en pausa con un posible envío anterior. Comprueba las misiones del juego.'
+            : 'Importada en pausa. Revisa origen, destino y flota antes de reanudar.';
+        } else if (job.status === 'sending') {
+          job.status = 'uncertain';
+          job.needsReview = true;
+          job.message = 'El envío quedó sin confirmar. Comprueba las misiones del juego.';
+        }
+      }
+      return commit(next);
+    }
+
+    function fleetText(amounts) { return SHIPS.filter(id => amounts[id] > 0).map(id => amounts[id] + ' ' + NAMES[id]).join(' · '); }
+
+    function render() {
+      if (!mounted || destroyed) return;
+      const current = currentContext();
+      const jobs = (config?.jobs || []).map(job => ({ job,
+        plan: matches(job, current) ? productionPlan(job, currentFleet(job)) : null }));
+      const key = JSON.stringify({ jobs, context: current, notice, readError, storageError });
+      if (key === renderKey) return;
+      renderKey = key;
+      const doc = mounted.ownerDocument;
+      const el = (tag, text, className) => {
+        const element = doc.createElement(tag);
+        if (text !== undefined) element.textContent = text;
+        if (className) element.className = className;
+        return element;
+      };
+      const section = el('section', undefined, 'oldlight-fleet-wait');
+      section.setAttribute('aria-label', 'Misiones pendientes');
+      section.hidden = !jobs.length && !notice;
+      const style = el('style');
+      style.textContent = '.oldlight-fleet-wait{font:inherit;color:inherit;max-width:100%;min-width:0}' +
+        '.oldlight-fleet-wait h4{font-size:13px;margin:12px 0 8px}.oldlight-fleet-wait article{padding:10px;border:1px solid #3b4b60;border-radius:8px;margin:8px 0;min-width:0;overflow-wrap:anywhere}' +
+        '.oldlight-fleet-wait p{font-size:12px;line-height:1.45;margin:4px 0;overflow-wrap:anywhere}' +
+        '.oldlight-fleet-wait .fw-muted{opacity:.75}.oldlight-fleet-wait .fw-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}' +
+        '.oldlight-fleet-wait button{font:inherit;font-size:12px;padding:5px 8px;max-width:100%;white-space:normal;border-radius:6px;border:1px solid #52647c;background:#223046;color:inherit;cursor:pointer}' +
+        '.oldlight-fleet-wait button:disabled{opacity:.5;cursor:default}.oldlight-fleet-wait label{display:flex;align-items:flex-start;gap:6px;font-size:12px;margin-top:6px}' +
+        '.oldlight-fleet-wait input{margin:2px 0 0}.oldlight-fleet-wait .fw-error{color:#f8c58a}';
+      section.append(style, el('h4', 'Misiones pendientes'));
+      if (notice) {
+        const warning = el('p', notice, 'fw-error');
+        warning.setAttribute('role', 'status');
+        section.append(warning);
+      }
+      const safeAction = action => {
+        try { action(); } catch (error) { notice = error.message; renderKey = ''; render(); }
+      };
+      for (const { job, plan } of jobs) {
+        const article = el('article');
+        article.dataset.fleetWaitJob = job.id;
+        article.append(el('strong', job.target.label), el('p', 'Desde ' + job.originName, 'fw-muted'),
+          el('p', fleetText(job.quantities)));
+        const statuses = { paused: 'Pausada', sending: 'Enviando…', sent: 'Enviada',
+          uncertain: 'Envío sin confirmar. Comprueba las misiones del juego.' };
+        let state = statuses[job.status];
+        if (job.status === 'waiting') {
+          state = plan?.ready ? (job.autoSend ? 'Flota completa; lista para enviar.' : 'Flota completa. Envío automático desactivado.')
+            : plan ? 'Esperando: ' + fleetText(plan.missing) : 'Selecciona este origen para comprobar su flota.';
+        }
+        const status = el('p', state);
+        status.setAttribute('role', 'status');
+        article.append(status);
+        if (job.message && job.message !== state) article.append(el('p', job.message, 'fw-muted'));
+        if (job.produce && job.status === 'waiting' && plan && fleetText(plan.production)) {
+          article.append(el('p', 'Por producir: ' + fleetText(plan.production), 'fw-muted'));
+        }
+        if (['waiting', 'paused', 'uncertain'].includes(job.status)) {
+          for (const [field, text] of [['produce', 'Producir las naves que faltan'], ['autoSend', 'Enviar cuando la flota esté completa']]) {
+            const row = el('label');
+            const input = el('input');
+            input.type = 'checkbox';
+            input.checked = job[field];
+            input.disabled = readError;
+            input.dataset.fleetWaitOption = field;
+            input.addEventListener('change', () => safeAction(() => update(job.id, { [field]: input.checked })));
+            row.append(input, el('span', text));
+            article.append(row);
+          }
+        }
+        const actions = el('div', undefined, 'fw-actions');
+        const button = (text, action, disabled = false) => {
+          const control = el('button', text);
+          control.type = 'button';
+          control.disabled = disabled || readError;
+          control.addEventListener('click', () => safeAction(action));
+          actions.append(control);
+        };
+        if (job.status === 'waiting') button('Pausar', () => pause(job.id));
+        if (job.status === 'paused' && !job.needsReview) button('Reanudar', () => resume(job.id));
+        if (job.status === 'uncertain' || job.needsReview) button('He comprobado que no se envió: reanudar', () => acknowledge(job.id, { notSent: true }));
+        button(job.status === 'sent' ? 'Quitar' : 'Cancelar pendiente', () => cancel(job.id), job.status === 'sending');
+        article.append(actions);
+        section.append(article);
+      }
+      if (jobs.some(({ job }) => job.produce && job.status !== 'sent')) {
+        section.append(el('p', 'Pausar o cancelar detiene este pendiente. Las naves ya encargadas siguen en la cola del juego.', 'fw-muted'));
+      }
+      mounted.replaceChildren(section);
+    }
+
+    function mount(root) {
+      if (destroyed || !root?.ownerDocument || typeof root.replaceChildren !== 'function') {
+        throw new TypeError('Contenedor de misiones no válido.');
+      }
+      if (mounted && mounted !== root) mounted.replaceChildren();
+      mounted = root;
+      renderKey = '';
+      render();
+    }
+
+    function destroy() { destroyed = true; mounted?.replaceChildren(); mounted = null; }
+
+    try {
+      config = readStored();
+      if (config.jobs.some(job => job.status === 'sending')) {
+        const recovered = copy(config);
+        for (const job of recovered.jobs) if (job.status === 'sending') {
+          job.status = 'uncertain';
+          job.needsReview = true;
+          job.updatedAt = timestamp(job);
+          job.message = 'Se interrumpió un envío. Comprueba las misiones del juego antes de reintentar.';
+        }
+        commit(recovered);
+      }
+    } catch (_) {
+      readError = true;
+      storageError = true;
+      notice = 'No se pudo leer o recuperar la cola guardada. Las misiones pendientes están detenidas.';
+    }
+
+    return { queue, update, reconnect, cancel, pause, resume, acknowledge, productionPlan, productionDemand,
+      getJobFor, tick, exportConfig, validateConfig, importConfig, backupCheckpoint, restoreCheckpoint,
+      refreshConfig, mount, destroy,
+      list: () => exportConfig().jobs,
+      getDiagnostics: () => ({ storageError, readError, running, count: config?.jobs.length ?? null }) };
+  }
+  // END FLEET WAIT QUEUE
+
+  // BEGIN FLEET WAIT INTEGRATION
+  function missionContext() {
+    const galaxy = location.pathname.match(/^\/game\/galaxy\/([A-Za-z0-9_-]{1,64})(?:\/|$)/)?.[1] || '';
+    let player = '';
+    try { player = localStorage.getItem('oldlight.playerId') || ''; } catch { /* No actions without identity. */ }
+    const exactFleet = SHIPS.every(([id]) => fleetCounts(id) !== null);
+    return { scope: galaxy && /^[A-Za-z0-9_-]{1,96}$/.test(player) ? `${galaxy}/${player}` : '',
+      originId: systemId() || '', originName: text(document.querySelector('[data-field="nameplate-name"]')),
+      selectionCount: exactFleet ? 1 : null };
+  }
+
+  function currentMissionFleet() {
+    return new Map(SHIPS.map(([id]) => [id, fleetCounts(id)]));
+  }
+
+  function canOperateMission() {
+    const context = missionContext();
+    return Boolean(leader && settings.enabled && !importingBackup && !pending && !document.hidden
+      && context.scope && context.originId && context.selectionCount === 1
+      && !document.querySelector(`${PANEL} .b-loading, ${FLEET_PANEL} .b-loading`)
+      && (isVisible(document.querySelector(PANEL)) || isVisible(document.querySelector(FLEET_PANEL))));
+  }
+
+  function missionQueueContext() {
+    return { ...missionContext(), active: canOperateMission(),
+      canAct: canOperateMission() && !missionAdapter?.isBusy() && !document.querySelector('dialog[open]') };
+  }
+
+  function currentMissionJob() {
+    try { return fleetWait?.getJobFor(missionContext()) || null; } catch { return null; }
+  }
+
+  function sameMissionPreset(job, capture) {
+    const spec = capture.spec;
+    return Boolean(spec && job.scope === spec.scope && job.originId === spec.originId
+      && job.target.presetKey === spec.target.presetKey
+      && job.target.coordinate?.q === spec.target.coordinate?.q
+      && job.target.coordinate?.r === spec.target.coordinate?.r
+      && SHIPS.every(([id]) => job.quantities[id] === spec.quantities[id]));
+  }
+
+  function offerEmptyPresetMission(options) {
+    if (!options.capture?.spec || document.querySelector('dialog[open]')) return false;
+    document.getElementById('oldlight-preset-shortage-dialog')?.remove();
+    const dialog = document.createElement('dialog');
+    dialog.id = 'oldlight-preset-shortage-dialog';
+    dialog.setAttribute('aria-label', 'Preparar misión pendiente');
+    dialog.style.cssText = 'width:390px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);overflow:auto;'
+      + 'padding:14px;border:1px solid #45637a;border-radius:12px;background:#101b27;color:#e8f0f7;font:13px/1.4 system-ui,sans-serif';
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.textContent = 'Cerrar';
+    close.style.cssText = 'display:block;margin-left:auto;padding:5px 9px;color:inherit;background:#25465e;border:1px solid #628dad;border-radius:6px;cursor:pointer';
+    close.addEventListener('click', () => dialog.close());
+    dialog.append(close);
+    document.body.append(dialog);
+    dialog.addEventListener('close', () => dialog.remove(), { once: true });
+    dialog.addEventListener('click', event => {
+      const rect = dialog.getBoundingClientRect();
+      if (event.target === dialog && (event.clientX < rect.left || event.clientX > rect.right
+          || event.clientY < rect.top || event.clientY > rect.bottom)) dialog.close();
+    });
+    if (!offerPresetMission({ ...options, dialog })) { dialog.remove(); return false; }
+    dialog.showModal();
+    return true;
+  }
+
+  function offerPresetMission({ dialog, quantities, presetKey, shortage = true, capture: knownCapture = null }) {
+    if (!fleetWait || !missionAdapter || !(dialog instanceof HTMLDialogElement)) return false;
+    const existing = currentMissionJob();
+    if (!shortage && (!existing || existing.status === 'sent')) return false;
+    let capture = knownCapture;
+    let captureError = '';
+    try { capture ||= missionAdapter.capture(dialog, quantities, presetKey); }
+    catch (cause) { captureError = cause?.message || 'No se pudo identificar el origen y el destino de esta misión.'; }
+    if (!capture?.spec) {
+      captureError ||= capture?.message || 'No se pudo identificar el origen y el destino de esta misión.';
+      capture = null;
+    }
+    const matching = capture && existing && sameMissionPreset(existing, capture);
+    if (!shortage && !matching) return false;
+    dialog.querySelector('[data-oldlight-fleet-offer]')?.remove();
+    const card = document.createElement('div');
+    card.dataset.oldlightFleetOffer = '';
+    const shadow = card.attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<style>:host{display:block;margin:12px 0;color:#e8f0f7;font:13px/1.4 system-ui,sans-serif}'
+      + '*{box-sizing:border-box}.card{padding:12px;border:1px solid #45637a;border-radius:10px;background:#102131}'
+      + 'h3{font-size:14px;margin:0 0 7px}p{margin:6px 0;color:#b8cbd9}ul{padding-left:18px;margin:8px 0}'
+      + 'p,li{overflow-wrap:anywhere}'
+      + 'label{display:flex;align-items:flex-start;gap:7px;margin:9px 0}input{accent-color:#76b8e8;margin-top:3px}'
+      + 'button{font:inherit;padding:8px 10px;border-radius:7px;border:1px solid #628dad;background:#25465e;color:inherit;cursor:pointer}'
+      + 'button:disabled{opacity:.5;cursor:default}.error{color:#ffb9aa}.actions{display:flex;gap:8px;flex-wrap:wrap}'
+      + '</style><section class="card"><h3></h3><p data-field="route"></p><ul></ul>'
+      + '<label><input type="checkbox" data-option="produce">Producir las naves que faltan</label>'
+      + '<p data-field="production"></p>'
+      + '<label><input type="checkbox" data-option="auto-send" checked>Enviar automáticamente cuando el preset esté completo</label>'
+      + '<p>La misión esperará a tener todas sus naves en base. La producción descuenta las que estén en misión o en construcción.</p>'
+      + '<div class="actions"><button type="button" data-action="queue">Guardar misión pendiente</button></div>'
+      + '<p data-field="status" role="status" aria-live="polite"></p></section>';
+    const title = shadow.querySelector('h3');
+    title.textContent = shortage ? 'Faltan naves para este preset' : 'Esta misión ya está pendiente';
+    const route = shadow.querySelector('[data-field="route"]');
+    route.textContent = capture ? `${capture.spec.originName} → ${capture.spec.target.label}` : 'Misión pendiente';
+    const list = shadow.querySelector('ul');
+    const status = shadow.querySelector('[data-field="status"]');
+    const produce = shadow.querySelector('[data-option="produce"]');
+    const autoSend = shadow.querySelector('[data-option="auto-send"]');
+    const button = shadow.querySelector('[data-action="queue"]');
+    const production = shadow.querySelector('[data-field="production"]');
+    const plan = capture ? fleetWait.productionPlan(capture.spec, currentMissionFleet()) : null;
+    for (const [id, name] of SHIPS) {
+      if (!quantities[id]) continue;
+      const line = document.createElement('li');
+      line.textContent = plan ? `${name}: ${plan.parked[id]}/${quantities[id]} en base · ${plan.away[id]} en misión · ${plan.building[id]} en construcción`
+        : `${name}: ${quantities[id]} necesarias`;
+      list.append(line);
+    }
+    production.textContent = plan ? 'Producción pendiente: ' + (SHIPS.filter(([id]) => plan.production[id] > 0)
+      .map(([id, name]) => `${plan.production[id]} ${name}`).join(' · ') || 'ninguna; basta esperar a las naves existentes.')
+      : 'Selecciona un único sistema de origen para disponer de recuentos exactos.';
+    if (matching) {
+      produce.checked = existing.produce;
+      autoSend.checked = existing.autoSend;
+      button.textContent = 'Reconectar y reanudar esta misión';
+    }
+    const available = Boolean(capture && plan && (!existing || existing.status === 'sent' || matching)
+      && existing?.status !== 'sending' && !existing?.needsReview && existing?.status !== 'uncertain');
+    const syncButton = () => { button.disabled = !available || (!produce.checked && !autoSend.checked); };
+    produce.addEventListener('change', syncButton);
+    autoSend.addEventListener('change', syncButton);
+    syncButton();
+    if (!available) {
+      status.className = 'error';
+      status.textContent = captureError || (existing?.needsReview || existing?.status === 'uncertain'
+        ? 'Esta misión tiene un envío sin confirmar. Compruébalo primero desde Flota.'
+        : existing && !matching && existing.status !== 'sent'
+          ? 'Este origen ya tiene otra misión pendiente. Puedes cancelarla desde Flota antes de programar otra.'
+          : 'La espera y la producción requieren un único sistema de origen con recuentos disponibles.');
+      produce.disabled = autoSend.disabled = true;
+    }
+    button.addEventListener('click', event => {
+      event.preventDefault(); event.stopPropagation();
+      if (button.disabled) return;
+      button.disabled = true;
+      try {
+        const context = missionContext();
+        if (context.scope !== capture.spec.scope || context.originId !== capture.spec.originId || context.selectionCount !== 1) {
+          throw new Error('El origen ha cambiado. Vuelve a elegir el preset desde ese sistema.');
+        }
+        let job;
+        if (matching) {
+          const fresh = fleetWait.getJobFor(context);
+          if (!fresh || fresh.id !== existing.id || !sameMissionPreset(fresh, capture) || fresh.needsReview) {
+            throw new Error('La misión pendiente ha cambiado. Revisa su estado en Flota.');
+          }
+          fleetWait.reconnect(fresh.id, capture.spec.target);
+          fleetWait.update(fresh.id, { produce: produce.checked, autoSend: autoSend.checked });
+          missionAdapter.attach(fresh.id, capture);
+          fleetWait.resume(fresh.id);
+          job = fresh;
+        } else {
+          job = fleetWait.queue({ ...capture.spec, produce: produce.checked, autoSend: autoSend.checked });
+          missionAdapter.attach(job.id, capture);
+        }
+        settings.activeTab = 'fleet';
+        settings.minimized = false;
+        saveSettings();
+        syncSettingsTabs();
+        layoutHelper();
+        dialog.close();
+        card.remove();
+        schedule();
+      } catch (cause) {
+        status.className = 'error';
+        status.textContent = cause?.message || 'No se pudo guardar la misión pendiente.';
+        syncButton();
+      }
+    });
+    const actions = dialog.querySelector('.app-dialog-actions');
+    if (actions) actions.before(card); else dialog.append(card);
+    dialog.addEventListener('close', () => card.remove(), { once: true });
+    return true;
+  }
+  // END FLEET WAIT INTEGRATION
 
   // BEGIN NOTIFIER
   /* Paste createNotifier inside the userscript's IIFE. Required metadata:
