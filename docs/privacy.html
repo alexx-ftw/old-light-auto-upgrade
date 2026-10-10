@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <meta name="description" content="Cómo Old Light Helper guarda los ajustes, utiliza Google Drive y envía las notificaciones que configuras.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'">
+  <title>Privacidad · Old Light Helper</title>
+  <link rel="stylesheet" href="./drive.css">
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">OLD LIGHT HELPER</p>
+      <h1>Política de privacidad</h1>
+      <p>Esta página describe el tratamiento de datos del userscript independiente Old Light Helper y de su página de copias.</p>
+      <p class="note">Actualizada el <time datetime="2026-10-10">10 de octubre de 2026</time>.</p>
+    </header>
+    <section aria-labelledby="local-heading">
+      <h2 id="local-heading">Ajustes locales y archivos de copia</h2>
+      <p>El helper guarda en tu navegador los ajustes, borradores, prioridades, mínimos de naves, objetivos, filtros y posición del panel. Utiliza el almacenamiento del sitio y el almacenamiento GM del gestor de userscripts. También conserva estados locales para evitar avisos repetidos.</p>
+      <p>Puedes exportar e importar la configuración como un archivo JSON. La copia incluye la configuración de las conexiones: el Client ID de Google, el correo recordado cuando corresponda y, si has configurado Telegram, el token del bot y el identificador del chat. El mismo contenido se incluye en las copias opcionales de Drive. Trata estos archivos como información privada.</p>
+    </section>
+    <section aria-labelledby="google-heading">
+      <h2 id="google-heading">Conexión con Google Drive</h2>
+      <p>Google Drive es opcional. Al iniciar sesión, se solicita únicamente el permiso <code>drive.appdata</code> para crear, listar y leer las copias en <code>appDataFolder</code>, el espacio privado de datos de esta aplicación en tu cuenta.</p>
+      <p>El token de autorización de Google permanece solo en la memoria de la ventana de copias. Se descarta al cerrar, desconectar o caducar la sesión y no se incluye en el almacenamiento local ni en los archivos de copia.</p>
+      <p>Cuando Google los facilita, se consultan el nombre, el correo y un identificador de la cuenta para mostrar la sesión y asociar los cambios pendientes con la cuenta correcta. La opción «Recordar mi cuenta» controla si se guarda el correo en el helper para facilitar la siguiente conexión. Está activada por defecto y puedes desactivarla en Cuenta y permisos; el correo guardado también forma parte de la configuración exportada.</p>
+      <p>Las copias se envían cuando eliges guardarlas o cuando activas la copia automática y cambias ajustes con la ventana abierta y autorizada. Restaurar una copia requiere que la selecciones y pulses Restaurar.</p>
+    </section>
+    <section aria-labelledby="notifications-heading">
+      <h2 id="notifications-heading">Notificaciones y datos del juego</h2>
+      <p>El helper utiliza los datos visibles y los reportes de Old Light para las funciones que configuras. Los avisos pueden incluir nombres de sistemas o jugadores, coordenadas, flotas, recursos y resultados de acciones.</p>
+      <p>Si activas Telegram, los avisos seleccionados se envían directamente a la API de Telegram para el bot y chat que has configurado. Las notificaciones del navegador dependen de tu permiso y de los filtros elegidos. Puedes desactivar cada canal o tipo de aviso desde el helper.</p>
+    </section>
+    <section aria-labelledby="services-heading">
+      <h2 id="services-heading">Servicios que intervienen</h2>
+      <p>El proyecto no opera un servidor propio que reciba tus ajustes o copias. Los intercambios con Google Drive y Telegram se realizan desde tu navegador hacia esos servicios. GitHub aloja el código y estas páginas, y sirve las descargas y actualizaciones del userscript.</p>
+      <p>Al utilizar esos servicios, sus proveedores reciben las solicitudes necesarias y los datos técnicos de la conexión. Su tratamiento se describe en sus propias políticas:</p>
+      <ul class="setup-steps">
+        <li><a href="https://policies.google.com/privacy" target="_blank" rel="noopener noreferrer">Privacidad de Google</a></li>
+        <li><a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement" target="_blank" rel="noopener noreferrer">Privacidad de GitHub</a></li>
+        <li><a href="https://telegram.org/privacy" target="_blank" rel="noopener noreferrer">Privacidad de Telegram</a></li>
+      </ul>
+    </section>
+    <section aria-labelledby="controls-heading">
+      <h2 id="controls-heading">Control y eliminación</h2>
+      <p>Puedes cambiar los ajustes y desactivar las copias o notificaciones en cualquier momento. Para eliminar los datos locales, utiliza las opciones de almacenamiento del sitio y de tu gestor de userscripts. Los archivos JSON descargados se gestionan en tu dispositivo.</p>
+      <p>Desconectar la sesión del helper no elimina por sí mismo las copias de Drive. Puedes gestionar los datos de la aplicación desde Google Drive y retirar el permiso desde Cuenta y permisos o desde <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener noreferrer">tu cuenta de Google</a>.</p>
+    </section>
+    <section aria-labelledby="contact-heading">
+      <h2 id="contact-heading">Soporte y consultas</h2>
+      <p>Para consultas sobre el helper o esta política, utiliza <a href="https://github.com/alexx-ftw/old-light-auto-upgrade/issues" target="_blank" rel="noopener noreferrer">GitHub Issues del proyecto</a>. Los issues son públicos: evita adjuntar copias de configuración, tokens o credenciales.</p>
+      <p class="note">El funcionamiento puede cambiar con las actualizaciones. El <a href="https://github.com/alexx-ftw/old-light-auto-upgrade" target="_blank" rel="noopener noreferrer">código publicado</a> permite revisar la implementación.</p>
+    </section>
+    <footer>
+      <div class="actions">
+        <a href="./index.html">Old Light Helper</a>
+        <a href="./drive.html">Página de copias</a>
+      </div>
+    </footer>
+  </main>
+</body>
+</html>
