@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.1.0
-// @description  Mejoras por prioridad, Reactor y Depot según necesidad, mínimos de naves y avisos por Telegram/navegador. Con actualización automática.
+// @version      1.2.0
+// @description  Mejoras por prioridad, mínimos de naves, informes y avisos, panel móvil y copias locales/Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
 // @supportURL   https://github.com/alexx-ftw/old-light-auto-upgrade/issues

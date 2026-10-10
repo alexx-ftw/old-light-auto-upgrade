@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.1.0
-// @description  Mejoras por prioridad, Reactor y Depot según necesidad, mínimos de naves y avisos por Telegram/navegador. Con actualización automática.
+// @version      1.2.0
+// @description  Mejoras por prioridad, mínimos de naves, informes y avisos, panel móvil y copias locales/Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
 // @supportURL   https://github.com/alexx-ftw/old-light-auto-upgrade/issues
@@ -22,7 +22,8 @@
   // Usa los controles normales del juego, con Structures o Shipyard abierto.
   // Las mejoras actúan sobre la selección; los mínimos requieren un solo sistema.
   // Ambos paneles se actualizan aunque uno de sus tabs internos esté oculto.
-  // Nunca elimina hidden/disabled ni llama a APIs del juego.
+  // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
+  // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
@@ -50,7 +51,10 @@
   if (window.top !== window.self || document.getElementById(HOST_ID)) return;
 
   let settings = readSettings();
-  const notifier = createNotifier();
+  const notifier = createNotifier({ onSettingsChange: settingsChanged });
+  const reports = createReportsWatcher({ send: event => notifier.emit(event) });
+  let driveBackup = null;
+  let importingBackup = false;
   const notificationSession = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
   let eventSequence = 0;
   const observeGameEvents = createGameEventObserver(emitEvent);
@@ -72,7 +76,7 @@
 
   function emitEvent(type, message, id, systemName = text(document.querySelector('[data-field="nameplate-name"]'))) {
     notifier.emit({ type, id: id || `${notificationSession}:${++eventSequence}`,
-      title: systemName ? `Old Light · ${systemName}` : 'Old Light', message });
+      title: 'Old Light', systemName, message });
   }
 
   function normalizeOrder(order, defaults = DEFAULT_ORDER) {
@@ -86,15 +90,22 @@
       ? Math.min(MAX_SHIP_MINIMUM, Math.max(0, Math.floor(value))) : 0;
   }
 
-  function readSettings() {
-    try {
-      const value = JSON.parse(localStorage.getItem(KEY) || '{}');
+  function normalizePanelPosition(value) {
+    return value && Number.isFinite(value.x) && Number.isFinite(value.y)
+      ? { x: Math.round(value.x), y: Math.round(value.y) } : null;
+  }
+
+  function normalizeSettings(value) {
       return {
         enabled: value?.enabled !== false,
         excluded: Array.isArray(value?.excluded)
           ? [...new Set(value.excluded.filter(id => DEFAULT_ORDER.includes(id)))] : [],
         order: normalizeOrder(value?.order),
         expanded: value?.expanded === true,
+        minimized: value?.minimized === true,
+        panelPosition: normalizePanelPosition(value?.panelPosition),
+        activeTab: ['buildings', 'fleet', 'notifications', 'data'].includes(value?.activeTab) ? value.activeTab : 'buildings',
+        conditionsExpanded: value?.conditionsExpanded !== false,
         shipMinimums: Object.fromEntries(SHIPS.map(([id]) => [id, normalizeMinimum(value?.shipMinimums?.[id])])),
         shipOrder: normalizeOrder(value?.shipOrder, DEFAULT_SHIP_ORDER),
         countAway: value?.countAway === true,
@@ -102,15 +113,22 @@
         depotFillPercent: typeof value?.depotFillPercent === 'number' && Number.isFinite(value.depotFillPercent)
           ? Math.min(100, Math.max(1, Math.round(value.depotFillPercent))) : 90,
       };
+  }
+
+  function readSettings() {
+    try {
+      return normalizeSettings(JSON.parse(localStorage.getItem(KEY) || '{}'));
     } catch {
-      return { enabled: true, excluded: [], order: [...DEFAULT_ORDER], expanded: false,
-        shipMinimums: Object.fromEntries(SHIPS.map(([id]) => [id, 0])),
-        shipOrder: [...DEFAULT_SHIP_ORDER], countAway: false, fleetExpanded: false, depotFillPercent: 90 };
+      return normalizeSettings({});
     }
   }
 
+  function settingsChanged() {
+    if (!importingBackup) driveBackup?.notifyChanged?.();
+  }
+
   function saveSettings() {
-    try { localStorage.setItem(KEY, JSON.stringify(settings)); } catch {
+    try { localStorage.setItem(KEY, JSON.stringify(settings)); settingsChanged(); } catch {
       // El script sigue funcionando si el navegador bloquea el almacenamiento.
     }
   }
@@ -374,11 +392,21 @@
             z-index:2147483000; color-scheme:dark; font:12px/1.45 system-ui,sans-serif; }
           :host([hidden]) { display:none !important; }
           * { box-sizing:border-box; }
-          section { width:300px; max-width:calc(100vw - 24px); max-height:calc(100dvh - 24px);
+          .helper-shell { width:300px; max-width:calc(100vw - 24px); max-height:calc(100dvh - 24px);
             overflow-y:auto; padding:11px 12px;
-            color:#d8e5ef; background:#101923f5; border:1px solid #40566b;
+            color:#d8e5ef; background:#101923; border:1px solid #40566b;
             border-radius:10px; box-shadow:0 5px 24px #0005; }
-          header { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+          header { display:flex; align-items:center; justify-content:space-between; gap:7px;
+            position:sticky; top:0; z-index:2; background:#101923; cursor:grab; touch-action:none; user-select:none; }
+          header::before { content:''; position:absolute; inset:-12px -12px -3px;
+            background:#101923; z-index:-1; pointer-events:none; }
+          header.is-dragging { cursor:grabbing; }
+          .helper-title { display:flex; align-items:center; gap:5px; flex:1; min-width:0; }
+          .helper-grip { color:#8298aa; font-size:16px; }
+          .helper-minimize { width:27px; height:27px; padding:0; color:#b8cddd;
+            background:#1c2a36; border-color:#40576b; flex-shrink:0; }
+          .helper-shell.minimized { width:210px; padding:7px 9px; overflow:hidden; }
+          .helper-shell.minimized > :not(header) { display:none !important; }
           strong { color:#f2f7fa; font-size:13px; }
           button { font:inherit; cursor:pointer; color:#9ce9b9; background:#21382c;
             border:1px solid #426a51; border-radius:6px; padding:3px 9px; }
@@ -391,8 +419,40 @@
           details { margin-top:8px; border-top:1px solid #304252; padding-top:7px; }
           summary { cursor:pointer; color:#aebfd0; }
           .choices { display:grid; gap:5px; padding-top:8px; }
-          .priority-row { display:grid; grid-template-columns:12px minmax(0,1fr) auto;
+          .priority-row { display:grid; grid-template-columns:27px 12px minmax(0,1fr) auto;
             align-items:center; gap:6px; }
+          .priority-drag { width:27px; height:27px; padding:0; color:#92a9bc; background:transparent;
+            border-color:transparent; font-size:17px; cursor:grab; touch-action:none; user-select:none; }
+          .priority-drag:hover { border-color:#40576b; background:#1c2a36; }
+          .priority-row.is-dragging { opacity:.5; background:#253b4b; border-radius:4px; }
+          .priority-row.drop-before { box-shadow:0 -2px 0 #80ccab; }
+          .priority-row.drop-after { box-shadow:0 2px 0 #80ccab; }
+          .choices.is-sorting, .choices.is-sorting .priority-drag { cursor:grabbing; }
+          .settings-tabs { display:flex; gap:4px; margin-top:10px; padding:3px; border-radius:7px; background:#09121b; }
+          .settings-tabs button { flex:1; min-width:0; padding:5px 3px; border-color:transparent;
+            color:#92a9bc; background:transparent; font-size:11px; }
+          .settings-tabs button[aria-selected="true"] { color:#def6e8; background:#254235; border-color:#446c56; }
+          .settings-page { margin-top:10px; padding-top:0; border-top:0; }
+          .settings-page[hidden] { display:none !important; }
+          .settings-page > summary, .settings-page > .notifications-details > summary { display:none; }
+          .settings-page > .notifications-details { margin-top:0; padding-top:0; border-top:0; }
+          .page-intro { margin:0 0 6px; color:#aebfd0; font-size:11px; }
+          .conditions-details { padding:8px; border:1px solid #304252; border-radius:6px; background:#15222d; }
+          .backup-actions { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin:10px 0; }
+          .backup-actions button { padding:8px 5px; color:#d8e5ef; background:#23344d; border-color:#52657f; }
+          .backup-status { white-space:pre-line; font-size:11px; color:#aebfd0; }
+          .backup-card { border:1px solid #304252; border-radius:6px; padding:9px; }
+          .oldlight-drive-config { margin-top:10px; padding:9px; border:1px solid #304252; border-radius:6px; }
+          .oldlight-drive-config h4 { margin:0 0 8px; font-size:13px; color:#f2f7fa; }
+          .oldlight-drive-config label { margin-top:8px; font-size:11px; }
+          .oldlight-drive-config label:first-of-type { display:grid; gap:5px; }
+          .oldlight-drive-config input[type="text"] { width:100%; min-width:0; padding:7px;
+            font:inherit; color:#e1edf4; background:#172632; border:1px solid #40576b; border-radius:5px; }
+          .oldlight-drive-config p { font-size:11px; color:#aebfd0; }
+          .oldlight-drive-controls { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+          .oldlight-drive-controls button { padding:6px; flex:1; }
+          .oldlight-drive-controls button:first-child { flex-basis:100%; }
+          .backup-help { display:inline-block; margin-top:8px; font-size:11px; color:#8cc8ff; }
           .priority-position { color:#8298aa; text-align:right; font-variant-numeric:tabular-nums; }
           .priority-actions { display:flex; gap:3px; }
           .priority-actions button { width:27px; height:27px; padding:0; color:#b8cddd;
@@ -413,30 +473,70 @@
             border-radius:5px; color:#e1edf4; background:#172632; font:inherit; }
           .hint { color:#8298aa; font-size:11px; margin-top:8px; }
         </style>
-        <section aria-label="Mejoras automáticas de Old Light">
-          <header><strong>Auto ↑</strong><button type="button" aria-pressed="true"></button></header>
+        <section class="helper-shell" aria-label="Mejoras automáticas de Old Light">
+          <header title="Arrastra la cabecera para mover el helper">
+            <strong class="helper-title"><span class="helper-grip" aria-hidden="true">⠿</span>Auto ↑</strong>
+            <button type="button" data-action="automation-toggle" aria-pressed="true"></button>
+            <button type="button" class="helper-minimize" data-action="helper-minimize" aria-expanded="true" aria-label="Minimizar helper" title="Minimizar helper">−</button>
+          </header>
           <p role="status"></p><small></small>
-          <details><summary>Edificios</summary>
+          <nav class="settings-tabs" role="tablist" aria-label="Ajustes del helper">
+            <button type="button" role="tab" id="oldlight-tab-buildings" data-settings-tab="buildings" aria-controls="oldlight-settings-buildings" aria-selected="true">Edificios</button>
+            <button type="button" role="tab" id="oldlight-tab-fleet" data-settings-tab="fleet" aria-controls="oldlight-settings-fleet" aria-selected="false" tabindex="-1">Flota</button>
+            <button type="button" role="tab" id="oldlight-tab-notifications" data-settings-tab="notifications" aria-controls="oldlight-settings-notifications" aria-selected="false" tabindex="-1">Avisos</button>
+            <button type="button" role="tab" id="oldlight-tab-data" data-settings-tab="data" aria-controls="oldlight-settings-data" aria-selected="false" tabindex="-1">Datos</button>
+          </nav>
+          <details class="settings-page building-page" data-page="buildings" id="oldlight-settings-buildings" role="tabpanel" aria-labelledby="oldlight-tab-buildings" open><summary>Edificios</summary>
+            <p class="page-intro">Marca qué mejorar y ordena sus prioridades.</p>
             <div class="choices" role="list" aria-label="Prioridad de edificios"></div>
             <button type="button" class="reset-order">Restablecer orden</button>
-            <p class="hint">Prioridad de arriba abajo. Se mejora el primero disponible entre los marcados.</p>
-            <p class="hint">Reactor solo si otra mejora marcada necesita más energía. Cada Reactor o Depot espera al anterior en cola.</p>
-            <label class="depot-threshold">Depot al alcanzar <input type="number" min="1" max="100" step="1"
-              data-setting="depot-fill-percent" aria-label="Porcentaje de capacidad para mejorar Resource Depot">% de capacidad</label>
+            <p class="hint">Arrastra el asa ⠿ o usa ↑ / ↓. Se mejora el primero disponible entre los marcados.</p>
+            <details class="conditions-details" open><summary>Condiciones de construcción</summary>
+              <p class="hint">Reactor solo si otra mejora marcada necesita más energía. Cada Reactor o Depot espera al anterior en cola.</p>
+              <label class="depot-threshold">Depot al alcanzar <input type="number" min="1" max="100" step="1"
+                data-setting="depot-fill-percent" aria-label="Porcentaje de capacidad para mejorar Resource Depot">% de capacidad</label>
+            </details>
           </details>
-          <details class="fleet-details"><summary>Mínimos de naves</summary>
-            <p class="hint">Mínimo por tipo en el sistema seleccionado. 0 desactiva su reposición.</p>
+          <details class="settings-page fleet-details" data-page="fleet" id="oldlight-settings-fleet" role="tabpanel" aria-labelledby="oldlight-tab-fleet" open hidden><summary>Mínimos de naves</summary>
+            <p class="page-intro">Mínimo por tipo en el sistema seleccionado. 0 desactiva su reposición.</p>
             <div class="fleet-choices" role="list" aria-label="Mínimos y prioridad de naves"></div>
             <label class="count-away"><input type="checkbox">Contar también las naves en misión</label>
             <button type="button" class="reset-ships">Restablecer orden de naves</button>
             <p class="hint">Se descuentan las naves ya en construcción. La reposición disponible tiene prioridad sobre las mejoras.</p>
           </details>
+          <div class="settings-page" data-page="notifications" id="oldlight-settings-notifications" role="tabpanel" aria-labelledby="oldlight-tab-notifications" hidden></div>
+          <div class="settings-page" data-page="data" id="oldlight-settings-data" role="tabpanel" aria-labelledby="oldlight-tab-data" hidden>
+            <div class="backup-card">
+              <strong>Copia local</strong>
+              <p class="page-intro">La configuración y la posición del helper se guardan automáticamente en este navegador.</p>
+              <div class="backup-actions">
+                <button type="button" data-action="export-settings">Exportar todo</button>
+                <button type="button" data-action="choose-import-settings">Importar copia</button>
+              </div>
+              <input type="file" data-action="import-settings" accept=".json,application/json" hidden>
+              <p class="hint">El archivo incluye prioridades, mínimos, panel, filtros y las credenciales guardadas de Telegram. Importar sustituye esos ajustes.</p>
+              <p class="backup-status" data-field="backup-status" role="status" aria-live="polite"></p>
+            </div>
+            <div data-field="drive-backup"></div>
+          </div>
         </section>`;
       ui = {
-        toggle: shadow.querySelector('button'),
+        section: shadow.querySelector('section'),
+        header: shadow.querySelector('header'),
+        minimize: shadow.querySelector('[data-action="helper-minimize"]'),
+        toggle: shadow.querySelector('[data-action="automation-toggle"]'),
         status: shadow.querySelector('[role="status"]'),
         last: shadow.querySelector('small'),
-        details: shadow.querySelector('details'),
+        details: shadow.querySelector('.building-page'),
+        tabs: [...shadow.querySelectorAll('[data-settings-tab]')],
+        pages: [...shadow.querySelectorAll('[data-page]')],
+        notificationContainer: shadow.querySelector('[data-page="notifications"]'),
+        conditionsDetails: shadow.querySelector('.conditions-details'),
+        backupStatus: shadow.querySelector('[data-field="backup-status"]'),
+        exportSettings: shadow.querySelector('[data-action="export-settings"]'),
+        importSettings: shadow.querySelector('[data-action="import-settings"]'),
+        chooseImport: shadow.querySelector('[data-action="choose-import-settings"]'),
+        driveContainer: shadow.querySelector('[data-field="drive-backup"]'),
         choices: shadow.querySelector('.choices'),
         resetOrder: shadow.querySelector('.reset-order'),
         depotThreshold: shadow.querySelector('[data-setting="depot-fill-percent"]'),
@@ -452,6 +552,13 @@
         item.className = 'priority-row';
         item.dataset.buildingId = id;
         item.setAttribute('role', 'listitem');
+        const drag = document.createElement('button');
+        drag.type = 'button';
+        drag.className = 'priority-drag';
+        drag.dataset.action = 'priority-drag';
+        drag.textContent = '⠿';
+        drag.title = `Arrastrar prioridad de ${name}`;
+        drag.setAttribute('aria-label', drag.title);
         const position = document.createElement('span');
         position.className = 'priority-position';
         position.setAttribute('aria-hidden', 'true');
@@ -475,9 +582,9 @@
           button.addEventListener('click', () => movePriority(id, delta));
           actions.append(button);
         }
-        item.append(position, label, actions);
+        item.append(drag, position, label, actions);
         ui.choices.append(item);
-        ui.items.set(id, { item, position, input, up, down, name });
+        ui.items.set(id, { item, position, input, up, down, drag, name });
         input.addEventListener('change', () => {
           settings.excluded = BUILDINGS.map(([key]) => key).filter(key =>
             ![...ui.choices.querySelectorAll('input')].some(item => item.value === key && item.checked));
@@ -547,11 +654,6 @@
         syncFleetChoices();
         schedule();
       });
-      ui.fleetDetails.addEventListener('toggle', () => {
-        if (settings.fleetExpanded === ui.fleetDetails.open) return;
-        settings.fleetExpanded = ui.fleetDetails.open;
-        saveSettings();
-      });
       ui.resetOrder.addEventListener('click', () => {
         settings.order = [...DEFAULT_ORDER];
         saveSettings();
@@ -571,18 +673,362 @@
         settings.enabled = !settings.enabled;
         if (settings.enabled) { error = ''; unconfirmed = 0; }
         saveSettings();
-        emitEvent(settings.enabled ? 'automation.resumed' : 'automation.paused',
+        emitEvent('settings.automation',
           settings.enabled ? 'Mejoras y reposición reanudadas.' : 'Mejoras y reposición pausadas.');
         schedule();
       });
-      ui.details.addEventListener('toggle', () => {
-        if (settings.expanded === ui.details.open) return;
-        settings.expanded = ui.details.open;
+      ui.minimize.addEventListener('click', () => {
+        ui.cancelPriorityDrag?.();
+        ui.cancelPanelDrag?.();
+        settings.minimized = !settings.minimized;
+        layoutHelper();
+        saveSettings();
+        schedule();
+      });
+      installHelperDragging();
+      installPriorityDragging();
+      installLocalBackups();
+      ui.conditionsDetails.addEventListener('toggle', () => {
+        if (settings.conditionsExpanded === ui.conditionsDetails.open) return;
+        settings.conditionsExpanded = ui.conditionsDetails.open;
         saveSettings();
       });
-      notifier.mount(shadow.querySelector('section'));
+      if (typeof ResizeObserver === 'function') new ResizeObserver(layoutHelper).observe(ui.section);
+      for (const [index, tab] of ui.tabs.entries()) {
+        const select = () => {
+          ui.cancelPriorityDrag?.();
+          settings.activeTab = tab.dataset.settingsTab;
+          syncSettingsTabs();
+          layoutHelper();
+          saveSettings();
+        };
+        tab.addEventListener('click', select);
+        tab.addEventListener('keydown', event => {
+          const next = event.key === 'ArrowRight' ? (index + 1) % ui.tabs.length
+            : event.key === 'ArrowLeft' ? (index + ui.tabs.length - 1) % ui.tabs.length
+              : event.key === 'Home' ? 0 : event.key === 'End' ? ui.tabs.length - 1 : null;
+          if (next === null) return;
+          event.preventDefault();
+          ui.tabs[next].click();
+          ui.tabs[next].focus();
+        });
+      }
+      notifier.mount(ui.notificationContainer);
+      if (driveBackup) driveBackup.mount(ui.driveContainer);
+      else {
+        const unavailable = document.createElement('p');
+        unavailable.className = 'hint';
+        unavailable.textContent = 'Google Drive requiere un gestor de userscripts con almacenamiento GM disponible.';
+        ui.driveContainer.append(unavailable);
+      }
+      const backupHelp = document.createElement('a');
+      backupHelp.className = 'backup-help';
+      backupHelp.textContent = 'Cómo configurar Google Drive';
+      backupHelp.href = 'https://github.com/alexx-ftw/old-light-auto-upgrade#copias-en-google-drive';
+      backupHelp.target = '_blank';
+      backupHelp.rel = 'noopener noreferrer';
+      ui.driveContainer.append(backupHelp);
+      ui.reportsStatus = document.createElement('p');
+      ui.reportsStatus.className = 'hint';
+      ui.reportsStatus.dataset.field = 'reports-status';
+      ui.reportsStatus.setAttribute('role', 'status');
+      ui.notificationContainer.append(ui.reportsStatus);
+      const notificationDetails = ui.notificationContainer.querySelector('.notifications-details');
+      if (notificationDetails) notificationDetails.open = true;
+      syncSettingsTabs();
     }
     document.body.append(host);
+    layoutHelper();
+  }
+
+  function createBackup() {
+    return {
+      format: 'old-light-auto-upgrade-backup',
+      schemaVersion: 1,
+      scriptVersion: '1.2.0',
+      exportedAt: new Date().toISOString(),
+      settings: normalizeSettings(settings),
+      notifications: notifier.exportConfig(),
+      drive: driveBackup?.exportConfig?.() || { clientId: '', autoBackup: false },
+    };
+  }
+
+  function backupError(message) {
+    const cause = new Error(message);
+    cause.name = 'BackupError';
+    return cause;
+  }
+
+  function validateBackup(value) {
+    const object = item => item && typeof item === 'object' && !Array.isArray(item);
+    if (!object(value) || value.format !== 'old-light-auto-upgrade-backup' || value.schemaVersion !== 1
+        || !object(value.settings) || !object(value.notifications)) {
+      throw backupError('El archivo no es una copia compatible de Old Light Auto Upgrade.');
+    }
+    const next = value.settings;
+    const list = (items, known) => Array.isArray(items) && items.length <= known.length
+      && items.every(id => typeof id === 'string' && known.includes(id));
+    const booleanKeys = ['enabled', 'expanded', 'minimized', 'countAway', 'fleetExpanded', 'conditionsExpanded'];
+    if (typeof next.enabled !== 'boolean' || !list(next.order, DEFAULT_ORDER) || !list(next.excluded, DEFAULT_ORDER)
+        || !list(next.shipOrder, DEFAULT_SHIP_ORDER) || !object(next.shipMinimums)
+        || booleanKeys.some(key => next[key] !== undefined && typeof next[key] !== 'boolean')
+        || SHIPS.some(([id]) => !Number.isInteger(next.shipMinimums[id])
+          || next.shipMinimums[id] < 0 || next.shipMinimums[id] > MAX_SHIP_MINIMUM)
+        || !Number.isFinite(next.depotFillPercent) || next.depotFillPercent < 1 || next.depotFillPercent > 100
+        || (next.panelPosition != null && !normalizePanelPosition(next.panelPosition))
+        || (next.activeTab !== undefined && !['buildings', 'fleet', 'notifications', 'data'].includes(next.activeTab))) {
+      throw backupError('La copia contiene ajustes del helper inválidos.');
+    }
+    let notifications;
+    let drive;
+    try { notifications = notifier.validateConfig(value.notifications); }
+    catch { throw backupError('La copia contiene ajustes de notificaciones inválidos.'); }
+    try {
+      if (driveBackup) drive = driveBackup.validateConfig(value.drive || { clientId: '', autoBackup: false });
+      else {
+        if (value.drive?.clientId || value.drive?.autoBackup) throw new Error('Drive no disponible');
+        drive = { clientId: '', autoBackup: false };
+      }
+    } catch { throw backupError('La copia contiene una configuración de Drive incompatible.'); }
+    return { settings: normalizeSettings(next), notifications, drive };
+  }
+
+  function applyBackup(value) {
+    const next = validateBackup(value);
+    ui?.cancelPriorityDrag?.();
+    ui?.cancelPanelDrag?.();
+    const previous = { settings, raw: localStorage.getItem(KEY), notifications: notifier.exportConfig(),
+      drive: driveBackup?.exportConfig?.() };
+    importingBackup = true;
+    try {
+      localStorage.setItem(KEY, JSON.stringify(next.settings));
+      notifier.importConfig(next.notifications);
+      if (driveBackup) driveBackup.importConfig(next.drive);
+      settings = next.settings;
+      if (settings.enabled) { error = ''; unconfirmed = 0; }
+      syncSettingsTabs();
+      layoutHelper();
+    } catch {
+      let restored = true;
+      try {
+        if (previous.raw === null) localStorage.removeItem(KEY);
+        else localStorage.setItem(KEY, previous.raw);
+      } catch { restored = false; }
+      try { notifier.importConfig(previous.notifications); } catch { restored = false; }
+      try { if (driveBackup && previous.drive) driveBackup.importConfig(previous.drive); } catch { restored = false; }
+      settings = previous.settings;
+      syncSettingsTabs();
+      layoutHelper();
+      if (!restored) {
+        settings.enabled = false;
+        error = 'La importación no pudo restaurar todos los ajustes. Revisa la configuración.';
+      }
+      throw backupError(restored
+        ? 'No se pudo guardar la copia. Se han conservado los ajustes anteriores.'
+        : 'La importación falló y no pudo restaurar todos los ajustes. Automatización pausada.');
+    } finally {
+      importingBackup = false;
+      schedule();
+    }
+    settingsChanged();
+    return true;
+  }
+
+  function installLocalBackups() {
+    ui.exportSettings.addEventListener('click', event => {
+      if (!event.isTrusted) return;
+      try {
+        const blob = new Blob([JSON.stringify(createBackup(), null, 2) + '\n'], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'old-light-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+        setText(ui.backupStatus, 'Copia exportada. Incluye toda la configuración guardada.');
+      } catch { setText(ui.backupStatus, 'No se pudo exportar la configuración.'); }
+    });
+    ui.chooseImport.addEventListener('click', event => {
+      if (event.isTrusted) ui.importSettings.click();
+    });
+    ui.importSettings.addEventListener('change', async () => {
+      const file = ui.importSettings.files?.[0];
+      if (!file) return;
+      try {
+        if (file.size > 1024 * 1024) throw backupError('La copia supera el tamaño máximo de 1 MiB.');
+        let value;
+        try { value = JSON.parse(await file.text()); }
+        catch { throw backupError('El archivo no contiene JSON válido.'); }
+        applyBackup(value);
+        setText(ui.backupStatus, 'Copia importada. Preferencias y credenciales restauradas.');
+      } catch (cause) {
+        setText(ui.backupStatus, cause?.name === 'BackupError' ? cause.message : 'No se pudo importar la copia.');
+      } finally { ui.importSettings.value = ''; }
+    });
+  }
+
+  function syncSettingsTabs() {
+    if (!ui) return;
+    for (const tab of ui.tabs) {
+      const active = tab.dataset.settingsTab === settings.activeTab;
+      tab.setAttribute('aria-selected', String(active));
+      tab.tabIndex = active ? 0 : -1;
+    }
+    for (const page of ui.pages) {
+      page.hidden = page.dataset.page !== settings.activeTab;
+      if (page.tagName === 'DETAILS') page.open = true;
+    }
+    if (ui.conditionsDetails.open !== settings.conditionsExpanded) ui.conditionsDetails.open = settings.conditionsExpanded;
+  }
+
+  function layoutHelper() {
+    if (!ui || !host?.isConnected) return;
+    ui.section.classList.toggle('minimized', settings.minimized);
+    setText(ui.minimize, settings.minimized ? '+' : '−');
+    ui.minimize.setAttribute('aria-expanded', String(!settings.minimized));
+    ui.minimize.title = settings.minimized ? 'Restaurar helper' : 'Minimizar helper';
+    ui.minimize.setAttribute('aria-label', ui.minimize.title);
+    const setStyle = (name, value) => {
+      if (host.style.getPropertyValue(name) !== value) host.style.setProperty(name, value);
+    };
+    if (!settings.panelPosition) {
+      for (const name of ['left', 'top', 'right', 'bottom']) {
+        if (host.style.getPropertyValue(name)) host.style.removeProperty(name);
+      }
+      return;
+    }
+    const rect = ui.section.getBoundingClientRect();
+    const x = Math.max(12, Math.min(settings.panelPosition.x, innerWidth - rect.width - 12));
+    const y = Math.max(12, Math.min(settings.panelPosition.y, innerHeight - rect.height - 12));
+    settings.panelPosition = { x: Math.round(x), y: Math.round(y) };
+    setStyle('right', 'auto');
+    setStyle('bottom', 'auto');
+    setStyle('left', settings.panelPosition.x + 'px');
+    setStyle('top', settings.panelPosition.y + 'px');
+  }
+
+  function bindPointerDrag(target, handlers) {
+    let state = null;
+    function finish(commit, event) {
+      if (!state || (event?.pointerId !== undefined && event.pointerId !== state.pointerId)) return;
+      const previous = state;
+      state = null;
+      try {
+        if (target.hasPointerCapture(previous.pointerId)) target.releasePointerCapture(previous.pointerId);
+      } catch { /* El navegador puede haber liberado el puntero al cancelar. */ }
+      handlers.end(previous, commit, event);
+    }
+    target.addEventListener('pointerdown', event => {
+      if (state || !event.isPrimary || event.button !== 0) return;
+      const initial = handlers.start(event);
+      if (!initial) return;
+      state = { ...initial, pointerId: event.pointerId, moved: false };
+      event.preventDefault();
+      event.stopPropagation();
+      try { target.setPointerCapture(event.pointerId); }
+      catch { finish(false, event); }
+    });
+    target.addEventListener('pointermove', event => {
+      if (!state || event.pointerId !== state.pointerId) return;
+      event.preventDefault();
+      event.stopPropagation();
+      handlers.move(state, event);
+    });
+    target.addEventListener('pointerup', event => finish(true, event));
+    target.addEventListener('pointercancel', event => finish(false, event));
+    target.addEventListener('lostpointercapture', event => finish(false, event));
+    document.addEventListener('keydown', event => {
+      if (state && event.key === 'Escape') { event.preventDefault(); finish(false); }
+    });
+    document.addEventListener('visibilitychange', () => { if (document.hidden) finish(false); });
+    window.addEventListener('blur', () => finish(false));
+    return () => finish(false);
+  }
+
+  function installHelperDragging() {
+    ui.cancelPanelDrag = bindPointerDrag(ui.header, {
+      start(event) {
+        if (event.target.closest('button, input, a')) return null;
+        ui.cancelPriorityDrag?.();
+        const rect = ui.section.getBoundingClientRect();
+        return { startX: event.clientX, startY: event.clientY, x: rect.left, y: rect.top,
+          original: settings.panelPosition ? { ...settings.panelPosition } : null };
+      },
+      move(state, event) {
+        const dx = event.clientX - state.startX, dy = event.clientY - state.startY;
+        if (!state.moved && Math.hypot(dx, dy) < 4) return;
+        state.moved = true;
+        ui.header.classList.add('is-dragging');
+        settings.panelPosition = { x: state.x + dx, y: state.y + dy };
+        layoutHelper();
+      },
+      end(state, commit) {
+        ui.header.classList.remove('is-dragging');
+        if (!commit) settings.panelPosition = state.original;
+        layoutHelper();
+        if (commit && state.moved) saveSettings();
+      },
+    });
+  }
+
+  function installPriorityDragging() {
+    const clearMarkers = () => {
+      ui.choices.classList.remove('is-sorting');
+      for (const { item } of ui.items.values()) item.classList.remove('is-dragging', 'drop-before', 'drop-after');
+    };
+    ui.cancelPriorityDrag = bindPointerDrag(ui.choices, {
+      start(event) {
+        const handle = event.target.closest('[data-action="priority-drag"]');
+        if (!handle) return null;
+        ui.cancelPanelDrag?.();
+        handle.focus({ preventScroll: true });
+        const id = handle.closest('[data-building-id]').dataset.buildingId;
+        return { id, startY: event.clientY, order: [...settings.order], index: settings.order.indexOf(id) };
+      },
+      move(state, event) {
+        if (state.order.join() !== settings.order.join()) { ui.cancelPriorityDrag(); return; }
+        if (!state.moved && Math.abs(event.clientY - state.startY) < 4) return;
+        state.moved = true;
+        const section = ui.section.getBoundingClientRect();
+        if (event.clientY < section.top + 45) ui.section.scrollTop -= 18;
+        else if (event.clientY > section.bottom - 30) ui.section.scrollTop += 18;
+        const others = state.order.filter(id => id !== state.id);
+        const before = others.findIndex(id => {
+          const rect = ui.items.get(id).item.getBoundingClientRect();
+          return event.clientY < rect.top + rect.height / 2;
+        });
+        state.index = before < 0 ? others.length : before;
+        clearMarkers();
+        ui.choices.classList.add('is-sorting');
+        ui.items.get(state.id).item.classList.add('is-dragging');
+        if (before < 0) ui.items.get(others.at(-1)).item.classList.add('drop-after');
+        else ui.items.get(others[before]).item.classList.add('drop-before');
+      },
+      end(state, commit, event) {
+        clearMarkers();
+        const rect = ui.choices.getBoundingClientRect();
+        const section = ui.section.getBoundingClientRect();
+        const inside = event && event.clientX >= rect.left - 24 && event.clientX <= rect.right + 24
+          && event.clientY >= section.top && event.clientY <= section.bottom;
+        if (!commit || !state.moved || !inside || state.order.join() !== settings.order.join()) return;
+        const order = state.order.filter(id => id !== state.id);
+        order.splice(state.index, 0, state.id);
+        if (order.join() === settings.order.join()) return;
+        settings.order = order;
+        saveSettings();
+        notifyPriorityOrder();
+        syncChoices();
+        ui.items.get(state.id).drag.focus({ preventScroll: true });
+        schedule();
+      },
+    });
+  }
+
+  function notifyPriorityOrder(ship = false) {
+    const order = ship ? settings.shipOrder : settings.order;
+    const names = ship ? SHIPS : BUILDINGS;
+    emitEvent('settings.priority', 'Prioridad de ' + (ship ? 'naves' : 'edificios') + ': '
+      + order.map(key => names.find(([known]) => known === key)?.[1] || key).join(' → ') + '.');
   }
 
   function movePriority(id, delta, ship = false) {
@@ -654,8 +1100,8 @@
     ui.toggle.title = settings.enabled ? 'Pausar automatización' : 'Reanudar automatización';
     setText(ui.status, message);
     setText(ui.last, lastClick ? `Último clic: ${lastClick}` : '');
-    if (ui.details.open !== settings.expanded) ui.details.open = settings.expanded;
-    if (ui.fleetDetails.open !== settings.fleetExpanded) ui.fleetDetails.open = settings.fleetExpanded;
+    syncSettingsTabs();
+    layoutHelper();
     if (ui.depotThreshold.getRootNode().activeElement !== ui.depotThreshold) {
       ui.depotThreshold.value = String(settings.depotFillPercent);
     }
@@ -712,6 +1158,7 @@
     const fleetPanel = document.querySelector(FLEET_PANEL);
     if ((!panel && !fleetPanel) || !document.body) {
       observingNotifications = false;
+      reports.tick({ active: false, enabled: notifier.isEventEnabled('game.reports') });
       observeGameEvents([], false);
       // Si la página desmonta el panel durante una petición, conserva el bloqueo
       // hasta que se agote su plazo para no enviar otro clic desde otra pestaña.
@@ -737,7 +1184,10 @@
       (isVisible(panel) || isVisible(fleetPanel));
     observingNotifications = observeNotifications;
     if (observeNotifications) acquireLeadership();
-    observeGameEvents(current, leader && observeNotifications);
+    const reportsState = reports.tick({ active: leader && observeNotifications,
+      enabled: notifier.isEventEnabled('game.reports'), unread: readUnread('reports') });
+    setText(ui.reportsStatus, reportsState.status);
+    observeGameEvents(current, leader && observeNotifications, reportsState.apiAvailable);
 
     if (pending) {
       const requestSystemName = pending.systemName;
@@ -899,6 +1349,13 @@
   }
 
   // BEGIN NOTIFIER
+  /* Paste createNotifier inside the userscript's IIFE. Required metadata:
+   * @grant GM_xmlhttpRequest
+   * @grant GM_getValue
+   * @grant GM_setValue
+   * @connect api.telegram.org
+   * All credentials and notification preferences use userscript storage only.
+   */
   function createNotifier(deps = {}) {
     const own = (key) => Object.prototype.hasOwnProperty.call(deps, key);
     const gmGet = own('gmGetValue') ? deps.gmGetValue
@@ -921,9 +1378,40 @@
     const BROWSER_GAP = 3100;
     const REQUEST_TIMEOUT = 15000;
     const MAX_429_RETRIES = 4;
+    const EVENT_GROUPS = [
+      { label: 'Actividad', enabled: true, entries: [
+        ['request.sent', 'Solicitud enviada', '📤'],
+        ['building.queued', 'Mejora en cola', '🏗️'],
+        ['ships.queued', 'Naves en construcción', '🚀'],
+        ['building.completed', 'Mejora completada', '✅'],
+        ['fleet.changed', 'Flota actualizada', '🛸'],
+        ['game.toast', 'Aviso del juego', '🔔'],
+        ['game.reports', 'Informe del juego', '📋'],
+        ['game.messages', 'Mensajes sin leer', '💬'],
+      ] },
+      { label: 'Problemas', enabled: true, entries: [
+        ['request.failed', 'Pedido fallido', '❌'],
+        ['request.rejected', 'Mejora rechazada', '🚫'],
+        ['request.unconfirmed', 'Pedido sin confirmación', '⚠️'],
+        ['automation.paused', 'Pausa automática', '⏸️'],
+      ] },
+      { label: 'Ajustes', enabled: false, entries: [
+        ['settings.buildings', 'Ajustes de edificios', '⚙️'],
+        ['settings.minimum', 'Mínimos de naves', '⚙️'],
+        ['settings.fleet_mode', 'Recuento de naves', '⚙️'],
+        ['settings.priority', 'Prioridades', '⚙️'],
+        ['settings.depot', 'Umbral del Depot', '⚙️'],
+        ['settings.automation', 'Pausa o reanudación manual', '⏯️'],
+      ] },
+    ];
+    const EVENT_TYPES = EVENT_GROUPS.flatMap((group) => group.entries.map(([type]) => type));
+    const EVENT_META = new Map(EVENT_GROUPS.flatMap((group) =>
+      group.entries.map(([type, label, icon]) => [type, { label, icon }])));
+    const DEFAULT_EVENTS = Object.fromEntries(EVENT_GROUPS.flatMap((group) =>
+      group.entries.map(([type]) => [type, group.enabled])));
     const storageAvailable = typeof gmGet === 'function' && typeof gmSet === 'function';
     const telegramAvailable = storageAvailable && typeof gmRequest === 'function';
-    const defaults = { browserEnabled: false, telegramEnabled: false, botToken: '', chatId: '' };
+    const defaults = { browserEnabled: false, telegramEnabled: false, botToken: '', chatId: '', events: DEFAULT_EVENTS, eventsExpanded: false };
     let config = { ...defaults };
     let destroyed = false;
     let storageError = '';
@@ -947,7 +1435,7 @@
     const counters = {
       accepted: 0, duplicates: 0, browserSent: 0, telegramSent: 0,
       browserFailed: 0, telegramFailed: 0, browserDropped: 0, telegramDropped: 0,
-      rateRetries: 0,
+      rateRetries: 0, filtered: 0,
     };
 
     function validToken(value) {
@@ -969,13 +1457,48 @@
     }
 
     function normalizeConfig(saved) {
-      if (!saved || typeof saved !== 'object') return { ...defaults };
+      if (!saved || typeof saved !== 'object') return { ...defaults, events: { ...DEFAULT_EVENTS } };
       return {
         browserEnabled: saved.browserEnabled === true,
         telegramEnabled: saved.telegramEnabled === true,
+        eventsExpanded: saved.eventsExpanded === true,
         botToken: validToken(saved.botToken) ? saved.botToken : '',
         chatId: validChat(saved.chatId) ? saved.chatId : '',
+        events: Object.fromEntries(EVENT_TYPES.map((type) => [type,
+          typeof saved.events?.[type] === 'boolean' ? saved.events[type] : DEFAULT_EVENTS[type]])),
       };
+    }
+
+    function eventAllowed(type) {
+      return EVENT_TYPES.includes(type) && config.events[type] === true;
+    }
+
+    function queuedEventAllowed(item) {
+      return item.test === true || eventAllowed(item.type);
+    }
+
+    function dropFilteredQueueItems() {
+      for (let index = browserQueue.length - 1; index >= 0; index -= 1) {
+        if (!queuedEventAllowed(browserQueue[index])) {
+          browserQueue.splice(index, 1);
+          counters.browserDropped += 1;
+        }
+      }
+      for (let index = telegramQueue.length - 1; index >= 0; index -= 1) {
+        if (!queuedEventAllowed(telegramQueue[index])) {
+          telegramQueue.splice(index, 1);
+          counters.telegramDropped += 1;
+        }
+      }
+      if (!browserQueue.length && browserTimer !== null) {
+        cancelTimer(browserTimer);
+        browserTimer = null;
+      }
+      if (!telegramQueue.length && telegramTimer !== null) {
+        cancelTimer(telegramTimer);
+        telegramTimer = null;
+      }
+      // A filter only removes unsent items; it never aborts an in-flight request.
     }
 
     function refreshSeen() {
@@ -1074,6 +1597,7 @@
         updateUI();
         return false;
       }
+      next = normalizeConfig(next);
       try { gmSet(CONFIG_KEY, { ...next }); }
       catch {
         storageError = 'No se pudo guardar en el gestor. La configuración no ha cambiado.';
@@ -1084,8 +1608,10 @@
       if (destinationChanged || (config.telegramEnabled && !next.telegramEnabled)) clearTelegramQueue();
       if (!next.browserEnabled) clearBrowserQueue();
       config = { ...next };
+      dropFilteredQueueItems();
       storageError = '';
       updateUI();
+      try { deps.onSettingsChange?.(); } catch { /* Los avisos no dependen de la copia de seguridad. */ }
       return true;
     }
 
@@ -1096,10 +1622,13 @@
         const destinationChanged = next.botToken !== config.botToken || next.chatId !== config.chatId;
         const telegramChanged = next.telegramEnabled !== config.telegramEnabled;
         const browserChanged = next.browserEnabled !== config.browserEnabled;
-        if (!destinationChanged && !telegramChanged && !browserChanged) return;
+        const eventsChanged = EVENT_TYPES.some((type) => next.events[type] !== config.events[type]);
+        if (!destinationChanged && !telegramChanged && !browserChanged && !eventsChanged
+            && next.eventsExpanded === config.eventsExpanded) return;
         if (destinationChanged || (config.telegramEnabled && !next.telegramEnabled)) clearTelegramQueue();
         if (config.browserEnabled && !next.browserEnabled) clearBrowserQueue();
         config = next;
+        dropFilteredQueueItems();
         if (destinationChanged || (telegramChanged && next.telegramEnabled)) {
           telegramBlocked = false;
           consecutiveFailures = 0;
@@ -1114,7 +1643,8 @@
 
     function isEnabled() {
       refreshConfig();
-      return !destroyed && (config.browserEnabled || config.telegramEnabled);
+      return !destroyed && (config.browserEnabled || config.telegramEnabled)
+        && EVENT_TYPES.some((type) => config.events[type]);
     }
 
     function armBrowser() {
@@ -1127,6 +1657,7 @@
 
     function pumpBrowser() {
       refreshConfig();
+      dropFilteredQueueItems();
       if (destroyed || !browserQueue.length) return;
       if (!config.browserEnabled || permission() !== 'granted') {
         clearBrowserQueue();
@@ -1203,6 +1734,7 @@
 
     function pumpTelegram() {
       refreshConfig();
+      dropFilteredQueueItems();
       if (destroyed || activeRequest || !telegramQueue.length) return;
       if (now() < nextTelegramAt) { armTelegram(); return; }
       if (telegramBlocked || !configured()) return;
@@ -1220,6 +1752,8 @@
       updateUI();
 
       function finish(kind, response) {
+        if (destroyed || request.settled || activeRequest !== request) return;
+        refreshConfig();
         if (destroyed || request.settled || activeRequest !== request) return;
         request.settled = true;
         cancelTimer(request.watchdog);
@@ -1241,7 +1775,10 @@
         if (kind === 'load' && (status === 429 || apiCode === 429)) {
           const delay = retryDelay(response, payload, item.retries);
           nextTelegramAt = Math.max(nextTelegramAt, now() + delay);
-          if (item.retries < MAX_429_RETRIES && Number.isFinite(nextTelegramAt)) {
+          if (!queuedEventAllowed(item)) {
+            counters.telegramDropped += 1;
+            telegramStatus = 'Aviso descartado por su filtro; no se reintentará.';
+          } else if (item.retries < MAX_429_RETRIES && Number.isFinite(nextTelegramAt)) {
             item.retries += 1;
             counters.rateRetries += 1;
             telegramQueue.unshift(item);
@@ -1298,9 +1835,15 @@
       try {
         if (destroyed || !event || typeof event !== 'object') return false;
         refreshConfig();
-        const title = plain(event.title || 'Old Light', 500);
-        const message = plain(event.message || '', 4096);
-        const type = plain(event.type || 'event', 120);
+        const type = typeof event.type === 'string' ? event.type : '';
+        if (!eventAllowed(type)) { counters.filtered += 1; return false; }
+        const meta = EVENT_META.get(type);
+        const title = `${meta.icon} Old Light · ${meta.label}`;
+        const systemName = plain(typeof event.systemName === 'string'
+          ? event.systemName.replace(/\s+/g, ' ').trim() : '', 400);
+        const detail = plain(event.message || '', 4096);
+        const message = (systemName ? `Sistema: ${systemName}\n\n` : '') + detail;
+        const formatted = plain(title + (systemName ? '\n' : '\n\n') + message, 4096);
         const identity = typeof event.id === 'string' && event.id ? event.id.slice(0, 8192)
           : typeof event.id === 'number' ? String(event.id) : title + '\n' + message;
         const key = keyFor(type + '\0' + identity);
@@ -1313,7 +1856,7 @@
           return false;
         }
         remember(key);
-        const item = { key, title, message, text: plain('[Old Light] ' + title + '\n' + message, 4096), retries: 0 };
+        const item = { key, type, title, message, text: formatted, retries: 0 };
         let accepted = false;
         if (browserOn) {
           if (browserQueue.length < MAX_QUEUE) { browserQueue.push(item); accepted = true; armBrowser(); }
@@ -1338,6 +1881,7 @@
         destroyed,
         storageAvailable,
         storageError,
+        events: { ...config.events },
         browser: {
           enabled: config.browserEnabled, permission: permission(),
           queued: browserQueue.length, status: browserStatus,
@@ -1354,7 +1898,7 @@
 
     function updateUI() {
       if (!mounted) return;
-      const { root, browser, telegram, permit, token, chat, test, status } = mounted;
+      const { root, browser, telegram, permit, token, chat, test, status, eventInputs, eventCount } = mounted;
       const p = permission();
       browser.checked = config.browserEnabled;
       browser.disabled = !storageAvailable || p === 'unsupported' || (p !== 'granted' && !config.browserEnabled);
@@ -1366,6 +1910,16 @@
       token.placeholder = config.botToken ? 'Token guardado; vacío lo conserva' : 'Token del bot';
       chat.placeholder = config.chatId ? 'Chat guardado; vacío lo conserva' : 'ID numérico o @canal';
       test.disabled = !configured() || !!activeRequest || telegramQueue.some((item) => item.test);
+      for (const [type, input] of eventInputs) {
+        input.checked = config.events[type];
+        input.disabled = !storageAvailable;
+      }
+      const enabledEvents = EVENT_TYPES.filter((type) => config.events[type]).length;
+      const eventCountText = `${enabledEvents} de ${EVENT_TYPES.length} tipos activados. Se guardan al cambiarlos.`;
+      if (eventCount.textContent !== eventCountText) eventCount.textContent = eventCountText;
+      mounted.eventsAll.disabled = !storageAvailable || enabledEvents === EVENT_TYPES.length;
+      mounted.eventsNone.disabled = !storageAvailable || enabledEvents === 0;
+      if (mounted.eventsDetails.open !== config.eventsExpanded) mounted.eventsDetails.open = config.eventsExpanded;
       const browserLine = p === 'denied' ? 'Navegador: permiso bloqueado en los ajustes del sitio.'
         : p === 'unsupported' ? 'Este navegador no admite avisos de escritorio.'
           : 'Navegador: ' + (config.browserEnabled ? browserStatus || 'activado.' : 'desactivado.');
@@ -1403,6 +1957,11 @@
           .notifications-details button{box-sizing:border-box;max-width:100%;padding:7px;border:1px solid #52657f;border-radius:5px;background:#23344d;color:inherit;cursor:pointer;font:inherit;white-space:normal}
           .notifications-details button:disabled{opacity:.55;cursor:default}
           .notifications-details .notify-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+          .notifications-details .notification-events-details{min-width:0;border:1px solid #344257;border-radius:5px;padding:6px}
+          .notifications-details .notification-event-groups{display:grid;gap:8px;margin-top:8px;min-width:0}
+          .notifications-details .notify-event-group{display:grid;gap:7px;min-width:0;margin:0;padding:8px;border:1px solid #344257;border-radius:4px}
+          .notifications-details .notify-event-group legend{padding:0 4px;font-weight:600}
+          .notifications-details .notify-event-group label{align-items:flex-start;font-size:11px;line-height:1.35}
           .notifications-details .notify-note{margin:0;font-size:11px;line-height:1.4;opacity:.85}
           .notifications-details .notify-status{margin:0;white-space:pre-line;font-size:11px;line-height:1.45}
           .notifications-details :focus-visible{outline:2px solid #97c8ff;outline-offset:2px}
@@ -1412,6 +1971,17 @@
           <label><input class="notification-browser-toggle" type="checkbox"> Avisos del navegador</label>
           <button class="notification-permission" type="button">Permitir avisos del navegador</button>
           <label><input class="notification-telegram-toggle" type="checkbox"> Avisos por Telegram</label>
+          <details class="notification-events-details">
+            <summary>Tipos de notificación</summary>
+            <p class="notify-note">Estos filtros se aplican al navegador y a Telegram.</p>
+            <div class="notify-actions"><button class="notification-events-all" type="button">Todos</button><button class="notification-events-none" type="button">Ninguno</button></div>
+            <div class="notification-event-groups">${EVENT_GROUPS.map((group) =>
+              `<fieldset class="notify-event-group"><legend>${group.label}</legend>${group.entries.map(([type, label]) =>
+                `<label><input class="notification-event-toggle" type="checkbox" data-notification-event="${type}"> ${label}</label>`
+              ).join('')}</fieldset>`
+            ).join('')}</div>
+            <p class="notify-note notification-events-count"></p>
+          </details>
           <label class="notify-field">Token de tu bot<input class="notification-token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="221"></label>
           <label class="notify-field">Chat ID<input class="notification-chat-id" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="65"></label>
           <p class="notify-note">Los campos vacíos conservan lo guardado. Guardar no envía mensajes. Enviar prueba manda un mensaje al chat guardado.</p>
@@ -1424,8 +1994,17 @@
         root, browser: query('.notification-browser-toggle'), telegram: query('.notification-telegram-toggle'),
         permit: query('.notification-permission'), token: query('.notification-token'),
         chat: query('.notification-chat-id'), test: query('.notification-test'), status: query('.notify-status'),
+        eventInputs: new Map(EVENT_TYPES.map((type) => [type, query(`[data-notification-event="${type}"]`)])),
+        eventCount: query('.notification-events-count'), eventsAll: query('.notification-events-all'),
+        eventsNone: query('.notification-events-none'), eventsDetails: query('.notification-events-details'),
       };
       const ui = mounted;
+      ui.eventsDetails.addEventListener('toggle', () => {
+        const open = ui.eventsDetails.open;
+        if (open === config.eventsExpanded) return;
+        refreshConfig();
+        writeConfig({ ...config, eventsExpanded: open });
+      });
 
       function saveFields(enableTelegram) {
         refreshConfig();
@@ -1450,6 +2029,19 @@
       }
 
       query('.notification-save').addEventListener('click', () => saveFields());
+      for (const [type, input] of ui.eventInputs) {
+        input.addEventListener('change', () => {
+          const enabled = input.checked;
+          refreshConfig();
+          writeConfig({ ...config, events: { ...config.events, [type]: enabled } });
+        });
+      }
+      function setAllEvents(enabled) {
+        refreshConfig();
+        writeConfig({ ...config, events: Object.fromEntries(EVENT_TYPES.map((type) => [type, enabled])) });
+      }
+      ui.eventsAll.addEventListener('click', () => setAllEvents(true));
+      ui.eventsNone.addEventListener('click', () => setAllEvents(false));
       ui.telegram.addEventListener('change', () => {
         const desired = ui.telegram.checked;
         refreshConfig();
@@ -1508,7 +2100,7 @@
         consecutiveFailures = 0;
         telegramQueue.push({
           key: 'test-' + (++testSequence), test: true, retries: 0,
-          text: '[Old Light] Prueba de notificaciones. Telegram está configurado para recibir tus avisos.',
+          text: '🧪 Old Light · Prueba de notificaciones\n\nTelegram está configurado para recibir tus avisos.',
         });
         telegramStatus = 'Prueba solicitada en cola.';
         updateUI();
@@ -1530,6 +2122,36 @@
       return root;
     }
 
+    function isEventEnabled(type) {
+      refreshConfig();
+      return !destroyed && eventAllowed(type)
+        && ((config.browserEnabled && permission() === 'granted') || (config.telegramEnabled && configured()));
+    }
+
+    function exportConfig() {
+      refreshConfig();
+      return { ...config, events: { ...config.events } };
+    }
+
+    function validateConfig(value) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)
+          || typeof value.browserEnabled !== 'boolean' || typeof value.telegramEnabled !== 'boolean'
+          || typeof value.botToken !== 'string' || typeof value.chatId !== 'string'
+          || (value.botToken && !validToken(value.botToken)) || (value.chatId && !validChat(value.chatId))
+          || (value.events !== undefined && (!value.events || typeof value.events !== 'object' || Array.isArray(value.events)))
+          || EVENT_TYPES.some(type => value.events?.[type] !== undefined && typeof value.events[type] !== 'boolean')
+          || (value.eventsExpanded !== undefined && typeof value.eventsExpanded !== 'boolean')) {
+        throw new Error('La configuración de avisos de la copia no es válida.');
+      }
+      return normalizeConfig(value);
+    }
+
+    function importConfig(value) {
+      const next = validateConfig(value);
+      if (!writeConfig(next)) throw new Error('No se pudo guardar la configuración de avisos.');
+      return true;
+    }
+
     function destroy() {
       if (destroyed) return;
       destroyed = true;
@@ -1539,9 +2161,990 @@
       mounted = null;
     }
 
-    return Object.freeze({ emit, isEnabled, mount, getDiagnostics, destroy, get status() { return getDiagnostics(); } });
+    return Object.freeze({ emit, isEnabled, isEventEnabled, mount, getDiagnostics, exportConfig, validateConfig, importConfig,
+      destroy, get status() { return getDiagnostics(); } });
   }
   // END NOTIFIER
+
+  // BEGIN REPORTS
+  /* Paste this factory inside the userscript IIFE. It only reads the native API:
+   * GET https://api.oldlight.io/api/galaxy/{slug}/reports?limit=20[&before=cursor]
+   * GET https://api.oldlight.io/api/galaxy/{slug}/reports/{UUID}
+   * Verified in galaxy-CRpoK2yj.js and base-DKX6or_P.js supplied with this task.
+   * No UI clicks, POST /read, action tokens, or mutation endpoints are used.
+   *
+   * createReportsWatcher({ send, fetch?, gmGetValue?, gmSetValue?, now?,
+   *   getPathname?, getHidden?, AbortController?, setTimeout?, clearTimeout? })
+   * .tick({ active, enabled = true, unread }) is synchronous and never awaits I/O.
+   * active must mean: this tab holds the root Web Lock, visible HUD, visible tab.
+   * enabled must reflect game.reports plus a notification channel, even while
+   * inactive. Explicitly disabling it starts a new silent baseline when enabled.
+   * .getDiagnostics() exposes status only; .destroy() cancels timers and GETs.
+   * The old unread-count notification should be used only as an API fallback.
+   * Runtime checkpoints are not settings and should not be imported/exported.
+   */
+  function createReportsWatcher(deps = {}) {
+    const own = (key) => Object.prototype.hasOwnProperty.call(deps, key);
+    const fetchRead = own('fetch') ? deps.fetch
+      : (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
+    const gmGet = own('gmGetValue') ? deps.gmGetValue
+      : (typeof GM_getValue === 'function' ? GM_getValue : null);
+    const gmSet = own('gmSetValue') ? deps.gmSetValue
+      : (typeof GM_setValue === 'function' ? GM_setValue : null);
+    const Controller = own('AbortController') ? deps.AbortController
+      : (typeof AbortController === 'function' ? AbortController : null);
+    const send = typeof deps.send === 'function' ? deps.send : null;
+    const now = deps.now || (() => Date.now());
+    const later = deps.setTimeout || ((fn, ms) => setTimeout(fn, ms));
+    const cancelTimer = deps.clearTimeout || ((id) => clearTimeout(id));
+    const getPathname = deps.getPathname || (() => globalThis.location?.pathname || '');
+    const getHidden = deps.getHidden || (() => typeof document !== 'undefined' && document.hidden);
+    const PREFIX = 'old-light-reports:runtime:v1:';
+    const API = 'https://api.oldlight.io/api/galaxy/';
+    const POLL_MS = 25000;
+    const WAKE_GAP_MS = 3000;
+    const TIMEOUT_MS = 10000;
+    const PAGE_SIZE = 20;
+    const PAGES_PER_CYCLE = 5;
+    const DETAILS_PER_CYCLE = 20;
+    const MAX_PENDING = 100;
+    const MAX_SEEN = 512;
+    const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const shipNames = { probe: 'Probe', marauder: 'Marauder', sentinel: 'Sentinel', vanguard: 'Vanguard' };
+    const buildingNames = {
+      command_center: 'Command Center', reactor: 'Reactor',
+      palladium_extractor: 'Palladium Extractor', iridium_extractor: 'Iridium Extractor',
+      warehouse: 'Resource Depot', shipyard: 'Shipyard', trade_hub: 'Trade Hub',
+    };
+    let active = false;
+    let enabled = true;
+    let destroyed = false;
+    let slug = '';
+    let epoch = 0;
+    let checkpoint = blankCheckpoint();
+    let pollTimer = null;
+    let request = null;
+    let running = null;
+    let lastUnread = null;
+    let lastCycleAt = -Infinity;
+    let nextPollAt = 0;
+    let retryAt = 0;
+    let wakeRequested = false;
+    let failures = 0;
+    let lastError = '';
+    let storageError = false;
+    let lastListAt = null;
+    let phase = 'idle';
+    const counters = { polls: 0, pages: 0, details: 0, emitted: 0, fallbacks: 0, invalidItems: 0, errors: 0 };
+
+    function blankCheckpoint() {
+      return { version: 1, initialized: false, suspended: false, watermark: null,
+        seen: [], pending: [], scan: null };
+    }
+
+    function object(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+    function finite(value) { return typeof value === 'number' && Number.isFinite(value); }
+    function stamp(value) {
+      if (finite(value)) return value >= 0 && value <= 8640000000000000 ? value : null;
+      if (typeof value !== 'string' || value.length > 80 || !value.trim()) return null;
+      const parsed = Date.parse(value);
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+    }
+    function maxStamp(a, b) { return b === null ? a : a === null ? b : Math.max(a, b); }
+    function clean(value, limit = 240) {
+      if (typeof value !== 'string') return '';
+      const text = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim();
+      return Array.from(text).slice(0, limit).join('');
+    }
+    function cursor(value) {
+      return typeof value === 'string' && value.length > 0 && value.length <= 2048
+        && !/[\u0000-\u001f\u007f]/.test(value) ? value : null;
+    }
+    function pathSlug() {
+      try {
+        const match = String(getPathname()).match(/^\/game\/galaxy\/([A-Za-z0-9_-]{1,64})(?:\/|$)/);
+        return match ? match[1] : '';
+      } catch { return ''; }
+    }
+    function canRead() {
+      return !!slug && typeof fetchRead === 'function' && typeof Controller === 'function' && !!send;
+    }
+    function current(token) {
+      try { return !destroyed && active && enabled && token === epoch && pathSlug() === slug && !getHidden(); }
+      catch { return false; }
+    }
+    function fault(kind, status = 0, waitMs = 0) {
+      const result = new Error(kind);
+      result.kind = kind; result.status = status; result.waitMs = waitMs;
+      return result;
+    }
+    function assertCurrent(token) { if (!current(token)) throw fault('interrupted'); }
+
+    function summary(value) {
+      if (!object(value) || typeof value.id !== 'string' || !UUID.test(value.id)) return null;
+      return { id: value.id.toLowerCase(), takenAt: stamp(value.takenAt),
+        title: clean(value.title), verdict: clean(value.verdict, 80),
+        attempts: Number.isInteger(value.attempts) ? Math.min(3, Math.max(0, value.attempts)) : 0 };
+    }
+
+    function normalize(saved) {
+      const out = blankCheckpoint();
+      if (!object(saved) || saved.version !== 1) return out;
+      out.initialized = saved.initialized === true;
+      out.suspended = saved.suspended === true;
+      out.watermark = stamp(saved.watermark);
+      if (Array.isArray(saved.seen)) {
+        const unique = new Map();
+        for (const pair of saved.seen.slice(-MAX_SEEN)) {
+          if (Array.isArray(pair) && typeof pair[0] === 'string' && UUID.test(pair[0])) {
+            unique.set(pair[0].toLowerCase(), stamp(pair[1]));
+          }
+        }
+        out.seen = Array.from(unique);
+      }
+      if (Array.isArray(saved.pending)) {
+        const unique = new Map();
+        for (const value of saved.pending.slice(0, MAX_PENDING)) {
+          const item = summary(value);
+          if (item) unique.set(item.id, item);
+        }
+        out.pending = Array.from(unique.values());
+      }
+      if (object(saved.scan) && (saved.scan.before === null || cursor(saved.scan.before))) {
+        const anchors = Array.isArray(saved.scan.anchors) ? saved.scan.anchors : [];
+        out.scan = { before: cursor(saved.scan.before), floor: stamp(saved.scan.floor),
+          high: stamp(saved.scan.high), anchors: anchors.filter((id) => typeof id === 'string' && UUID.test(id))
+            .slice(0, MAX_SEEN + MAX_PENDING).map((id) => id.toLowerCase()) };
+      }
+      if (!out.initialized || out.suspended) { out.pending = []; out.scan = null; }
+      return out;
+    }
+
+    function loadCheckpoint() {
+      if (!slug) { checkpoint = blankCheckpoint(); return; }
+      if (typeof gmGet !== 'function') return;
+      try { checkpoint = normalize(gmGet(PREFIX + slug, null)); storageError = false; }
+      catch { storageError = true; }
+    }
+
+    function saveCheckpoint() {
+      if (!slug || typeof gmSet !== 'function') return;
+      try {
+        gmSet(PREFIX + slug, { ...checkpoint,
+          seen: checkpoint.seen.map((pair) => [...pair]),
+          pending: checkpoint.pending.map((item) => ({ ...item })),
+          scan: checkpoint.scan ? { ...checkpoint.scan, anchors: [...checkpoint.scan.anchors] } : null });
+        storageError = false;
+      } catch { storageError = true; }
+    }
+
+    function remember(item) {
+      checkpoint.seen = checkpoint.seen.filter(([id]) => id !== item.id);
+      checkpoint.seen.push([item.id, item.takenAt]);
+      if (checkpoint.seen.length > MAX_SEEN) checkpoint.seen.splice(0, checkpoint.seen.length - MAX_SEEN);
+    }
+
+    function stop() {
+      epoch++;
+      if (pollTimer !== null) { cancelTimer(pollTimer); pollTimer = null; }
+      if (request) request.cancel();
+    }
+
+    function retryDelay(response) {
+      let value = '';
+      try { value = response.headers?.get('Retry-After') || ''; } catch { /* Optional HTTP header. */ }
+      const seconds = /^\d+(?:\.\d+)?$/.test(value.trim()) ? Number(value) : NaN;
+      const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - now();
+      // Respect the server's delay; use the browser's maximum safe timer range.
+      return Number.isFinite(delay) ? Math.min(2147483647, Math.max(0, delay)) : 0;
+    }
+
+    async function readJSON(url, token) {
+      assertCurrent(token);
+      const controller = new Controller();
+      let timer = null;
+      let settled = false;
+      let activeRead;
+      try {
+        return await new Promise((resolve, reject) => {
+          const finish = (error, value) => {
+            if (settled) return;
+            settled = true;
+            if (timer !== null) cancelTimer(timer);
+            error ? reject(error) : resolve(value);
+          };
+          activeRead = { cancel() {
+            finish(fault('interrupted'));
+            try { controller.abort(); } catch { /* The generation guard also ignores late responses. */ }
+          } };
+          request = activeRead;
+          timer = later(() => {
+            finish(fault('timeout'));
+            try { controller.abort(); } catch { /* Do not hold the watcher on a broken transport. */ }
+          }, TIMEOUT_MS);
+          Promise.resolve().then(() => {
+            assertCurrent(token);
+            return fetchRead(url, { method: 'GET', credentials: 'include', cache: 'no-store',
+              redirect: 'error', signal: controller.signal });
+          }).then(async (response) => {
+            assertCurrent(token);
+            if (!response || typeof response.json !== 'function') throw fault('schema');
+            if (!response.ok) throw fault('http', Number(response.status) || 0, retryDelay(response));
+            let data;
+            try { data = await response.json(); }
+            catch { throw fault('schema'); }
+            assertCurrent(token);
+            finish(null, data);
+          }).catch((error) => finish(error?.kind ? error : fault('network')));
+        });
+      } finally {
+        if (timer !== null) cancelTimer(timer);
+        if (request === activeRead) request = null;
+      }
+    }
+
+    async function readPage(before, token) {
+      const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
+      if (before !== null) params.set('before', before);
+      const payload = await readJSON(`${API}${slug}/reports?${params}`, token);
+      assertCurrent(token);
+      if (!object(payload) || !Array.isArray(payload.items)
+        || !(payload.nextCursor === null || cursor(payload.nextCursor))) throw fault('schema');
+      // A native page has at most 20 rows. A larger, changed schema is not silently truncated.
+      if (payload.items.length > PAGE_SIZE) throw fault('schema');
+      const items = payload.items.map(summary).filter(Boolean);
+      counters.invalidItems += payload.items.length - items.length;
+      if (payload.items.length && !items.length) throw fault('schema');
+      counters.pages++;
+      lastListAt = now();
+      return { items, nextCursor: cursor(payload.nextCursor) };
+    }
+
+    async function scanList(token) {
+      phase = 'list';
+      if (!checkpoint.initialized || checkpoint.suspended) {
+        const page = await readPage(null, token);
+        assertCurrent(token);
+        checkpoint = blankCheckpoint();
+        checkpoint.initialized = true;
+        for (const item of page.items) {
+          remember(item);
+          checkpoint.watermark = maxStamp(checkpoint.watermark, item.takenAt);
+        }
+        saveCheckpoint();
+        return;
+      }
+      if (!checkpoint.scan) {
+        checkpoint.scan = { before: null, floor: checkpoint.watermark, high: checkpoint.watermark,
+          anchors: [...checkpoint.seen.map(([id]) => id), ...checkpoint.pending.map((item) => item.id)] };
+      }
+      const scan = checkpoint.scan;
+      const anchors = new Set(scan.anchors);
+      const visited = new Set();
+      for (let pageNumber = 0; pageNumber < PAGES_PER_CYCLE; pageNumber++) {
+        if (checkpoint.pending.length >= MAX_PENDING) break;
+        const before = scan.before;
+        if (visited.has(before)) throw fault('schema');
+        visited.add(before);
+        const page = await readPage(before, token);
+        assertCurrent(token);
+        let boundary = false;
+        let full = false;
+        const known = new Set([...checkpoint.seen.map(([id]) => id), ...checkpoint.pending.map((item) => item.id)]);
+        for (const item of page.items) {
+          // Native pagination is newest first. Existing IDs or an older timestamp
+          // delimit the preceding scan, regardless of changing read/unread flags.
+          if (anchors.has(item.id) || (scan.floor !== null && item.takenAt !== null && item.takenAt < scan.floor)) {
+            boundary = true; break;
+          }
+          scan.high = maxStamp(scan.high, item.takenAt);
+          if (known.has(item.id)) continue;
+          if (checkpoint.pending.length >= MAX_PENDING) { full = true; break; }
+          checkpoint.pending.push(item);
+          known.add(item.id);
+        }
+        if (full) { saveCheckpoint(); break; } // Re-read this page after draining the bounded queue.
+        if (boundary || page.nextCursor === null) {
+          checkpoint.watermark = maxStamp(checkpoint.watermark, scan.high);
+          checkpoint.scan = null;
+          saveCheckpoint();
+          break;
+        }
+        if (page.nextCursor === before || visited.has(page.nextCursor)) throw fault('schema');
+        scan.before = page.nextCursor;
+        saveCheckpoint();
+      }
+    }
+
+    function number(value, round = false) {
+      if (!finite(value)) return '';
+      return (round ? Math.round(value) : value).toLocaleString('es-ES', { maximumFractionDigits: 2 });
+    }
+    function count(value) {
+      if (!object(value) || value.kind === 'unknown' || !finite(value.quantity)) return '???';
+      return `${value.kind === 'approximate' || value.approximate === true ? '~' : ''}${number(value.quantity)}`;
+    }
+    function fleet(values) {
+      if (!Array.isArray(values)) return '';
+      const entries = values.slice(0, 16).filter(object).map((item) => {
+        const name = shipNames[item.type] || clean(item.type, 40) || 'Tipo desconocido';
+        return `${name} ${count(item)}`;
+      });
+      return entries.join(' · ') || '0';
+    }
+    function resources(value, fields) {
+      if (!object(value)) return '';
+      return fields.filter(([key]) => finite(value[key]))
+        .map(([key, label]) => `${label} ${number(value[key], true)}`).join(' · ');
+    }
+    function locationText(value) {
+      if (!object(value)) return '';
+      const name = clean(value.name, 150);
+      const coordinates = finite(value.q) && finite(value.r) ? `(${value.q}, ${value.r})` : '';
+      const owner = clean(value.ownerName, 100);
+      return [name || (coordinates ? '' : 'Desconocido'), coordinates, owner ? `Propietario: ${owner}` : '']
+        .filter(Boolean).join(' · ');
+    }
+    function dateText(item, detail) {
+      const time = item.takenAt ?? stamp(detail?.createdAt);
+      if (time === null) return '';
+      try {
+        return new Intl.DateTimeFormat(undefined, { year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short' }).format(new Date(time));
+      } catch { return new Date(time).toISOString(); }
+    }
+
+    function reportEvent(item, detail = null, unavailable = '') {
+      const route = object(detail?.route) ? detail.route : {};
+      const sections = object(detail?.sections) ? detail.sections : {};
+      const battle = object(sections.battle) ? sections.battle : null;
+      const probe = object(sections.probe) ? sections.probe : null;
+      const variant = object(detail?.variant) ? detail.variant : {};
+      const lines = [];
+      if (item.title) lines.push(item.title);
+      if (item.verdict) lines.push(`Resultado: ${item.verdict}`);
+      const date = dateText(item, detail);
+      if (date) lines.push(`Fecha: ${date}`);
+      const from = locationText(route.from), to = locationText(route.to);
+      if (from) lines.push(`Origen: ${from}`);
+      if (to) lines.push(`Destino: ${to}`);
+      if (battle) {
+        lines.push('');
+        for (const [field, label] of [
+          ['attackerShips', 'Flota atacante'], ['attackerLost', 'Pérdidas atacantes'],
+          ['defenderShips', 'Flota defensora'], ['defenderLost', 'Pérdidas defensoras'],
+        ]) {
+          const text = fleet(battle[field]);
+          if (text) lines.push(`${label}: ${text}`);
+        }
+        const loot = resources(battle.plundered, [['pa', 'Palladium'], ['ir', 'Iridium'], ['credits', 'Créditos']]);
+        if (loot) lines.push(`Botín: ${loot}`);
+        const loyalty = battle.loyaltyChange;
+        if (object(loyalty)) {
+          if (finite(loyalty.before) && finite(loyalty.after)) {
+            lines.push(`Lealtad: ${number(loyalty.before)} → ${number(loyalty.after)}`);
+          } else if (finite(loyalty.after)) lines.push(`Lealtad final: ${number(loyalty.after)}`);
+          if (finite(loyalty.damageDealt)) lines.push(`Daño a la lealtad: ${number(loyalty.damageDealt)}`);
+          if (loyalty.captured === true) lines.push(battle.targetOwnerKind === 'owned' ? 'Sistema perdido.' : 'Sistema capturado.');
+        }
+        if (battle.combatDeficit === true) lines.push('Fuerza de combate reducida por déficit de créditos.');
+        if (finite(battle.defenderSectorBonusPct) && battle.defenderSectorBonusPct > 0) {
+          lines.push(`Bonificación del defensor: ${number(battle.defenderSectorBonusPct)}%.`);
+        }
+      }
+      if (probe) {
+        lines.push('');
+        if (probe.tier === 0) lines.push('Sondeo: todas las sondas perdidas; no se recuperó información.');
+        else {
+          lines.push(finite(probe.tier) ? `Inteligencia obtenida: nivel ${number(probe.tier)}.` : 'Inteligencia obtenida:');
+          const intel = resources(probe, [['palladium', 'Palladium'], ['iridium', 'Iridium']]);
+          if (intel) lines.push(`Recursos detectados: ${intel}`);
+          if (Array.isArray(probe.buildings) && probe.buildings.length) {
+            const buildings = probe.buildings.slice(0, 20).filter(object).map((entry) => {
+              const name = buildingNames[entry.type] || clean(entry.type, 40) || 'Edificio desconocido';
+              const level = finite(entry.level) ? `${entry.approximate === true ? '~' : ''}${number(entry.level)}` : '???';
+              return `${name}: nivel ${level}`;
+            });
+            if (buildings.length) lines.push('Edificios detectados:', ...buildings);
+          }
+          if (Array.isArray(probe.inTransit) && probe.inTransit.length) lines.push(`En tránsito: ${fleet(probe.inTransit)}`);
+          if (finite(probe.loyalty) && !battle?.loyaltyChange) lines.push(`Lealtad: ${number(probe.loyalty)}`);
+        }
+      }
+      if (object(sections.incoming) && finite(sections.incoming.attackerIntelTier) && sections.incoming.attackerIntelTier > 0) {
+        lines.push(`Información obtenida por el atacante: nivel ${number(sections.incoming.attackerIntelTier)}.`);
+      }
+      const variantLines = [];
+      if (variant.kind === 'capture_success' && battle?.loyaltyChange?.captured !== true) variantLines.push('Sistema capturado.');
+      if (variant.kind === 'capture_loss') {
+        if (battle?.loyaltyChange?.captured !== true) variantLines.push('Sistema perdido.');
+        if (finite(variant.creditsLost)) variantLines.push(`Créditos perdidos: ${number(variant.creditsLost, true)}`);
+      }
+      if (finite(variant.creditsSeized)) variantLines.push(`Créditos capturados: ${number(variant.creditsSeized, true)}`);
+      if (variant.kind === 'colonise_success') variantLines.push(`Colonización completada${clean(variant.targetLabel) ? `: ${clean(variant.targetLabel)}` : ''}.`);
+      if (variant.kind === 'colonise_abort') {
+        variantLines.push(variant.reason === 'spacing' ? 'Colonización abortada: el destino está demasiado cerca de un sistema existente.'
+          : variant.reason === 'no_vanguard' ? 'La flota llegó a un sistema inactivo sin nada que combatir, reclamar o saquear. Regresa al origen.'
+            : 'Colonización abortada.');
+      }
+      if (variant.kind === 'hostility_damage') {
+        if (finite(variant.damageDealt)) variantLines.push(`Hostilidad reducida: ${number(variant.damageDealt)}`);
+        if (finite(variant.hostilityRemaining)) variantLines.push(`Hostilidad restante: ${number(variant.hostilityRemaining)}`);
+      }
+      if (variant.kind === 'dormant_salvage') {
+        const salvage = resources(variant, [['salvagePa', 'Palladium'], ['salvageIr', 'Iridium']]);
+        if (salvage) variantLines.push(`Recuperado: ${salvage}`);
+      }
+      if (variant.kind === 'shipment_delivered') {
+        const cargo = resources(variant, [['deliveredPa', 'Palladium'], ['deliveredIr', 'Iridium']]);
+        if (cargo) variantLines.push(`${variant.shipmentRole === 'recipient' ? 'Cargamento recibido' : 'Cargamento entregado'}: ${cargo}`);
+        if (variant.deliveredPa === 0 && variant.deliveredIr === 0) variantLines.push('No había espacio para el cargamento en el depósito de destino.');
+      }
+      if (variant.kind === 'territory_raid') {
+        variantLines.push(`Incursión en tu territorio${clean(variant.raiderName) ? ` por ${clean(variant.raiderName)}` : ''}.`);
+      }
+      if (variantLines.length) lines.push('', ...variantLines);
+      if (unavailable) lines.push('', `Detalle no disponible: ${unavailable}.`);
+      if (!lines.some(Boolean)) lines.push('Se recibió un nuevo informe.');
+      let message = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+      // Reserve space for the notifier's heading and system line. Slice without
+      // splitting UTF-16 surrogate pairs; final notifier also enforces 4096.
+      if (message.length > 3600) {
+        let clipped = message.slice(0, 3560);
+        if (/[\uD800-\uDBFF]$/.test(clipped)) clipped = clipped.slice(0, -1);
+        message = `${clipped}\n[Resumen recortado]`;
+      }
+      const defensive = object(sections.incoming) || variant.kind === 'capture_loss'
+        || battle?.targetOwnerKind === 'owned' || variant.shipmentRole === 'recipient';
+      const context = defensive ? route.to : route.from?.ownerKind === 'owned' ? route.from : null;
+      return { type: 'game.reports', id: `report:${item.id}`, title: 'Old Light',
+        systemName: clean(context?.name, 150), message };
+    }
+
+    function errorLabel(error) {
+      if (error?.kind === 'http') return `HTTP ${error.status || 'desconocido'}`;
+      if (error?.kind === 'timeout') return 'tiempo de espera agotado';
+      if (error?.kind === 'schema') return 'formato de respuesta no compatible';
+      if (error?.kind === 'callback') return 'el canal no pudo aceptar el informe';
+      return 'conexión no disponible';
+    }
+
+    function dispatch(item, detail, token, unavailable = '') {
+      assertCurrent(token);
+      try {
+        const result = send(reportEvent(item, detail, unavailable));
+        // emit() is normally synchronous. Do not create unhandled rejections if
+        // an integration supplies a promise, and never await its Telegram queue.
+        if (result && typeof result.catch === 'function') result.catch(() => {});
+      } catch { throw fault('callback'); }
+      assertCurrent(token);
+      checkpoint.pending = checkpoint.pending.filter((candidate) => candidate.id !== item.id);
+      remember(item);
+      saveCheckpoint();
+      counters.emitted++;
+      if (unavailable) counters.fallbacks++;
+    }
+
+    async function drainDetails(token) {
+      phase = 'detail';
+      checkpoint.pending.sort((a, b) => (a.takenAt ?? Infinity) - (b.takenAt ?? Infinity));
+      for (let count = 0; count < DETAILS_PER_CYCLE && checkpoint.pending.length; count++) {
+        const item = checkpoint.pending[0];
+        try {
+          const detail = await readJSON(`${API}${slug}/reports/${item.id}`, token);
+          assertCurrent(token);
+          if (!object(detail) || typeof detail.id !== 'string' || detail.id.toLowerCase() !== item.id
+            || !(object(detail.sections) || object(detail.route) || object(detail.variant))) throw fault('schema');
+          counters.details++;
+          dispatch(item, detail, token);
+        } catch (error) {
+          assertCurrent(token);
+          if (error?.kind === 'callback') throw error;
+          if (error?.kind === 'http' && error.status === 404) {
+            dispatch(item, null, token, 'el informe ya no está disponible');
+            continue;
+          }
+          // Authentication and rate limiting affect the whole API, not a report.
+          if (!(error?.kind === 'http' && [401, 403, 429].includes(error.status))) {
+            item.attempts++;
+            if (item.attempts >= 3) dispatch(item, null, token, errorLabel(error));
+            else saveCheckpoint();
+          }
+          throw error;
+        }
+      }
+    }
+
+    function recordFailure(error) {
+      failures++;
+      counters.errors++;
+      lastError = errorLabel(error);
+      const auth = error?.kind === 'http' && [401, 403].includes(error.status);
+      const backoff = auth ? 300000 : Math.min(300000, 5000 * (2 ** Math.min(failures - 1, 6)));
+      retryAt = now() + Math.max(backoff, error?.waitMs || 0);
+      nextPollAt = retryAt;
+      phase = 'error';
+    }
+
+    async function cycle(token) {
+      lastCycleAt = now();
+      wakeRequested = false;
+      counters.polls++;
+      try {
+        await scanList(token);
+        assertCurrent(token);
+        await drainDetails(token);
+        assertCurrent(token);
+        failures = 0; lastError = ''; retryAt = 0; phase = 'ready';
+        nextPollAt = wakeRequested ? Math.max(now(), lastCycleAt + WAKE_GAP_MS) : now() + POLL_MS;
+      } catch (error) {
+        if (current(token) && error?.kind !== 'interrupted') recordFailure(error);
+      }
+    }
+
+    function arm() {
+      if (pollTimer !== null) { cancelTimer(pollTimer); pollTimer = null; }
+      if (!active || !enabled || destroyed || !canRead() || running) return;
+      const due = Math.max(nextPollAt, retryAt, lastCycleAt + WAKE_GAP_MS);
+      pollTimer = later(() => { pollTimer = null; kick(); }, Math.max(0, due - now()));
+    }
+
+    function kick() {
+      if (running || !current(epoch) || !canRead()) return;
+      if (now() < Math.max(nextPollAt, retryAt, lastCycleAt + WAKE_GAP_MS)) { arm(); return; }
+      if (pollTimer !== null) { cancelTimer(pollTimer); pollTimer = null; }
+      const work = cycle(epoch);
+      running = work;
+      work.finally(() => { if (running === work) running = null; arm(); }).catch(() => {});
+    }
+
+    function tick(input = {}) {
+      if (destroyed) return getDiagnostics();
+      const nextSlug = pathSlug();
+      const nextEnabled = input.enabled !== false;
+      let nextActive = nextEnabled && input.active === true;
+      try { if (getHidden()) nextActive = false; } catch { nextActive = false; }
+      const changedSlug = nextSlug !== slug;
+      if (changedSlug) {
+        active = false;
+        stop();
+        slug = nextSlug;
+        checkpoint = blankCheckpoint();
+        loadCheckpoint();
+        lastUnread = null; lastListAt = null; lastCycleAt = -Infinity;
+        nextPollAt = now(); retryAt = 0; failures = 0; lastError = '';
+      }
+      if (!nextEnabled) {
+        if (active || enabled) { active = false; stop(); }
+        if (enabled || changedSlug) {
+          checkpoint = blankCheckpoint(); checkpoint.suspended = true; saveCheckpoint();
+        }
+        enabled = false; phase = 'disabled'; lastUnread = null;
+        retryAt = 0; failures = 0; lastError = '';
+        return getDiagnostics();
+      }
+      const becameEnabled = !enabled;
+      enabled = true;
+      if (!nextActive || !canRead()) {
+        if (active) { active = false; stop(); }
+        phase = canRead() ? 'idle' : 'unsupported';
+        lastUnread = null;
+        return getDiagnostics();
+      }
+      if (!active) {
+        stop();
+        loadCheckpoint(); // The previous leader may have advanced the shared cache.
+        active = true;
+        nextPollAt = now();
+        if (becameEnabled) { retryAt = 0; failures = 0; lastError = ''; }
+      }
+      const unread = Number.isSafeInteger(input.unread) && input.unread >= 0 ? input.unread : null;
+      if (unread !== null && lastUnread !== null && unread > lastUnread) {
+        wakeRequested = true;
+        nextPollAt = Math.min(nextPollAt, Math.max(now(), lastCycleAt + WAKE_GAP_MS));
+      }
+      lastUnread = unread;
+      kick();
+      if (!running) arm();
+      return getDiagnostics();
+    }
+
+    function getDiagnostics() {
+      let status;
+      if (destroyed) status = 'Informes: detenido.';
+      else if (!enabled) status = 'Informes: notificaciones desactivadas.';
+      else if (!canRead()) status = 'Informes: lectura automática no disponible en esta página.';
+      else if (!active) status = 'Informes: esperando una pestaña visible con el control.';
+      else if (phase === 'error') status = `Informes: ${lastError}; se reintentará automáticamente.`;
+      else if (!checkpoint.initialized) status = 'Informes: preparando la referencia inicial, sin enviar historial.';
+      else if (request) status = `Informes: leyendo ${phase === 'detail' ? 'el contenido' : 'la lista'}.`;
+      else if (checkpoint.pending.length || checkpoint.scan) status = `Informes: ${checkpoint.pending.length} pendientes; se continuará automáticamente.`;
+      else status = 'Informes: al día; comprobación cada 25 segundos.';
+      if (storageError) status += ' No se pudo guardar la referencia entre pestañas.';
+      return { status, phase, active, enabled, apiAvailable: canRead(),
+        baselineReady: checkpoint.initialized, inFlight: !!request, pending: checkpoint.pending.length,
+        scanningBacklog: !!checkpoint.scan, slug, lastListAt, nextPollAt: Math.max(nextPollAt, retryAt),
+        lastError, failures, storageAvailable: typeof gmGet === 'function' && typeof gmSet === 'function',
+        storageError, counters: { ...counters } };
+    }
+
+    function destroy() {
+      if (destroyed) return;
+      destroyed = true; active = false; stop(); phase = 'destroyed';
+    }
+
+    return { tick, getDiagnostics, destroy };
+  }
+  // END REPORTS
+
+  // BEGIN DRIVE BACKUP
+  /*
+   * Optional userscript fragment. GIS runs only on the companion page.
+   * No OAuth token is returned to or stored by this module.
+   * gmGetValue is the synchronous GM_getValue API used by the main userscript.
+   * gmSetValue is the synchronous GM_setValue API used by the main userscript.
+   */
+  function createDriveBackup(options) {
+    'use strict';
+    const { getBackup, applyBackup, onStatus, gmGetValue, gmSetValue } = options;
+
+    const PROTOCOL = 'old-light-drive-v1';
+    const STORAGE_KEY = 'old-light-auto-upgrade:drive:v1';
+    const HELPER_URL = 'https://alexx-ftw.github.io/old-light-auto-upgrade/drive.html';
+    const HELPER_ORIGIN = 'https://alexx-ftw.github.io';
+    const MAX_BYTES = 1024 * 1024;
+    const encoder = new TextEncoder();
+    const LABELS = {
+      disconnected: 'Google Drive desconectado.',
+      missing_client: 'Añade tu Client ID de Google para habilitar las copias en Drive.',
+      opening: 'Abriendo la página de copias…',
+      bridge_ready: 'Ventana conectada. Autoriza Google Drive desde esa ventana.',
+      connecting: 'Esperando tu autorización de Google…',
+      connected: 'Google Drive conectado durante esta sesión.',
+      listing: 'Buscando copias en Drive…',
+      saving: 'Guardando una copia en Drive…',
+      saved: 'Copia guardada en Drive.',
+      unchanged: 'La configuración ya tiene una copia idéntica.',
+      restoring: 'Restaurando la copia seleccionada…',
+      restored: 'Configuración restaurada.',
+      expired: 'Autorización caducada. Vuelve a conectar Google Drive desde su ventana.',
+      denied: 'No se concedió el permiso de datos de la aplicación.',
+      popup_blocked: 'El navegador bloqueó la ventana. Vuelve a pulsar Abrir Google Drive.',
+      auth_closed: 'Se cerró la autorización de Google.',
+      auth_error: 'No se pudo autorizar Google Drive. Comprueba el Client ID y su origen.',
+      library_error: 'No se pudo cargar Google Identity Services en la página de copias.',
+      bridge_lost: 'Se perdió la conexión con la ventana. Vuelve a abrir Google Drive.',
+      timeout: 'La operación tardó demasiado. Comprueba la lista antes de repetir una copia.',
+      rate_limit: 'Google ha limitado las solicitudes. La copia automática está detenida.',
+      api_denied: 'Google rechazó la petición. Comprueba que Drive API esté activada y que el permiso siga concedido.',
+      upload_uncertain: 'No se confirmó la copia. Actualiza la lista de Drive antes de repetir.',
+      invalid_backup: 'La copia no es válida o supera 1 MiB.',
+      busy: 'Espera a que termine la operación actual.',
+      failed: 'No se pudo completar la operación. Revisa la ventana de Drive.',
+      config_saved: 'Configuración de Drive guardada. Guardar no inicia una copia.',
+      storage_error: 'No se pudo guardar la configuración de Drive.',
+    };
+
+    if (typeof getBackup !== 'function' || typeof applyBackup !== 'function' ||
+        typeof gmGetValue !== 'function' || typeof gmSetValue !== 'function') {
+      throw new TypeError('Faltan las funciones de almacenamiento o copia.');
+    }
+
+    let config;
+    try {
+      const stored = gmGetValue(STORAGE_KEY, { clientId: '', autoBackup: false });
+      if (stored && typeof stored.then === 'function') {
+        throw new TypeError('createDriveBackup necesita GM_getValue síncrono.');
+      }
+      config = validateConfig(stored);
+    } catch (error) {
+      if (error instanceof TypeError && /síncrono/.test(error.message)) throw error;
+      config = { clientId: '', autoBackup: false };
+    }
+
+    let destroyed = false;
+    let session = null;
+    let mountNode = null;
+    let inputs = null;
+    let statusCode = config.clientId ? 'disconnected' : 'missing_client';
+    let applying = false;
+    let configDeferred = false;
+    let suppressChangedUntil = 0;
+    let configRevision = 0;
+
+    function validateConfig(value) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new TypeError('La configuración de Drive debe ser un objeto.');
+      }
+      const clientId = value.clientId === undefined ? '' : value.clientId;
+      const autoBackup = value.autoBackup === undefined ? false : value.autoBackup;
+      if (typeof clientId !== 'string' || typeof autoBackup !== 'boolean') {
+        throw new TypeError('Client ID o copia automática inválidos.');
+      }
+      const trimmed = clientId.trim();
+      if (trimmed && (trimmed.length > 300 ||
+          !/^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$/.test(trimmed))) {
+        throw new TypeError('El Client ID de Google no tiene un formato válido.');
+      }
+      return { clientId: trimmed, autoBackup };
+    }
+
+    function exportConfig() {
+      return { clientId: config.clientId, autoBackup: config.autoBackup };
+    }
+
+    function report(code) {
+      if (destroyed) return;
+      statusCode = Object.hasOwn(LABELS, code) ? code : 'failed';
+      if (inputs) inputs.status.textContent = LABELS[statusCode];
+      try { onStatus?.({ code: statusCode, message: LABELS[statusCode] }); } catch (_) { /* caller UI */ }
+    }
+
+    function refreshControls() {
+      if (!inputs) return;
+      inputs.client.value = config.clientId;
+      inputs.auto.checked = config.autoBackup;
+      inputs.open.disabled = !config.clientId;
+      inputs.close.disabled = !session;
+      inputs.status.textContent = LABELS[statusCode];
+    }
+
+    function send(current, message) {
+      if (destroyed || current !== session || !current?.port || !current.ready) return false;
+      try {
+        current.port.postMessage({ protocol: PROTOCOL, ...message });
+        return true;
+      } catch (_) {
+        closeSession('bridge_lost');
+        return false;
+      }
+    }
+
+    function sendConfig() {
+      if (applying) { configDeferred = true; return; }
+      configDeferred = false;
+      send(session, { type: 'config', config: exportConfig(), revision: configRevision });
+    }
+
+    function importConfig(value) {
+      const next = validateConfig(value);
+      if (destroyed) throw new Error('El módulo de Drive está cerrado.');
+      const written = gmSetValue(STORAGE_KEY, { ...next });
+      if (written && typeof written.then === 'function') {
+        throw new TypeError('createDriveBackup necesita GM_setValue síncrono.');
+      }
+      const changed = next.clientId !== config.clientId || next.autoBackup !== config.autoBackup;
+      if (next.clientId !== config.clientId) configRevision += 1;
+      config = next;
+      if (!session) report(config.clientId ? 'disconnected' : 'missing_client');
+      refreshControls();
+      if (changed) sendConfig();
+      return exportConfig();
+    }
+
+    function parseBackup(json) {
+      if (typeof json !== 'string' || json.length > MAX_BYTES || encoder.encode(json).byteLength > MAX_BYTES) {
+        throw new Error('invalid_backup');
+      }
+      const value = JSON.parse(json);
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_backup');
+      return value;
+    }
+
+    async function handlePortMessage(current, message) {
+      if (destroyed || current !== session || !message || message.protocol !== PROTOCOL) return;
+      if (message.type === 'port-ready' && !current.ready) {
+        current.ready = true;
+        clearTimeout(current.openTimeout);
+        sendConfig();
+        report('bridge_ready');
+        return;
+      }
+      if (!current.ready) return;
+      if (message.type === 'ping') { send(current, { type: 'pong' }); return; }
+      if (message.type === 'bye') { closeSession('disconnected'); return; }
+      if (message.type === 'status') {
+        if (typeof message.code === 'string' && Object.hasOwn(LABELS, message.code)) report(message.code);
+        return;
+      }
+      if (message.type !== 'get-backup' && message.type !== 'apply-backup') return;
+      if (typeof message.id !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(message.id)) return;
+      if (message.revision !== configRevision) {
+        send(current, { type: 'reply', id: message.id, ok: false, error: 'expired' });
+        return;
+      }
+      if (current.serving) {
+        send(current, { type: 'reply', id: message.id, ok: false, error: 'busy' });
+        return;
+      }
+      current.serving = true;
+      try {
+        if (message.type === 'get-backup') {
+          const value = await getBackup();
+          if (message.revision !== configRevision) {
+            send(current, { type: 'reply', id: message.id, ok: false, error: 'expired' });
+            return;
+          }
+          const json = JSON.stringify(value);
+          parseBackup(json);
+          send(current, { type: 'reply', id: message.id, ok: true, json });
+        } else {
+          const value = parseBackup(message.json);
+          if (current !== session || destroyed) return;
+          applying = true;
+          await applyBackup(value);
+          suppressChangedUntil = Date.now() + 1000;
+          send(current, { type: 'reply', id: message.id, ok: true });
+          report('restored');
+        }
+      } catch (_) {
+        send(current, { type: 'reply', id: message.id, ok: false, error: 'invalid_backup' });
+        report('invalid_backup');
+      } finally {
+        current.serving = false;
+        applying = false;
+        if (configDeferred) sendConfig();
+      }
+    }
+
+    function closeSession(code = 'disconnected') {
+      const current = session;
+      if (current) {
+        session = null;
+        try { current.port?.postMessage({ protocol: PROTOCOL, type: 'disconnect' }); } catch (_) { /* closed */ }
+        clearTimeout(current.openTimeout);
+        clearInterval(current.closedCheck);
+        try { current.port?.close(); } catch (_) { /* already closed */ }
+      }
+      if (!destroyed) { report(code); refreshControls(); }
+    }
+
+    function onWindowMessage(event) {
+      const current = session;
+      const message = event.data;
+      if (!current || destroyed || current.port || event.origin !== HELPER_ORIGIN ||
+          event.source !== current.popup || !message || message.protocol !== PROTOCOL ||
+          message.type !== 'ready' || message.nonce !== current.nonce) return;
+      const channel = new MessageChannel();
+      current.port = channel.port1;
+      channel.port1.onmessage = event => { void handlePortMessage(current, event.data); };
+      channel.port1.onmessageerror = () => closeSession('bridge_lost');
+      channel.port1.start();
+      try {
+        // Only the public bootstrap and a private port cross window.postMessage.
+        // No backup, credentials, OAuth token, or configuration is sent this way.
+        current.popup.postMessage({ protocol: PROTOCOL, type: 'port', nonce: current.nonce },
+          HELPER_ORIGIN, [channel.port2]);
+      } catch (_) {
+        channel.port2.close();
+        closeSession('bridge_lost');
+      }
+    }
+
+    function openCompanion() {
+      if (destroyed) return;
+      if (!config.clientId) { report('missing_client'); return; }
+      if (session?.popup && !session.popup.closed) {
+        try { session.popup.focus(); } catch (_) { /* focus is best effort */ }
+        return;
+      }
+      closeSession();
+      const bytes = new Uint8Array(32);
+      crypto.getRandomValues(bytes);
+      const nonce = Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
+      // The nonce is public session routing data. Settings never enter this URL.
+      const current = { nonce, popup: null, port: null, ready: false, serving: false };
+      session = current;
+      try {
+        current.popup = window.open(`${HELPER_URL}#bridge=${nonce}`, '_blank',
+          'popup,width=720,height=820,resizable=yes,scrollbars=yes');
+      } catch (_) { /* blocked */ }
+      if (!current.popup) { closeSession('popup_blocked'); return; }
+      current.openTimeout = setTimeout(() => {
+        if (session === current && !current.ready) closeSession('bridge_lost');
+      }, 20000);
+      current.closedCheck = setInterval(() => {
+        if (session === current && current.popup.closed) closeSession('disconnected');
+      }, 1000);
+      report('opening');
+      refreshControls();
+    }
+
+    function notifyChanged() {
+      if (!destroyed && !applying && Date.now() >= suppressChangedUntil && config.autoBackup) {
+        send(session, { type: 'settings-changed' });
+      }
+    }
+
+    function element(tag, text, attrs = {}) {
+      const node = document.createElement(tag);
+      if (text !== undefined) node.textContent = text;
+      Object.assign(node, attrs);
+      return node;
+    }
+
+    function mount(container) {
+      if (destroyed) throw new Error('El módulo de Drive está cerrado.');
+      mountNode?.remove();
+      const box = element('section', undefined, { className: 'oldlight-drive-config' });
+      box.append(element('h4', 'Copia opcional en Google Drive'));
+      const clientLabel = element('label', 'Client ID de Google OAuth');
+      const client = element('input', undefined, { type: 'text', maxLength: 300,
+        autocomplete: 'off', spellcheck: false, placeholder: '…apps.googleusercontent.com' });
+      clientLabel.append(client);
+      const autoLabel = element('label');
+      const auto = element('input', undefined, { type: 'checkbox' });
+      autoLabel.append(auto, document.createTextNode(' Copia automática de los cambios locales'));
+      const note = element('p', 'Requiere un Client ID propio con origen autorizado ' + HELPER_ORIGIN +
+        '. La copia automática sólo funciona con la ventana de Drive abierta y la autorización vigente.');
+      const controls = element('div', undefined, { className: 'oldlight-drive-controls' });
+      const save = element('button', 'Guardar configuración', { type: 'button' });
+      const open = element('button', 'Abrir Google Drive', { type: 'button' });
+      const close = element('button', 'Desconectar', { type: 'button' });
+      const status = element('p');
+      status.setAttribute('role', 'status');
+      controls.append(save, open, close);
+      box.append(clientLabel, autoLabel, note, controls, status);
+      save.addEventListener('click', async () => {
+        save.disabled = true;
+        try {
+          const next = validateConfig({ clientId: client.value, autoBackup: auto.checked });
+          await importConfig(next);
+          report('config_saved');
+        } catch (_) {
+          report('storage_error');
+        } finally { save.disabled = false; }
+      });
+      open.addEventListener('click', openCompanion);
+      close.addEventListener('click', () => closeSession());
+      inputs = { client, auto, open, close, status };
+      mountNode = box;
+      container.append(box);
+      refreshControls();
+      return box;
+    }
+
+    function destroy() {
+      if (destroyed) return;
+      closeSession();
+      destroyed = true;
+      window.removeEventListener('message', onWindowMessage);
+      mountNode?.remove();
+      inputs = null;
+      mountNode = null;
+    }
+
+    window.addEventListener('message', onWindowMessage);
+    return { mount, notifyChanged, exportConfig, importConfig, validateConfig, destroy };
+  }
+  // END DRIVE BACKUP
+
+  function readUnread(kind) {
+    const button = document.querySelector(`#${kind}-btn`);
+    const label = button?.getAttribute('aria-label') || button?.getAttribute('title') || '';
+    const match = new RegExp(`^Open ${kind}(?:, (\\d+) unread)?$`).exec(label);
+    return match ? Number(match[1] || 0) : null;
+  }
 
   // Observa eventos nuevos del HUD; no reenvía historial al cargar/cambiar de pestaña.
   function createGameEventObserver(send) {
@@ -1549,13 +3152,6 @@
     let baseline = null;
     let seenToasts = new WeakSet();
     let unread = new Map();
-
-    function readUnread(kind) {
-      const button = document.querySelector(`#${kind}-btn`);
-      const label = button?.getAttribute('aria-label') || button?.getAttribute('title') || '';
-      const match = new RegExp(`^Open ${kind}(?:, (\\d+) unread)?$`).exec(label);
-      return match ? Number(match[1] || 0) : null;
-    }
 
     function snapshot(current) {
       return {
@@ -1568,7 +3164,7 @@
       };
     }
 
-    return function observe(current, active) {
+    return function observe(current, active, reportApiAvailable = false) {
       if (!active) { observing = false; baseline = null; return; }
       const next = snapshot(current);
       const toasts = [...document.querySelectorAll('.toast')];
@@ -1590,7 +3186,8 @@
         const count = readUnread(kind);
         const previous = unread.get(kind);
         if (count !== null) {
-          if (previous !== null && previous !== undefined && count > previous) {
+          if (previous !== null && previous !== undefined && count > previous
+              && !(kind === 'reports' && reportApiAvailable)) {
             const label = kind === 'reports' ? 'informes' : 'mensajes';
             send(`game.${kind}`, `${count - previous} ${label} más sin leer (${count} en total).`);
           }
@@ -1617,6 +3214,13 @@
     };
   }
 
+  if (typeof GM_getValue === 'function' && typeof GM_setValue === 'function') {
+    try {
+      driveBackup = createDriveBackup({ getBackup: createBackup, applyBackup,
+        gmGetValue: GM_getValue, gmSetValue: GM_setValue });
+    } catch { /* La copia local y la automatización funcionan aunque GM no esté disponible. */ }
+  }
+
   // Los cambios en disabled disparan una revisión inmediata. También cubre
   // el reemplazo completo del panel y los cambios de nivel/precio de los botones.
   new MutationObserver(records => {
@@ -1633,9 +3237,16 @@
   });
   window.addEventListener('storage', event => {
     if (event.key !== KEY && event.key !== null) return;
+    ui?.cancelPriorityDrag?.();
+    ui?.cancelPanelDrag?.();
     settings = readSettings();
     if (settings.enabled) { error = ''; unconfirmed = 0; }
     schedule();
+  });
+  window.addEventListener('resize', () => {
+    ui?.cancelPriorityDrag?.();
+    ui?.cancelPanelDrag?.();
+    layoutHelper();
   });
   document.addEventListener('visibilitychange', schedule);
   window.addEventListener('pageshow', schedule);
