@@ -1,6 +1,6 @@
 # Old Light Auto Upgrade
 
-Userscript para [Old Light](https://oldlight.io/play) que mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, repone naves hasta los mínimos configurados, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.5.0**.
+Userscript para [Old Light](https://oldlight.io/play) que mejora edificios por prioridad, muestra una ETA para la siguiente mejora, ajusta Reactor y Resource Depot según necesidad, repone naves hasta los mínimos configurados, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.6.0**.
 
 ## Instalación
 
@@ -26,6 +26,22 @@ Estos edificios también deben estar marcados y poder construirse normalmente:
 - **Resource Depot:** se considera cuando **cualquiera de los dos recursos**, palladium o iridium, alcanza el **90 %** de su capacidad. Puedes cambiar ese porcentaje entre **1 y 100** en **Depot al alcanzar…**.
 
 Si ya hay una mejora de Reactor o Depot en cola, espera antes de encargar otra del mismo tipo. Los valores desconocidos o la selección múltiple no justifican estas mejoras automáticas: necesitan datos del sistema seleccionado.
+
+### ETA de la siguiente mejora
+
+El indicador **Siguiente mejora**, encima de las pestañas, muestra el **edificio y nivel**, la **cuenta atrás aproximada** y el motivo de la espera. La cuenta atrás también se ve debajo de **Auto ↑** al minimizar el helper; al pasar el cursor aparece el detalle. No necesita activar ningún ajuste.
+
+La ETA corresponde a cuándo se podrá **encolar el siguiente pedido automático de mejora**. Una construcción que ya esté en curso puede continuar mientras se añade otro pedido si queda un hueco. El tiempo de construcción del nuevo nivel es distinto y lo muestra el juego.
+
+- Calcula cuánto falta de palladium e iridium y toma la mayor de las dos esperas según la producción actual. Usa las cantidades completas del juego aunque la interfaz muestre `K` o `M`.
+- Si la cola está llena, espera también al primer hueco que se libere. Los recursos se producen durante esa espera: ambos tiempos se combinan por su máximo, no se suman.
+- Pronostica la primera mejora que podrá hacerse con las prioridades y casillas marcadas actuales. Una mejora más barata puede estar disponible antes que la primera de la lista; si coinciden en tiempo, decide el orden de prioridad.
+- Reactor solo aparece si otra mejora marcada lo justifica y llega a poder pagarse. Depot espera al porcentaje configurado. Ninguno se repite si ya está en cola.
+- Si falta producción, el coste supera la capacidad, hay requisitos pendientes o faltan datos exactos, muestra **Sin ETA** y explica el bloqueo. La pausa y los pedidos pendientes también tienen su propio estado.
+
+Se actualiza con los datos del juego y la comprobación habitual de cada segundo. La cuenta atrás continúa entre actualizaciones de las cantidades enteras del HUD; si llega a cero antes de que el juego habilite el pedido, espera su confirmación. El símbolo **≈** indica una estimación con las tasas actuales, que el juego redondea. Los pedidos de naves, otros gastos, los recursos que lleguen y las construcciones que terminen pueden cambiarla; se recalcula al observar esos cambios. Si tienes reposición de flota configurada, el indicador recuerda que la producción de naves tiene prioridad sobre los edificios.
+
+Requiere **un único sistema**, una pestaña visible y **Structures o Shipyard** abierto. La previsión usa los datos disponibles sin iniciar peticiones, modificar prioridades ni generar notificaciones. No se guarda una cuenta atrás antigua: al recargar se calcula de nuevo.
 
 ## Mínimos de naves
 
@@ -119,7 +135,7 @@ Deja **Structures o Shipyard abierto y la pestaña visible**. Los dos paneles de
 
 Cuando la pestaña está oculta, el cliente del juego aplaza el refresco de sus contadores y **el script no inicia nuevas acciones**. Los avisos dependen de los cambios que lleguen a la interfaz mientras se observa. No ofrece una cobertura completa de eventos del servidor ni actividad continua en segundo plano; al cerrar, suspender o descartar la pestaña, deja de actuar.
 
-La versión **1.5.0** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las construcciones ya encoladas mantienen su orden en el juego.
+La versión **1.6.0** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las construcciones ya encoladas mantienen su orden en el juego.
 
 ## Guardado local, exportación e importación
 
@@ -186,6 +202,16 @@ El gestor comprueba si hay una versión superior según su configuración y frec
 La cabecera define `@updateURL` para consultar el archivo ligero `old-light-auto-upgrade.meta.js` y `@downloadURL` para descargar el `.user.js` completo. Ambos archivos deben compartir el mismo `@version`, que se incrementa con cada publicación.
 
 Documentación de los gestores: [Tampermonkey](https://www.tampermonkey.net/documentation.php?locale=en&q=update_url) y [Violentmonkey](https://violentmonkey.github.io/api/metadata-block/).
+
+## Pruebas del estimador
+
+Las pruebas usan el estimador incluido en el propio userscript y módulos nativos de Node.js. Desde la raíz del repositorio:
+
+```sh
+node --test tests/upgrade-eta.test.cjs
+```
+
+Cubren recursos y capacidad, cola, prioridades, condiciones de Reactor y Depot, producción negativa y datos incompletos. No conectan al juego ni envían pedidos o notificaciones.
 
 ## Incidencias
 

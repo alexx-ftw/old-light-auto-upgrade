@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.5.0
-// @description  Mejoras por prioridad, mínimos de naves, presets y misiones pendientes, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
+// @version      1.6.0
+// @description  Mejoras por prioridad con ETA, mínimos de naves, presets y misiones pendientes, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
 // @supportURL   https://github.com/alexx-ftw/old-light-auto-upgrade/issues
@@ -49,6 +49,7 @@
   const RESPONSE_TIMEOUT_MS = 12000;
   const RETRY_GAP_MS = 5000;
   const MAX_UNCONFIRMED = 3;
+  const upgradeEta = createUpgradeEtaEstimator();
 
   if (window.top !== window.self || document.getElementById(HOST_ID)) return;
 
@@ -75,6 +76,7 @@
   let host;
   let ui;
   let pending = null;
+  let upgradeEtaClock = null;
   let unconfirmed = 0;
   let nextClickAt = 0;
   let scheduled = false;
@@ -632,6 +634,117 @@
       ? reactorNeeded && !queuedBuilding('reactor') : !needsPower(row));
   }
 
+  function readUpgradeEtaSnapshot(current) {
+    const resources = Object.fromEntries(['palladium', 'iridium'].map(id => {
+      const cap = document.querySelector(`[data-field="res-${id}-cap"]`);
+      return [id, {
+        amount: displayedInteger(document.querySelector(`[data-field="res-${id}"]`)),
+        cap: exactInteger(cap?.getAttribute('title')?.replace(/^\/\s*/, '')) ?? exactInteger(text(cap).replace(/^\/\s*/, '')),
+        rate: upgradeEta.parseRate(text(document.querySelector(`[data-field="res-${id}-rate"]`))),
+      }];
+    }));
+    const buildings = current.map(row => {
+      const nativeReason = row.button.getAttribute('title') || '';
+      const visible = controlVisible(row.button, PANEL) && controlVisible(row.row.querySelector('.b-cost'), PANEL);
+      let blocker = 'unknown';
+      if (/^Maxed$/i.test(row.target)) blocker = 'maxed';
+      else if (row.row.classList.contains('building-row-locked') || /^Requires\b/i.test(nativeReason)) blocker = 'locked';
+      else if (row.button.classList.contains('b-upgrade-error')) blocker = 'error';
+      else if (row.button.classList.contains('b-loading')) blocker = 'loading';
+      else if (isAvailable(row.button)) blocker = 'ready';
+      else if (/^Build queue full\.?$/i.test(nativeReason)) blocker = 'queue';
+      else if (/^Not enough resources\.?$/i.test(nativeReason)) blocker = 'resources';
+      else if (/^Cost exceeds Resource Depot capacity\.?$/i.test(nativeReason)) blocker = 'capacity';
+      return { id: row.id, name: row.name, targetLevel: row.targetLevel, visible, blocker, nativeReason,
+        cost: { palladium: visible ? displayedInteger(row.row.querySelector('.b-cost-pa')) : null,
+          iridium: visible ? displayedInteger(row.row.querySelector('.b-cost-ir')) : null },
+        energy: visible ? upgradeEnergy(row) : null };
+    });
+    const queued = {};
+    const activeTimes = [];
+    const queueIdentity = [];
+    for (const node of document.querySelectorAll(`${PANEL} [data-field="queue-list"] .queue-row`)) {
+      const label = text(node.querySelector('.queue-row-text'));
+      const queuedRow = node.classList.contains('queue-row-queued');
+      queueIdentity.push(`${queuedRow ? 'queued' : 'active'}:${label.replace(/ · [\d\sdhms]+$/, '')}`);
+      const building = BUILDINGS.find(([, name]) => label.startsWith(`${name} → Lvl `));
+      if (building) queued[building[0]] = true;
+      if (queuedRow || /^Wealth · ongoing$/i.test(label)) continue;
+      activeTimes.push(upgradeEta.parseDuration(label.split(' · ').at(-1)));
+    }
+    return { resources, buildings, energy: signedInteger(document.querySelector('[data-field="res-energy"]')),
+      order: settings.order, excluded: settings.excluded, depotFillPercent: settings.depotFillPercent,
+      cooldownMs: Math.max(0, nextClickAt - Date.now()),
+      fleetPriority: fleetEnabled() || Boolean(currentMissionJob()?.produce),
+      queue: { buildings: queued, full: buildings.some(row => row.blocker === 'queue'),
+        identity: queueIdentity,
+        waitMs: activeTimes.length && activeTimes.every(value => value !== null) ? Math.min(...activeTimes) : null } };
+  }
+
+  function renderUpgradeEta() {
+    const state = (status, detail, request = null) => ({ state: status, detail, waitMs: null,
+      name: request?.kind === 'ship' ? '' : request?.name || '',
+      buildingId: request?.kind === 'ship' ? '' : request?.id || '', targetLevel: request?.targetLevel ?? null });
+    let forecast;
+    let clockKey = '';
+    if (!settings.enabled) forecast = state('paused', 'Reanuda el helper para continuar con las mejoras.');
+    else if (pending) forecast = state('busy', pending.kind === 'ship' ? 'Esperando confirmación del pedido de naves.'
+      : 'Esperando confirmación de la mejora solicitada.', pending);
+    else if (document.hidden) forecast = state('blocked', 'Vuelve a esta pestaña para leer los datos actuales.');
+    else if (![PANEL, FLEET_PANEL].some(selector => isVisible(document.querySelector(selector)))) {
+      forecast = state('blocked', 'Abre Structures o Shipyard para calcular la ETA.');
+    } else if (!systemId() || SHIPS.some(([id]) => fleetCounts(id) === null)) {
+      forecast = state('blocked', 'Selecciona un solo sistema con datos disponibles.');
+    }
+    else if (importingBackup || missionAdapter?.isBusy()
+        || document.querySelector(`${PANEL} .b-loading, ${FLEET_PANEL} .b-loading`)) {
+      forecast = state('busy', 'Se recalculará al terminar la operación en curso.');
+    } else if (settings.excluded.length === BUILDINGS.length) forecast = state('idle', 'Marca los edificios que quieras mejorar.');
+    else if (!leader) forecast = state('blocked', 'Esperando control de esta pestaña.');
+    else {
+      const snapshot = readUpgradeEtaSnapshot(rows());
+      forecast = upgradeEta.estimate(snapshot);
+      clockKey = JSON.stringify({ ...snapshot, system: systemId(), nextClickAt, cooldownMs: 0,
+        queue: { ...snapshot.queue, waitMs: null } });
+    }
+    // The HUD floors resource amounts. Keep a running clock between native
+    // changes instead of freezing until the next whole unit is produced.
+    // A new quote, target, queue, system or setting always replaces this clock.
+    if (clockKey && forecast.waitMs > 0) {
+      const now = Date.now();
+      if (!upgradeEtaClock || upgradeEtaClock.key !== clockKey || upgradeEtaClock.id !== forecast.buildingId
+          || forecast.waitMs > upgradeEtaClock.rawMs + 1) {
+        upgradeEtaClock = { key: clockKey, id: forecast.buildingId, readyAt: now + forecast.waitMs };
+      }
+      upgradeEtaClock.rawMs = forecast.waitMs;
+      upgradeEtaClock.readyAt = Math.min(upgradeEtaClock.readyAt, now + forecast.waitMs);
+      forecast.waitMs = Math.max(0, upgradeEtaClock.readyAt - now);
+      if (!forecast.waitMs) {
+        forecast = { ...forecast, state: 'blocked', waitMs: null,
+          detail: 'Esperando a que el juego confirme los recursos y la disponibilidad.' };
+      }
+    } else upgradeEtaClock = null;
+    const numeric = Number.isFinite(forecast.waitMs);
+    const duration = numeric ? (forecast.waitMs > 0 ? `≈${upgradeEta.formatDuration(forecast.waitMs)}` : 'Disponible')
+      : forecast.state === 'paused' ? 'En pausa' : forecast.state === 'busy' ? 'Confirmando…' : 'Sin ETA';
+    const target = forecast.name ? `${forecast.name}${forecast.targetLevel !== null ? ` · nivel ${forecast.targetLevel}` : ''}`
+      : 'Próxima mejora automática';
+    const explanation = 'Tiempo estimado hasta poder encolar la siguiente mejora, con la producción actual. '
+      + 'Se recalcula al cambiar recursos, costes, cola o prioridades. Otros gastos y las construcciones que terminen pueden cambiar la previsión.';
+    ui.eta.dataset.state = forecast.state;
+    ui.eta.dataset.buildingId = forecast.buildingId || '';
+    if (numeric) ui.etaTime.dataset.seconds = String(Math.ceil(forecast.waitMs / 1000));
+    else delete ui.etaTime.dataset.seconds;
+    setText(ui.etaTime, duration);
+    setText(ui.etaTarget, target);
+    setText(ui.etaDetail, forecast.detail);
+    setText(ui.etaCompact, duration);
+    const readyAt = numeric ? new Date(Date.now() + forecast.waitMs) : null;
+    ui.eta.title = explanation + (readyAt && Number.isFinite(readyAt.getTime())
+      ? ` Hora aproximada: ${readyAt.toLocaleString(undefined, { hour12: false })}.` : '');
+    ui.etaCompact.title = `${target}: ${duration}. ${forecast.detail} ${explanation}`;
+  }
+
   function batchSummary() {
     return document.querySelector(`${PANEL} .b-batch-report .b-batch-summary`);
   }
@@ -673,6 +786,10 @@
             background:#101923; z-index:-1; pointer-events:none; }
           header.is-dragging { cursor:grabbing; }
           .helper-title { display:flex; align-items:center; gap:5px; flex:1; min-width:0; }
+          .helper-title > span:last-child { min-width:0; }
+          .helper-eta-compact { display:none; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+            font-size:10px; line-height:1.3; font-weight:400; color:#afd9c3; font-variant-numeric:tabular-nums; }
+          .helper-shell.minimized .helper-eta-compact { display:block; }
           .helper-grip { color:#8298aa; font-size:16px; }
           .helper-minimize { width:27px; height:27px; padding:0; color:#b8cddd;
             background:#1c2a36; border-color:#40576b; flex-shrink:0; }
@@ -687,6 +804,15 @@
           p { margin:8px 0 0; overflow-wrap:anywhere; }
           small { display:block; color:#93a9bb; margin-top:5px; overflow-wrap:anywhere; }
           small:empty { display:none; }
+          .upgrade-eta { margin-top:9px; padding:8px; border:1px solid #304252; border-radius:6px; background:#15222d; }
+          .upgrade-eta-heading { display:flex; align-items:baseline; justify-content:space-between; gap:7px;
+            color:#aebfd0; font-size:11px; }
+          .upgrade-eta-time { flex-shrink:0; color:#a9e5c4; font-size:12px; font-variant-numeric:tabular-nums; }
+          .upgrade-eta-target { margin-top:3px; color:#e2edf4; overflow-wrap:anywhere; }
+          .upgrade-eta-detail { margin-top:3px; font-size:10px; }
+          .upgrade-eta[data-state="blocked"] .upgrade-eta-time,
+          .upgrade-eta[data-state="paused"] .upgrade-eta-time,
+          .upgrade-eta[data-state="idle"] .upgrade-eta-time { color:#93a9bb; }
           details { margin-top:8px; border-top:1px solid #304252; padding-top:7px; }
           summary { cursor:pointer; color:#aebfd0; }
           .choices { display:grid; gap:5px; padding-top:8px; }
@@ -748,11 +874,16 @@
         </style>
         <section class="helper-shell" aria-label="Mejoras automáticas de Old Light">
           <header title="Arrastra la cabecera para mover el helper">
-            <strong class="helper-title"><span class="helper-grip" aria-hidden="true">⠿</span>Auto ↑</strong>
+            <strong class="helper-title"><span class="helper-grip" aria-hidden="true">⠿</span><span>Auto ↑<span class="helper-eta-compact" data-field="upgrade-eta-compact"></span></span></strong>
             <button type="button" data-action="automation-toggle" aria-pressed="true"></button>
             <button type="button" class="helper-minimize" data-action="helper-minimize" aria-expanded="true" aria-label="Minimizar helper" title="Minimizar helper">−</button>
           </header>
           <p role="status"></p><small></small>
+          <div class="upgrade-eta" data-field="upgrade-eta" aria-label="Tiempo hasta la siguiente mejora automática">
+            <div class="upgrade-eta-heading"><span>Siguiente mejora</span><strong class="upgrade-eta-time" data-field="upgrade-eta-time"></strong></div>
+            <div class="upgrade-eta-target" data-field="upgrade-eta-target"></div>
+            <small class="upgrade-eta-detail" data-field="upgrade-eta-detail"></small>
+          </div>
           <nav class="settings-tabs" role="tablist" aria-label="Ajustes del helper">
             <button type="button" role="tab" id="oldlight-tab-buildings" data-settings-tab="buildings" aria-controls="oldlight-settings-buildings" aria-selected="true">Edificios</button>
             <button type="button" role="tab" id="oldlight-tab-fleet" data-settings-tab="fleet" aria-controls="oldlight-settings-fleet" aria-selected="false" tabindex="-1">Flota</button>
@@ -807,6 +938,11 @@
         toggle: shadow.querySelector('[data-action="automation-toggle"]'),
         status: shadow.querySelector('[role="status"]'),
         last: shadow.querySelector('small'),
+        eta: shadow.querySelector('[data-field="upgrade-eta"]'),
+        etaTime: shadow.querySelector('[data-field="upgrade-eta-time"]'),
+        etaTarget: shadow.querySelector('[data-field="upgrade-eta-target"]'),
+        etaDetail: shadow.querySelector('[data-field="upgrade-eta-detail"]'),
+        etaCompact: shadow.querySelector('[data-field="upgrade-eta-compact"]'),
         details: shadow.querySelector('.building-page'),
         tabs: [...shadow.querySelectorAll('[data-settings-tab]')],
         pages: [...shadow.querySelectorAll('[data-page]')],
@@ -1030,7 +1166,7 @@
     return {
       format: 'old-light-auto-upgrade-backup',
       schemaVersion: 1,
-      scriptVersion: '1.5.0',
+      scriptVersion: '1.6.0',
       exportedAt: new Date().toISOString(),
       settings: normalizeSettings(settings),
       notifications: notifier.exportConfig(),
@@ -1405,6 +1541,7 @@
     ui.toggle.title = settings.enabled ? 'Pausar automatización' : 'Reanudar automatización';
     setText(ui.status, message);
     setText(ui.last, lastClick ? `Último clic: ${lastClick}` : '');
+    renderUpgradeEta();
     syncSettingsTabs();
     layoutHelper();
     syncChoices();
@@ -1660,6 +1797,156 @@
       console.warn('[Old Light Auto Upgrade]', cause);
     }
   }
+
+  // BEGIN UPGRADE ETA ESTIMATOR
+  function createUpgradeEtaEstimator() {
+    const RESOURCES = ['palladium', 'iridium'];
+    const RESOURCE_NAMES = { palladium: 'Palladium', iridium: 'Iridium' };
+    const EPSILON = 1e-7;
+
+    function parseRate(value) {
+      // The native HUD uses toFixed(1), not locale grouping or compact notation.
+      const match = /^([+\-−]?\d+(?:\.\d+)?)\/min$/.exec(String(value || '').trim());
+      const number = match ? Number(match[1].replace('−', '-')) : NaN;
+      return Number.isFinite(number) ? number : null;
+    }
+
+    function parseDuration(value) {
+      const input = String(value || '').trim();
+      if (!/^(?:\d+[dhms]\s*)+$/.test(input)) return null;
+      const units = { d: 86400000, h: 3600000, m: 60000, s: 1000 };
+      const seen = new Set();
+      let total = 0;
+      for (const [, count, unit] of input.matchAll(/(\d+)([dhms])/g)) {
+        if (seen.has(unit)) return null;
+        seen.add(unit);
+        total += Number(count) * units[unit];
+      }
+      return Number.isSafeInteger(total) ? total : null;
+    }
+
+    function formatDuration(ms) {
+      const seconds = Math.max(0, Math.ceil(ms / 1000));
+      const days = Math.floor(seconds / 86400);
+      const hours = Math.floor(seconds / 3600) % 24;
+      const minutes = Math.floor(seconds / 60) % 60;
+      const rest = seconds % 60;
+      if (days) return `${days}d ${hours}h ${minutes}m`;
+      if (seconds >= 3600) return `${hours}h ${minutes}m ${rest}s`;
+      return minutes ? `${minutes}m ${rest}s` : `${rest}s`;
+    }
+
+    function estimate(snapshot) {
+      const excluded = new Set(snapshot.excluded || []);
+      const byId = new Map((snapshot.buildings || []).map(row => [row.id, row]));
+      const selected = (snapshot.order || []).filter(id => !excluded.has(id)).map(id => byId.get(id)).filter(Boolean);
+      const result = (state, detail, row = null, waitMs = null, reason = '') => ({ state, detail, waitMs, reason,
+        buildingId: row?.id || '', name: row?.name || '', targetLevel: row?.targetLevel ?? null });
+      if (!selected.length) return result('idle', 'Marca los edificios que quieras mejorar.');
+      const resources = snapshot.resources || {};
+      if (RESOURCES.some(id => !Number.isFinite(resources[id]?.amount) || resources[id].amount < 0
+          || !Number.isFinite(resources[id]?.cap) || resources[id].cap <= 0)) {
+        return result('blocked', 'Selecciona un solo sistema con recursos y capacidad disponibles.', null, null, 'data');
+      }
+      const queue = snapshot.queue || {};
+      const queued = queue.buildings || {};
+      const queueWait = queue.full ? queue.waitMs : 0;
+      if (queue.full && (!Number.isFinite(queueWait) || queueWait < 0)) {
+        return result('blocked', 'Cola llena: el juego no muestra cuándo se libera un hueco.', null, null, 'queue');
+      }
+      if (queue.full && queueWait === 0) {
+        return result('blocked', 'Esperando a que el juego confirme el hueco libre en la cola.', null, null, 'refresh');
+      }
+      const notBefore = Math.max(0, snapshot.cooldownMs || 0, queueWait || 0);
+      const threshold = Math.min(100, Math.max(1, snapshot.depotFillPercent || 90));
+      const costKnown = row => RESOURCES.every(id => Number.isFinite(row.cost?.[id]) && row.cost[id] >= 0);
+      const capacityFits = row => costKnown(row) && RESOURCES.every(id => row.cost[id] <= resources[id].cap);
+      const powerKnown = row => Number.isFinite(row.energy) && Number.isFinite(snapshot.energy);
+      const needsPower = row => row.energy < 0 && snapshot.energy + row.energy < 0;
+      const models = selected.filter(row => row.visible && Number.isSafeInteger(row.targetLevel) && row.targetLevel > 0 && costKnown(row)
+        && powerKnown(row) && capacityFits(row) && ['ready', 'resources', 'queue'].includes(row.blocker)
+        && !(['reactor', 'warehouse'].includes(row.id) && queued[row.id]));
+      const project = (id, ms) => {
+        const { amount, cap, rate } = resources[id];
+        if (ms > 0 && !Number.isFinite(rate)) return null;
+        return Math.min(cap, Math.max(0, amount + (rate || 0) * ms / 60000));
+      };
+      const events = new Set([notBefore]);
+      const addThreshold = (id, amount) => {
+        const resource = resources[id];
+        if (resource.rate > 0 && amount <= resource.cap && amount > resource.amount) {
+          const ms = (amount - resource.amount) / resource.rate * 60000;
+          if (Number.isFinite(ms)) events.add(Math.max(notBefore, ms));
+        }
+      };
+      for (const row of models) for (const id of RESOURCES) addThreshold(id, row.cost[id]);
+      if (models.some(row => row.id === 'warehouse')) {
+        for (const id of RESOURCES) addThreshold(id, resources[id].cap * threshold / 100);
+      }
+
+      // Eligibility can begin only at a resource threshold, the Depot threshold,
+      // a free queue slot or the end of the helper's cooldown. Re-evaluate the
+      // actual priority policy at each event, including decreasing resources.
+      for (const ms of [...events].sort((a, b) => a - b)) {
+        const amounts = Object.fromEntries(RESOURCES.map(id => [id, project(id, ms)]));
+        if (RESOURCES.some(id => amounts[id] === null)) continue;
+        const fill = Math.max(...RESOURCES.map(id => amounts[id] / resources[id].cap * 100));
+        const available = models.filter(row =>
+          (ms > 0 || row.blocker === 'ready') &&
+          RESOURCES.every(id => amounts[id] + EPSILON >= row.cost[id]) &&
+          (row.id !== 'warehouse' || fill + EPSILON >= threshold));
+        const consumer = available.find(row => row.id !== 'reactor' && needsPower(row));
+        const candidate = available.find(row => row.id === 'reactor' ? Boolean(consumer) : !needsPower(row));
+        if (!candidate) continue;
+        const notes = [];
+        if (candidate.id === 'reactor') notes.push(`Energía necesaria para ${consumer.name}.`);
+        if (candidate.id === 'warehouse') notes.push(`Depot al ${threshold}% de capacidad.`);
+        if (queue.full) notes.push(`Hueco en cola en ≈${formatDuration(queueWait)}.`);
+        const missing = RESOURCES.filter(id => candidate.cost[id] > resources[id].amount)
+          .map(id => `${Math.ceil(candidate.cost[id] - resources[id].amount).toLocaleString()} ${RESOURCE_NAMES[id]}`);
+        if (missing.length) notes.push(`Faltan ${missing.join(' y ')}.`);
+        if (snapshot.fleetPriority) notes.push('La producción de naves tiene prioridad.');
+        if (!notes.length) notes.push(ms > 0 ? 'Esperando el siguiente pedido del helper.' : 'Lista para encolar.');
+        return result(ms > 0 ? 'waiting' : 'ready', notes.join(' '), candidate, ms);
+      }
+
+      // Give a concrete blocker instead of displaying infinity, zero, or a
+      // countdown inferred from the duration of a job that has not been queued.
+      for (const row of selected) {
+        if (row.id === 'reactor') continue;
+        if (queued[row.id] && row.id === 'warehouse') {
+          return result('blocked', 'Resource Depot ya está en cola; se recalculará cuando termine.', row, null, 'queued');
+        }
+        if (!row.visible || row.targetLevel === null || !['ready', 'resources', 'queue', 'capacity'].includes(row.blocker)) continue;
+        if (!costKnown(row) || !powerKnown(row)) return result('blocked', 'Esperando costes y energía exactos del juego.', row, null, 'data');
+        if (!capacityFits(row)) return result('blocked', 'El coste supera la capacidad actual del Resource Depot.', row, null, 'capacity');
+        if (needsPower(row)) {
+          const detail = queued.reactor ? 'Esperando el Reactor en cola; se recalculará cuando termine.'
+            : excluded.has('reactor') ? 'Necesita más energía. Reactor está desmarcado.'
+              : 'Necesita más energía; esperando una mejora de Reactor disponible.';
+          return result('blocked', detail, row, null, 'energy');
+        }
+        for (const id of RESOURCES) {
+          const resource = resources[id];
+          if (!Number.isFinite(resource.rate)) return result('blocked', `Producción de ${RESOURCE_NAMES[id]} no disponible.`, row, null, 'rate');
+          if (resource.rate <= 0 && row.cost[id] > resource.amount) {
+            return result('blocked', `Falta ${RESOURCE_NAMES[id]} y su producción no es positiva.`, row, null, 'production');
+          }
+          if (resource.rate < 0) return result('blocked', `El ${RESOURCE_NAMES[id]} disponible disminuye durante la espera.`, row, null, 'production');
+        }
+        if (row.id === 'warehouse') return result('blocked', `Esperando que un recurso alcance el ${threshold}% del Depot.`, row, null, 'threshold');
+        return result('blocked', 'Esperando disponibilidad actualizada del juego.', row, null, 'refresh');
+      }
+      const locked = selected.find(row => row.id !== 'reactor');
+      if (locked) return result('blocked', locked.blocker === 'maxed' ? `${locked.name} ha alcanzado su máximo.`
+        : locked.blocker === 'locked' ? `Requisito pendiente: ${locked.nativeReason || locked.name}.`
+          : 'Esperando que el juego permita la siguiente mejora.', locked, null, locked.blocker);
+      return result('idle', 'Reactor solo se mejora cuando otra mejora marcada necesita energía.', null, null, 'demand');
+    }
+
+    return { estimate, parseRate, parseDuration, formatDuration };
+  }
+  // END UPGRADE ETA ESTIMATOR
 
   // BEGIN SHIFT PRESETS
   function createShiftPresetMenu({ isEnabled = () => true, onPreset = null,
