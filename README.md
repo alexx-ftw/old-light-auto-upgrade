@@ -1,6 +1,6 @@
 # Old Light Auto Upgrade
 
-Userscript para [Old Light](https://oldlight.io/play) que da prioridad a la flota, reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.7.1**.
+Userscript para [Old Light](https://oldlight.io/play) que da prioridad a la flota, reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.8.0**. La versión cargada aparece en la cabecera del helper, también al minimizarlo.
 
 ## Instalación
 
@@ -118,6 +118,24 @@ El seguimiento usa el identificador único de cada informe y conserva su estado 
 
 Funciona también con Telegram y las notificaciones del navegador desactivados. Si quieres avisos, activa **Avisos → Tipos de notificación → Reintentos de ataque** y el canal correspondiente. Los cambios de estos ajustes no generan notificaciones. Los ajustes, borradores y campañas se guardan automáticamente y se incluyen en las copias locales y de Drive; **importar una copia desactiva los reintentos y pausa sus campañas**.
 
+### Aumentar automáticamente los mínimos de naves
+
+En **Flota → Reintentar ataques fallidos**, la opción **Aumentar automáticamente los mínimos tras una derrota** ajusta los mínimos a la flota del ataque perdido con **+1 Marauder**. Conserva las cantidades de los otros tipos de nave y nunca reduce un mínimo que ya sea mayor.
+
+| Último ataque fallido | Mínimos actuales | Mínimos resultantes |
+| --- | --- | --- |
+| 8 Marauder | 8 Marauder | 9 Marauder |
+| 8 Marauder | 12 Marauder | 12 Marauder |
+| 8 Marauder y 2 Sentinel | 5 Marauder y 1 Sentinel | 9 Marauder y 2 Sentinel |
+
+Viene desactivada y es **independiente del reenvío automático**: puedes mantener la flota preparada y enviar las misiones manualmente. Empieza con los combates posteriores a su activación. Solo admite derrotas ofensivas confirmadas con cantidades conocidas; sondeos, defensas e informes incompletos no suben los mínimos.
+
+Si se recuperan varios informes juntos, usa la última derrota de la cuenta, aunque después haya una victoria en ese destino. Una derrota nueva con cantidades desconocidas deja sin efecto una propuesta anterior pendiente. Los informes más antiguos o repetidos no sustituyen el resultado más reciente.
+
+Los mínimos siguen siendo los ajustes compartidos del helper que se aplican al sistema seleccionado. Se respetan el orden de prioridades de naves, el modo de contar las naves en misión y la pausa general de producción. El cambio se guarda automáticamente, se refleja en los campos de mínimos y se incluye en las copias locales y de Drive. Importar una copia desactiva esta automatización para que puedas revisar sus ajustes.
+
+Si estás editando un mínimo que habría que aumentar, el helper conserva tu borrador y deja la actualización pendiente hasta que termines. Releer el mismo informe, recargar o reintentar un guardado no vuelve a subir un mínimo que hayas cambiado manualmente después. Desactivar la opción cancela los cambios automáticos pendientes y conserva los mínimos que ya se hayan aplicado.
+
 ### Recuperación de reintentos en 1.7.1
 
 Corrige informes que podían aparecer correctamente en Telegram y no llegar al reintento: la fecha de la lista y la del detalle no tienen que coincidir, y una cantidad numérica exacta puede omitir el indicador `kind`. Se siguen exigiendo el mismo identificador de informe, coordenadas exactas y una flota ofensiva conocida.
@@ -182,7 +200,7 @@ Deja **Structures o Shipyard abierto y la pestaña visible**. Los dos paneles de
 
 Cuando la pestaña está oculta, el cliente del juego aplaza el refresco de sus contadores y **el script no inicia nuevas acciones**. Los avisos dependen de los cambios que lleguen a la interfaz mientras se observa. No ofrece una cobertura completa de eventos del servidor ni actividad continua en segundo plano; al cerrar, suspender o descartar la pestaña, deja de actuar.
 
-La versión **1.7.1** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las construcciones ya encoladas mantienen su orden en el juego.
+La versión **1.8.0** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las construcciones ya encoladas mantienen su orden en el juego.
 
 ## Guardado local, exportación e importación
 

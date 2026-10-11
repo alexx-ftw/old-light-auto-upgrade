@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.7.1
+// @version      1.8.0
 // @description  Flota prioritaria con reserva de recursos y ETA, mejoras por prioridad, presets, misiones pendientes y reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -25,6 +25,7 @@
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
+  const SCRIPT_VERSION = '1.8.0';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -43,6 +44,7 @@
   const SHIPS = [['probe', 'Probe'], ['marauder', 'Marauder'], ['sentinel', 'Sentinel'], ['vanguard', 'Vanguard']];
   const DEFAULT_SHIP_ORDER = SHIPS.map(([id]) => id);
   const MAX_SHIP_MINIMUM = 1000000;
+  const MAX_AUTOMATIC_MINIMUM_RECEIPTS = 128;
   const MAX_NUMERIC_DRAFT_LENGTH = 32;
   const NUMERIC_DEBOUNCE_MS = 400;
   const MIN_GAP_MS = 500;
@@ -72,7 +74,7 @@
     getSnapshot: () => readLevelTargetSnapshot(rows()), onSettingsChange: settingsChanged });
   const reports = createReportsWatcher({ send: event => notifier.emit(event),
     getAccount: () => missionContext().scope.split('/')[1] || '',
-    getBaselineSince: () => attackRetry?.isEnabled() ? attackRetry.getEnabledAt() : null,
+    getBaselineSince: () => attackRetry?.getObservationSince() ?? null,
     onReport: report => attackRetry?.observeReport(report),
     onRecoverReports: batch => attackRetry?.recoverReports(batch) });
   let driveBackup = null;
@@ -131,6 +133,7 @@
     pauseJob: id => fleetWait.pause(id),
     resumeJob: id => fleetWait.resume(id),
     cancelJob: id => fleetWait.cancel(id),
+    raiseMinimums: raiseShipMinimums,
     send: event => notifier.emit(event),
     onSettingsChange: () => { settingsChanged(); schedule(); },
   });
@@ -226,6 +229,33 @@
       && SHIPS.every(([id]) => draft(value.ships[id]));
   }
 
+  function validAutomaticMinimumReceipt(value) {
+    return value && typeof value === 'object' && !Array.isArray(value)
+      && Object.keys(value).every(key => ['scope', 'reportId', 'takenAt'].includes(key))
+      && typeof value.scope === 'string' && /^[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{1,96}$/.test(value.scope)
+      && typeof value.reportId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.reportId)
+      && Number.isSafeInteger(value.takenAt) && value.takenAt >= 0 && value.takenAt <= 8640000000000000;
+  }
+
+  function normalizeAutomaticMinimumReceipts(value) {
+    const recent = new Map();
+    for (const item of Array.isArray(value) ? value : []) {
+      if (!validAutomaticMinimumReceipt(item)) continue;
+      const receipt = { scope: item.scope, reportId: item.reportId.toLowerCase(), takenAt: item.takenAt };
+      const key = JSON.stringify([receipt.scope, receipt.reportId]);
+      recent.delete(key);
+      recent.set(key, receipt);
+      if (recent.size > MAX_AUTOMATIC_MINIMUM_RECEIPTS) recent.delete(recent.keys().next().value);
+    }
+    return [...recent.values()];
+  }
+
+  function validAutomaticMinimumReceipts(value) {
+    return Array.isArray(value) && value.length <= MAX_AUTOMATIC_MINIMUM_RECEIPTS
+      && value.every(validAutomaticMinimumReceipt)
+      && new Set(value.map(item => JSON.stringify([item.scope, item.reportId.toLowerCase()]))).size === value.length;
+  }
+
   function normalizeSettings(value) {
       return {
         enabled: value?.enabled !== false,
@@ -238,6 +268,7 @@
         activeTab: ['buildings', 'fleet', 'notifications', 'data'].includes(value?.activeTab) ? value.activeTab : 'buildings',
         conditionsExpanded: value?.conditionsExpanded !== false,
         shipMinimums: Object.fromEntries(SHIPS.map(([id]) => [id, normalizeMinimum(value?.shipMinimums?.[id])])),
+        automaticMinimumReceipts: normalizeAutomaticMinimumReceipts(value?.automaticMinimumReceipts),
         shipOrder: normalizeOrder(value?.shipOrder, DEFAULT_SHIP_ORDER),
         countAway: value?.countAway === true,
         shiftPresetShortcut: value?.shiftPresetShortcut !== false,
@@ -268,6 +299,70 @@
     }
     try { settingsChanged(); } catch { /* El guardado local no depende de Drive. */ }
     return true;
+  }
+
+  function raiseShipMinimums(request) {
+    const object = value => value && typeof value === 'object' && !Array.isArray(value);
+    const receipt = { scope: request?.scope, reportId: request?.reportId, takenAt: request?.takenAt };
+    if (!object(request) || Object.keys(request).some(key => !['scope', 'reportId', 'takenAt', 'quantities'].includes(key))
+        || !validAutomaticMinimumReceipt(receipt) || receipt.takenAt > Date.now()
+        || !object(request.quantities) || Object.keys(request.quantities).some(id => !DEFAULT_SHIP_ORDER.includes(id))
+        || SHIPS.some(([id]) => !Number.isSafeInteger(request.quantities[id])
+          || request.quantities[id] < 0 || request.quantities[id] > MAX_SHIP_MINIMUM)) {
+      throw new TypeError('La propuesta de mínimos automáticos no es válida.');
+    }
+    if (importingBackup) return { status: 'deferred', changed: {}, reason: 'importing' };
+    if (missionContext().scope !== receipt.scope) return { status: 'deferred', changed: {}, reason: 'account' };
+
+    // Merge against the latest persisted settings. A failed read must never
+    // replace the user's settings or deduplication receipts with defaults.
+    const raw = localStorage.getItem(KEY);
+    const saved = raw === null ? {} : JSON.parse(raw);
+    if (!object(saved) || (saved.automaticMinimumReceipts !== undefined
+        && !validAutomaticMinimumReceipts(saved.automaticMinimumReceipts))) {
+      throw new TypeError('Los mínimos automáticos guardados no son válidos.');
+    }
+    const latest = normalizeSettings(saved);
+    receipt.reportId = receipt.reportId.toLowerCase();
+    // Minimums are shared across routes. An older report must not replace the
+    // latest defeat already considered for this account.
+    if (latest.automaticMinimumReceipts.some(item => item.scope === receipt.scope
+        && (item.reportId === receipt.reportId || item.takenAt >= receipt.takenAt))) {
+      settings = latest;
+      syncNumericInputs();
+      schedule();
+      return { status: 'noop', changed: {} };
+    }
+    const changed = {};
+    for (const [id] of SHIPS) {
+      const before = latest.shipMinimums[id];
+      const after = Math.max(before, request.quantities[id]);
+      if (after > before) changed[id] = { before, after };
+    }
+    // Let an existing edit finish before raising its active value. Otherwise
+    // its delayed commit or blur would silently restore the old minimum.
+    if (Object.keys(changed).some(id => {
+      const input = numericInputs.get(id)?.input;
+      return numericDraft(latest, id) !== null || numericUnsavedEditors.has(id)
+        || Boolean(input && input.getRootNode().activeElement === input);
+    })) return { status: 'deferred', changed: {}, reason: 'editing' };
+
+    const next = normalizeSettings(latest);
+    for (const [id, change] of Object.entries(changed)) next.shipMinimums[id] = change.after;
+    // The receipt and the minimums share one atomic localStorage write. A
+    // replay cannot undo a later manual reduction even if the controller's
+    // follow-up checkpoint fails or the page reloads immediately afterwards.
+    next.automaticMinimumReceipts = [...next.automaticMinimumReceipts, receipt].slice(-MAX_AUTOMATIC_MINIMUM_RECEIPTS);
+    const previous = settings;
+    settings = next;
+    if (!saveSettings()) {
+      settings = previous;
+      throw new Error('No se pudieron guardar los mínimos automáticos. Se volverá a intentar.');
+    }
+    for (const id of Object.keys(changed)) { numericErrors.delete(id); numericSaved.add(id); }
+    syncNumericInputs();
+    schedule();
+    return { status: Object.keys(changed).length ? 'applied' : 'noop', changed };
   }
 
   function numericDraft(source, id) {
@@ -889,11 +984,14 @@
             background:#101923; z-index:-1; pointer-events:none; }
           header.is-dragging { cursor:grabbing; }
           .helper-title { display:flex; align-items:center; gap:5px; flex:1; min-width:0; }
-          .helper-title > span:last-child { min-width:0; }
+          .helper-title > span:last-child { flex:1; min-width:0; }
+          .helper-title-line { display:flex; align-items:baseline; flex-wrap:wrap; gap:1px 4px; }
+          .helper-version { font-size:9px; line-height:1.3; font-weight:400; color:#93a9bb;
+            white-space:nowrap; font-variant-numeric:tabular-nums; }
           .helper-eta-compact { display:none; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
             font-size:10px; line-height:1.3; font-weight:400; color:#afd9c3; font-variant-numeric:tabular-nums; }
           .helper-shell.minimized .helper-eta-compact { display:block; }
-          .helper-grip { color:#8298aa; font-size:16px; }
+          .helper-grip { flex-shrink:0; color:#8298aa; font-size:16px; }
           .helper-minimize { width:27px; height:27px; padding:0; color:#b8cddd;
             background:#1c2a36; border-color:#40576b; flex-shrink:0; }
           .helper-shell.minimized { width:210px; padding:7px 9px; overflow:hidden; }
@@ -977,7 +1075,7 @@
         </style>
         <section class="helper-shell" aria-label="Mejoras automáticas de Old Light">
           <header title="Arrastra la cabecera para mover el helper">
-            <strong class="helper-title"><span class="helper-grip" aria-hidden="true">⠿</span><span>Auto ↑<span class="helper-eta-compact" data-field="upgrade-eta-compact"></span></span></strong>
+            <strong class="helper-title"><span class="helper-grip" aria-hidden="true">⠿</span><span><span class="helper-title-line"><span>Auto ↑</span><span class="helper-version" data-field="script-version" title="Versión del helper">v${SCRIPT_VERSION}</span></span><span class="helper-eta-compact" data-field="upgrade-eta-compact"></span></span></strong>
             <button type="button" data-action="automation-toggle" aria-pressed="true"></button>
             <button type="button" class="helper-minimize" data-action="helper-minimize" aria-expanded="true" aria-label="Minimizar helper" title="Minimizar helper">−</button>
           </header>
@@ -1272,7 +1370,7 @@
     return {
       format: 'old-light-auto-upgrade-backup',
       schemaVersion: 1,
-      scriptVersion: '1.7.1',
+      scriptVersion: SCRIPT_VERSION,
       exportedAt: new Date().toISOString(),
       settings: normalizeSettings(settings),
       notifications: notifier.exportConfig(),
@@ -1306,6 +1404,7 @@
           || next.shipMinimums[id] < 0 || next.shipMinimums[id] > MAX_SHIP_MINIMUM)
         || !Number.isInteger(next.depotFillPercent) || next.depotFillPercent < 1 || next.depotFillPercent > 100
         || (next.numericDrafts !== undefined && !validNumericDrafts(next.numericDrafts))
+        || (next.automaticMinimumReceipts !== undefined && !validAutomaticMinimumReceipts(next.automaticMinimumReceipts))
         || (next.presetCatalog !== undefined && !validPresetCatalog(next.presetCatalog))
         || (next.panelPosition != null && !normalizePanelPosition(next.panelPosition))
         || (next.activeTab !== undefined && !['buildings', 'fleet', 'notifications', 'data'].includes(next.activeTab))) {
@@ -1710,7 +1809,7 @@
     const fleetPanel = document.querySelector(FLEET_PANEL);
     if ((!panel && !fleetPanel) || !document.body) {
       observingNotifications = false;
-      reports.tick({ active: false, enabled: notifier.isEventEnabled('game.reports') || attackRetry.isEnabled() });
+      reports.tick({ active: false, enabled: notifier.isEventEnabled('game.reports') || attackRetry.isObservingReports() });
       observeGameEvents([], false);
       // Si la página desmonta el panel durante una petición, conserva el bloqueo
       // hasta que se agote su plazo para no enviar otro clic desde otra pestaña.
@@ -1734,7 +1833,7 @@
     const now = Date.now();
     const observeNotifications = notifier.isEnabled() && !document.hidden &&
       (isVisible(panel) || isVisible(fleetPanel));
-    const watchAttacks = attackRetry.isEnabled();
+    const watchAttacks = attackRetry.isObservingReports();
     const visibleHud = !document.hidden && (isVisible(panel) || isVisible(fleetPanel));
     observingNotifications = visibleHud && (observeNotifications || watchAttacks);
     if (observeNotifications || (watchAttacks && visibleHud)) acquireLeadership();
@@ -1742,6 +1841,13 @@
       enabled: notifier.isEventEnabled('game.reports') || watchAttacks, unread: readUnread('reports') });
     setText(ui.reportsStatus, reportsState.status);
     observeGameEvents(current, leader && observeNotifications, reportsState.apiAvailable);
+
+    // Updating a saved minimum is independent of permission to build or send.
+    // Finish recovery first so an older defeat cannot replace the latest one.
+    if (leader && visibleHud && !importingBackup && !reports.isRecovering()) {
+      try { attackRetry.flushMinimums(); }
+      catch (_) { wakeAt(Date.now() + RETRY_GAP_MS); }
+    }
 
     if (pending) {
       const requestSystemName = pending.systemName;
@@ -4323,7 +4429,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const copy = value => JSON.parse(JSON.stringify(value));
     const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     const zeros = () => Object.fromEntries(SHIPS.map(id => [id, 0]));
-    const defaults = () => ({ schemaVersion: 1, enabled: false, enabledAt: 0, produceMissing: true,
+    const defaults = () => ({ schemaVersion: 1, enabled: false, enabledAt: 0, autoMinimums: false,
+      minimumsEnabledAt: 0, minimumUpdates: [], minimumOutcomes: [], produceMissing: true,
       maxRetries: 3, maxRetriesDraft: '3', expanded: true, campaigns: [], processed: [], outcomes: [], floorAt: 0 });
     const gmGet = deps.gmGetValue || (typeof GM_getValue === 'function' ? GM_getValue : null);
     const gmSet = deps.gmSetValue || (typeof GM_setValue === 'function' ? GM_setValue : null);
@@ -4333,6 +4440,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     let readError = false;
     let storageError = false;
     let notice = '';
+    let minimumNotice = '';
     let lastReportDecision = null;
     let destroyed = false;
     let running = false;
@@ -4386,17 +4494,38 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         value.targetCoordinate.q, value.targetCoordinate.r]);
     }
     function validateConfig(value = {}) {
-      if (!keys(value, ['schemaVersion', 'enabled', 'enabledAt', 'produceMissing', 'maxRetries', 'maxRetriesDraft',
+      if (!keys(value, ['schemaVersion', 'enabled', 'enabledAt', 'autoMinimums', 'minimumsEnabledAt', 'minimumUpdates', 'minimumOutcomes', 'produceMissing', 'maxRetries', 'maxRetriesDraft',
         'expanded', 'campaigns', 'processed', 'outcomes', 'floorAt'])) throw new TypeError('Los reintentos guardados no son válidos.');
       const next = { ...defaults(), ...value };
       if (value.maxRetriesDraft === undefined) next.maxRetriesDraft = String(next.maxRetries);
-      if (next.schemaVersion !== 1 || !['enabled', 'produceMissing', 'expanded'].every(key => typeof next[key] === 'boolean') ||
+      if (next.schemaVersion !== 1 || !['enabled', 'autoMinimums', 'produceMissing', 'expanded'].every(key => typeof next[key] === 'boolean') ||
           !Number.isSafeInteger(next.maxRetries) || next.maxRetries < 0 || next.maxRetries > 100 ||
           typeof next.maxRetriesDraft !== 'string' || next.maxRetriesDraft.length > 16 || /[\u0000-\u001f\u007f]/.test(next.maxRetriesDraft)) {
         throw new TypeError('Los ajustes de reintento no son válidos.');
       }
-      time(next.enabledAt); time(next.floorAt);
+      time(next.enabledAt); time(next.minimumsEnabledAt); time(next.floorAt);
       if (next.enabled && next.enabledAt === 0) throw new TypeError('Falta la fecha de activación de los reintentos.');
+      if (next.autoMinimums && next.minimumsEnabledAt === 0) throw new TypeError('Falta la fecha de activación de los mínimos automáticos.');
+      if (!Array.isArray(next.minimumUpdates) || next.minimumUpdates.length > MAX_CAMPAIGNS) {
+        throw new TypeError('Hay demasiados mínimos automáticos pendientes.');
+      }
+      const minimumScopes = new Set();
+      next.minimumUpdates = next.minimumUpdates.map(item => {
+        if (!keys(item, ['scope', 'reportId', 'takenAt', 'quantities']) || !SCOPE.test(item.scope || '') ||
+            !UUID.test(item.reportId || '') || minimumScopes.has(item.scope)) throw new TypeError('Un mínimo automático pendiente no es válido.');
+        minimumScopes.add(item.scope);
+        return { scope: item.scope, reportId: item.reportId.toLowerCase(), takenAt: time(item.takenAt), quantities: quantities(item.quantities) };
+      });
+      if (!Array.isArray(next.minimumOutcomes) || next.minimumOutcomes.length > MAX_CAMPAIGNS) {
+        throw new TypeError('El historial de mínimos automáticos no es válido.');
+      }
+      const minimumOutcomeScopes = new Set();
+      next.minimumOutcomes = next.minimumOutcomes.map(item => {
+        if (!keys(item, ['scope', 'reportId', 'takenAt']) || !SCOPE.test(item.scope || '') ||
+            !UUID.test(item.reportId || '') || minimumOutcomeScopes.has(item.scope)) throw new TypeError('Un resultado de mínimos automáticos no es válido.');
+        minimumOutcomeScopes.add(item.scope);
+        return { scope: item.scope, reportId: item.reportId.toLowerCase(), takenAt: time(item.takenAt) };
+      });
       if (!Array.isArray(next.campaigns) || next.campaigns.length > MAX_CAMPAIGNS ||
           !Array.isArray(next.processed) || next.processed.length > MAX_HISTORY ||
           !Array.isArray(next.outcomes) || next.outcomes.length > MAX_HISTORY) throw new TypeError('Hay demasiados reintentos guardados.');
@@ -4651,7 +4780,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       for (const campaign of sent) emit(campaign, 'sent', 'Reintento ' + campaign.retries + ' enviado a ' + campaign.targetName + '.\n' + fleetText(campaign.quantities));
       return queue;
     }
-    function parseReport(value, onReject) {
+    function parseReport(value, onReject, allowUnknownDefeatFleet = false) {
       const reject = message => { onReject?.(message); return null; };
       if (!object(value) || !SCOPE.test(value.scope || '') || !object(value.item) || !object(value.detail)) {
         return reject('Falta el detalle del combate o la identidad de la cuenta.');
@@ -4687,9 +4816,12 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
               entry.approximate === true || !Number.isSafeInteger(entry.quantity) || entry.quantity < 0 || entry.quantity > MAX_QUANTITY) { valid = false; break; }
           found.add(entry.type); out[entry.type] = entry.quantity;
         }
+        if (valid && out.marauder === 0 && out.sentinel === 0 && (verdict === 'Defeat' || verdict === 'Draw')) {
+          return reject('El informe no contiene naves de combate atacantes.');
+        }
         if (valid) try { amounts = quantities(out); } catch (_) { /* No exact offensive fleet. */ }
       }
-      if ((verdict === 'Defeat' || verdict === 'Draw') && !amounts) {
+      if ((verdict === 'Defeat' || verdict === 'Draw') && !amounts && !(verdict === 'Defeat' && allowUnknownDefeatFleet)) {
         return reject('Falta una flota atacante exacta: cantidades enteras conocidas y al menos un Marauder o Sentinel.');
       }
       let originName, targetName;
@@ -4702,15 +4834,86 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         receivedAt: now(), message };
       render();
     }
+    function observationSince(value = config) {
+      if (!value) return null;
+      const dates = [];
+      if (value.enabled) dates.push(value.enabledAt);
+      if (value.autoMinimums) dates.push(value.minimumsEnabledAt);
+      return dates.length ? Math.min(...dates) : null;
+    }
+    function rememberMinimum(value, report, ambiguous = false) {
+      if (!value.autoMinimums || report.verdict !== 'Defeat' ||
+          report.takenAt <= Math.max(value.minimumsEnabledAt, value.floorAt)) return value;
+      const previous = value.minimumOutcomes.find(item => item.scope === report.scope);
+      if (previous && previous.takenAt > report.takenAt) return value;
+      if (previous && previous.takenAt === report.takenAt) {
+        if (previous.reportId === report.id && !ambiguous) return value;
+        // Equal-time defeats have no reliable ordering. Retain their boundary
+        // but never apply one of the competing fleets automatically.
+        return { ...value, minimumUpdates: value.minimumUpdates.filter(item => item.scope !== report.scope) };
+      }
+      const next = { ...value,
+        minimumOutcomes: [...value.minimumOutcomes.filter(item => item.scope !== report.scope),
+          { scope: report.scope, reportId: report.id, takenAt: report.takenAt }].slice(-MAX_CAMPAIGNS),
+        minimumUpdates: value.minimumUpdates.filter(item => item.scope !== report.scope) };
+      // Unknown attackers and quantity overflow supersede an older defeat but
+      // cannot authorize any increase. The boundary survives later victories.
+      if (ambiguous || !report.quantities || report.quantities.marauder >= MAX_QUANTITY) return next;
+      next.minimumUpdates = [...next.minimumUpdates, { scope: report.scope, reportId: report.id, takenAt: report.takenAt,
+        quantities: { ...report.quantities, marauder: report.quantities.marauder + 1 } }].slice(-MAX_CAMPAIGNS);
+      return next;
+    }
+    function flushMinimums() {
+      if (destroyed) return 0;
+      ensureReady();
+      if (!config.autoMinimums || !config.minimumUpdates.length) return 0;
+      let acknowledged = 0;
+      for (const request of copy(config.minimumUpdates)) {
+        ensureReady();
+        if (!config.autoMinimums) break;
+        if (!config.minimumUpdates.some(item => same(item, request))) continue;
+        try {
+          if (typeof deps.raiseMinimums !== 'function') throw new Error('No está disponible el guardado de mínimos.');
+          // Intent was committed with the report before touching fleet settings.
+          // The writer saves a receipt with its update, making a failed ack safe.
+          const result = syncResult(deps.raiseMinimums(copy(request)));
+          if (!object(result) || !['applied', 'noop', 'deferred'].includes(result.status) || !keys(result.changed, SHIPS) ||
+              !Object.values(result.changed).every(change => keys(change, ['before', 'after']) &&
+                Number.isSafeInteger(change.before) && change.before >= 0 &&
+                Number.isSafeInteger(change.after) && change.after > change.before)) {
+            throw new Error('No se pudo confirmar el guardado de los mínimos.');
+          }
+          if (result.status === 'deferred') {
+            minimumNotice = result.reason === 'editing' ? 'Mínimos pendientes: termina de editar las cantidades de flota.'
+              : result.reason === 'account' ? 'Hay mínimos pendientes de otra cuenta.'
+                : 'Mínimos pendientes. Se aplicarán cuando termine la operación actual.';
+            continue;
+          }
+          ensureReady();
+          const remaining = config.minimumUpdates.filter(item => !same(item, request));
+          if (remaining.length !== config.minimumUpdates.length) commit({ ...config, minimumUpdates: remaining });
+          acknowledged += 1;
+          const changes = Object.entries(result.changed).map(([id, change]) => NAMES[id] + ': ' + change.before + ' → ' + change.after);
+          minimumNotice = changes.length ? 'Mínimos guardados. ' + changes.join(' · ') + '.' : 'Mínimos revisados: se conservan las cantidades actuales.';
+        } catch (error) {
+          minimumNotice = 'No se pudieron actualizar los mínimos. La derrota queda guardada para volver a intentarlo.';
+          render();
+          throw error;
+        }
+      }
+      render();
+      return acknowledged;
+    }
     function recoverReports(batch) {
       if (destroyed) return 0;
       ensureReady();
-      if (!config.enabled) return 0;
+      if (observationSince() === null) return 0;
       if (!object(batch) || !SCOPE.test(batch.scope || '') || !Array.isArray(batch.reports) || batch.reports.length > 20) {
         throw new TypeError('La recuperación de combates no es válida.');
       }
       const latest = new Map();
-      const cutoff = Math.max(config.enabledAt, config.floorAt);
+      let latestMinimum = null;
+      const cutoff = Math.max(observationSince(), config.floorAt);
       const incomplete = (entry, message) => {
         reportDecision({ scope: batch.scope, item: entry?.item }, 'La recuperación sigue pendiente. ' + message);
         throw new Error(message);
@@ -4736,6 +4939,11 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
           incomplete(entry, 'Un combate reciente identifica el mismo punto como origen y destino.');
         }
         const value = { scope: batch.scope, item, detail };
+        const minimumReport = parseReport(value, null, true);
+        if (minimumReport?.verdict === 'Defeat') {
+          if (!latestMinimum || takenAt > latestMinimum.report.takenAt) latestMinimum = { report: minimumReport, ambiguous: false };
+          else if (takenAt === latestMinimum.report.takenAt && minimumReport.id !== latestMinimum.report.id) latestMinimum.ambiguous = true;
+        }
         const route = routeKey({ scope: batch.scope, originCoordinate, targetCoordinate });
         const previous = latest.get(route);
         // Select using identity and outcome time before validating the fleet.
@@ -4744,10 +4952,17 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
           value, takenAt, originCoordinate, targetCoordinate, ambiguous: false });
         else if (takenAt === previous.takenAt && item.id.toLowerCase() !== previous.value.item.id.toLowerCase()) previous.ambiguous = true;
       }
+      // Minimums use the latest defeat in the batch, even if a later victory
+      // on that route means there is no attack left to retry.
+      if (latestMinimum) {
+        ensureReady();
+        const next = rememberMinimum(copy(config), latestMinimum.report, latestMinimum.ambiguous);
+        if (!same(next, config)) commit(next);
+      }
       let accepted = 0;
       for (const [route, entry] of [...latest].sort((a, b) => b[1].takenAt - a[1].takenAt)) {
         ensureReady();
-        if (!config.enabled) break;
+        if (observationSince() === null) break;
         const value = entry.value;
         const known = config.processed.some(item => item.scope === batch.scope && item.id === value.item.id.toLowerCase());
         const outcome = config.outcomes.find(item => routeKey(item) === route);
@@ -4758,7 +4973,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         if (entry.ambiguous || !parsed) {
           const message = entry.ambiguous ? 'Hay dos combates de esta ruta con la misma fecha. Revisa sus resultados antes de reintentar.'
             : 'El último combate no se pudo usar para reintentar. ' + reason;
-          const campaign = config.campaigns.find(item => routeKey(item) === route && !TERMINAL.includes(item.status));
+          const campaign = config.enabled && entry.takenAt > config.enabledAt
+            ? config.campaigns.find(item => routeKey(item) === route && !TERMINAL.includes(item.status)) : null;
           // Keep the outcome boundary even when no fleet can be authorized.
           // The normal watcher may still have older reports pending after this
           // batch; neither they nor a reload may turn them into a stale attack.
@@ -4800,20 +5016,33 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     function observeReport(value) {
       if (destroyed) return false;
       if (!refreshConfig()) throw new Error('No se pudieron leer los reintentos guardados. El informe sigue pendiente.');
-      if (!config.enabled) return false;
+      if (observationSince() === null) return false;
+      // Store minimum intent independently of the mission queue and its report
+      // deduplication. A queue read error must still leave this work durable.
+      const minimumReport = config.autoMinimums ? parseReport(value, null, true) : null;
+      if (minimumReport) {
+        const next = rememberMinimum(copy(config), minimumReport);
+        if (!same(next, config)) commit(next);
+      }
       let reason = '';
       const report = parseReport(value, message => { reason = message; });
       if (!report) {
         if (value?.item?.verdict === 'Defeat' && (value.detail?.route?.from?.ownerKind === 'owned' || /^You attacked\b/i.test(value.item.title || ''))) {
-          reportDecision(value, 'No se preparó un reintento para la última derrota. ' + reason);
+          reportDecision(value, 'No se pudo usar la última derrota. ' + reason);
         }
         return false;
       }
-      if (report.takenAt <= Math.max(config.enabledAt, config.floorAt) ||
+      if (report.takenAt <= Math.max(observationSince(), config.floorAt) ||
           config.processed.some(item => item.scope === report.scope && item.id === report.id)) return false;
       const route = routeKey(report);
       const outcome = config.outcomes.find(item => routeKey(item) === route);
       if (outcome && report.takenAt <= outcome.takenAt) return false;
+      if (!config.enabled || report.takenAt <= config.enabledAt) {
+        commit(remember(copy(config), report));
+        lastReportDecision = null;
+        render();
+        return true;
+      }
       try { reconcile(); } catch (_) {
         notice = 'No se puede comprobar la cola. El informe esperará antes de preparar otro ataque.'; render();
         throw new Error(notice);
@@ -4976,9 +5205,11 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     }
     function setConfig(patch) {
       ensureReady();
-      if (!keys(patch, ['enabled', 'produceMissing', 'maxRetries', 'maxRetriesDraft', 'expanded'])) throw new TypeError('Ajustes de reintento no válidos.');
+      if (!keys(patch, ['enabled', 'autoMinimums', 'produceMissing', 'maxRetries', 'maxRetriesDraft', 'expanded'])) throw new TypeError('Ajustes de reintento no válidos.');
       const next = { ...config, ...patch };
       if (patch.enabled === true && !config.enabled) next.enabledAt = Math.max(1, now());
+      if (patch.autoMinimums === true && !config.autoMinimums) next.minimumsEnabledAt = Math.max(1, now());
+      if (patch.autoMinimums === false) next.minimumUpdates = [];
       if (patch.maxRetries !== undefined && patch.maxRetriesDraft === undefined) next.maxRetriesDraft = String(patch.maxRetries);
       const previous = copy(config);
       if (patch.enabled === false) next.campaigns = next.campaigns.map(item => ACTIVE.includes(item.status)
@@ -4988,6 +5219,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
           ? { ...item, status: 'limit', resumeStatus: null, updatedAt: Math.max(now(), item.updatedAt),
             message: 'Se alcanzó el máximo de reintentos configurado.' } : item);
       const saved = commit(next);
+      if (patch.autoMinimums !== undefined) { minimumNotice = ''; render(); }
       if (patch.enabled === false) for (const campaign of previous.campaigns) {
         if (!TERMINAL.includes(campaign.status)) try { controlOwnJob(campaign, 'pause'); } catch (_) { /* State remains disabled. */ }
       }
@@ -5047,12 +5279,14 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       let previous = [];
       try { previous = configFromRaw(readRaw()).campaigns; } catch (_) { /* Explicit import can repair corrupt configuration. */ }
       next.enabled = false; next.enabledAt = 0;
+      next.autoMinimums = false; next.minimumsEnabledAt = 0; next.minimumUpdates = []; next.minimumOutcomes = [];
       next.campaigns = next.campaigns.map(item => TERMINAL.includes(item.status) ? item : { ...item,
         status: 'paused', resumeStatus: item.status === 'uncertain' ? null : item.status === 'paused' ? item.resumeStatus : item.status,
         updatedAt: Math.max(now(), item.updatedAt), message: item.status === 'uncertain'
           ? 'Importada en pausa con un envío sin confirmar. Comprueba las misiones del juego.'
           : 'Importada en pausa. Revisa el origen, el destino y la flota antes de reanudar.' });
       const saved = commit(next);
+      minimumNotice = ''; render();
       for (const campaign of previous) {
         try { controlOwnJob(campaign, 'pause'); } catch (_) { /* Imports never authorize outstanding old retry jobs. */ }
       }
@@ -5078,6 +5312,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       if (!mounted || !ui || destroyed) return;
       const value = config || defaults();
       ui.enable.checked = value.enabled;
+      ui.minimums.checked = value.autoMinimums;
       ui.produce.checked = value.produceMissing;
       ui.details.open = value.expanded;
       if (ui.limit !== ui.limit.getRootNode().activeElement) ui.limit.value = value.maxRetriesDraft;
@@ -5086,9 +5321,14 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         ? 'Escribe un número de 0 a 100. Sigue vigente: ' + (value.maxRetries === 0 ? 'sin límite' : value.maxRetries) + '.'
         : value.maxRetries === 0 ? 'Sin límite: seguirá sumando 1 Marauder tras cada derrota hasta ganar o pausar la campaña.'
           : 'Como máximo ' + value.maxRetries + ' reintentos por campaña. 0 significa sin límite.';
-      ui.status.textContent = notice || (!value.enabled ? 'Desactivado. Al activarlo solo se procesarán informes nuevos.'
-        : lastReportDecision?.message || 'Activo para nuevos ataques fallidos.');
-      for (const input of [ui.enable, ui.produce, ui.limit]) input.disabled = readError;
+      ui.status.textContent = notice || lastReportDecision?.message || (value.enabled
+        ? value.autoMinimums ? 'Activos: reintentos y aumento de mínimos tras nuevas derrotas.' : 'Reintentos activos para nuevos ataques fallidos.'
+        : value.autoMinimums ? 'Mínimos automáticos activos. El reenvío de ataques está desactivado.'
+          : 'Desactivado. Al activar una opción solo se procesarán combates posteriores.');
+      ui.minimumStatus.hidden = !value.autoMinimums;
+      ui.minimumStatus.textContent = minimumNotice || (value.minimumUpdates.length
+        ? 'Hay mínimos pendientes de guardar a partir de la última derrota.' : 'Esperando la próxima derrota para revisar los mínimos.');
+      for (const input of [ui.enable, ui.minimums, ui.produce, ui.limit]) input.disabled = readError;
       const key = JSON.stringify([value.campaigns, value.enabled, readError]);
       if (key === cardsKey) return;
       cardsKey = key;
@@ -5132,6 +5372,10 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       const checkbox = (label, field) => { const row = el('label'), input = el('input'); input.type = 'checkbox'; input.dataset.attackRetryOption = field;
         input.addEventListener('change', () => { try { setConfig({ [field]: input.checked }); } catch (error) { showError(error); } }); row.append(input, el('span', label)); details.append(row); return input; };
       const enable = checkbox('Reintentar automáticamente con +1 Marauder tras una derrota', 'enabled');
+      const minimums = checkbox('Aumentar automáticamente los mínimos tras una derrota', 'autoMinimums');
+      details.append(el('p', 'Usa la flota del último ataque fallido y suma 1 Marauder. Conserva los mínimos que ya sean mayores. Funciona aunque el reenvío esté desactivado y solo para combates posteriores a su activación.', 'ar-muted'));
+      details.append(el('p', 'Se guardan los mínimos de Flota que usa el sistema seleccionado. La producción respeta tus prioridades y la pausa del helper.', 'ar-muted'));
+      const minimumStatus = el('p', '', 'ar-status'); minimumStatus.setAttribute('role', 'status'); details.append(minimumStatus);
       const produce = checkbox('Producir las naves necesarias para nuevos reintentos', 'produceMissing');
       const row = el('label'), limit = el('input'); limit.type = 'text'; limit.inputMode = 'numeric'; limit.maxLength = 16;
       limit.dataset.attackRetryOption = 'maxRetries'; limit.setAttribute('aria-label', 'Máximo de reintentos; cero significa sin límite');
@@ -5147,16 +5391,20 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       details.addEventListener('toggle', () => {
         if (config && details.open !== config.expanded) try { setConfig({ expanded: details.open }); } catch (error) { showError(error); }
       });
-      ui = { details, enable, produce, limit, limitHint, status, cards }; mounted.replaceChildren(details); render();
+      ui = { details, enable, minimums, minimumStatus, produce, limit, limitHint, status, cards }; mounted.replaceChildren(details); render();
     }
     function destroy() { destroyed = true; epoch += 1; mounted?.replaceChildren(); mounted = null; ui = null; }
     refreshConfig();
-    return { observeReport, recoverReports, tick, canRunJob, setConfig, pause, resume, cancel, remove, mount, exportConfig, validateConfig,
+    return { observeReport, recoverReports, flushMinimums, tick, canRunJob, setConfig, pause, resume, cancel, remove, mount, exportConfig, validateConfig,
       importConfig, backupCheckpoint, restoreCheckpoint, refreshConfig, destroy,
       isEnabled: () => !destroyed && refreshConfig() && config.enabled,
       getEnabledAt: () => !destroyed && refreshConfig() ? config.enabledAt : 0,
+      isObservingReports: () => !destroyed && refreshConfig() && observationSince() !== null,
+      getObservationSince: () => !destroyed && refreshConfig() ? observationSince() : null,
       isBusy: () => running,
       getDiagnostics: () => ({ enabled: config?.enabled ?? false, enabledAt: config?.enabledAt ?? 0,
+        autoMinimums: config?.autoMinimums ?? false, minimumsEnabledAt: config?.minimumsEnabledAt ?? 0,
+        minimumUpdates: config ? copy(config.minimumUpdates) : [], minimumOutcomes: config ? copy(config.minimumOutcomes) : [], minimumNotice,
         running, readError, storageError, notice, lastReportDecision: lastReportDecision ? copy(lastReportDecision) : null, count: config?.campaigns.length ?? null,
         campaigns: config ? copy(config.campaigns) : [] }) };
   }
