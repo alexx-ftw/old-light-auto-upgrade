@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.10.0
+// @version      1.10.1
 // @description  Flota prioritaria con reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -19,13 +19,14 @@
 (() => {
   'use strict';
 
-  // Usa los controles normales del juego, con Structures o Shipyard abierto.
+  // Usa los controles normales del juego, también cuando la vista estrecha
+  // oculta sus paneles en Galaxy o Movements pero mantiene sus datos actualizados.
   // Las mejoras actúan sobre la selección; los mínimos requieren un solo sistema.
   // Ambos paneles se actualizan aunque uno de sus tabs internos esté oculto.
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.10.0';
+  const SCRIPT_VERSION = '1.10.1';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -561,19 +562,77 @@
       getComputedStyle(node).visibility === 'visible');
   }
 
+  // BEGIN NATIVE HUD AVAILABILITY
+  function hudBlocked() {
+    return !document.body || document.body.matches('.booting, .boot-error, .ui-hidden');
+  }
+
+  function mobileHudBlock(block, selector) {
+    return Boolean(!hudBlocked() && window.matchMedia('(max-width: 900px)').matches
+      && block?.isConnected && block.matches(selector)
+      && block.parentElement?.matches('main#app > header#hud > #hud-columns.hud-columns > .hud-stack.hud-stack-left')
+      && isVisible(block.parentElement));
+  }
+
+  function hudPathAvailable(node, anchor, hiddenTab = null, layoutHidden = null) {
+    if (!node?.isConnected || !isVisible(anchor)) return false;
+    let item = node;
+    for (; item && item !== anchor; item = item.parentElement) {
+      const inactiveTab = item === hiddenTab && item.hidden === true;
+      const style = getComputedStyle(item);
+      if (item.matches('[inert], [aria-hidden="true"]') || style.visibility !== 'visible'
+          || (item.hasAttribute('hidden') && !inactiveTab)) return false;
+      // Only native responsive CSS may hide the known wrapper. An explicit
+      // inline hide or a hidden child still means the game control is unavailable.
+      if (style.display === 'none' && !inactiveTab
+          && (item !== layoutHidden || item.style.getPropertyValue('display').trim() !== '')) return false;
+    }
+    return item === anchor;
+  }
+
+  function responsiveBuildingsBlock(panel) {
+    const block = panel?.parentElement;
+    if (!['galaxy', 'move'].includes(document.body?.dataset.mobileMode)
+        || !mobileHudBlock(block, '.hud-block.hud-buildings[data-field="buildings-wrap"]')) return null;
+    const tabs = [PANEL, FLEET_PANEL].map(selector => document.querySelector(selector));
+    if (!tabs.every(tab => tab?.parentElement === block) || !tabs.includes(panel)) return null;
+    const active = tabs.filter(tab => !tab.hidden);
+    const selected = { structures: PANEL, fleet: FLEET_PANEL }[document.body.dataset.starTab];
+    if (active.length !== 1 || !selected || !active[0].matches(selected)) return null;
+    return block;
+  }
+
+  function hudPanelAvailable(panel) {
+    if (hudBlocked()) return false;
+    if (isVisible(panel)) return true;
+    const block = responsiveBuildingsBlock(panel);
+    return Boolean(block && !panel.hidden && hudPathAvailable(panel, block.parentElement, null, block));
+  }
+
   function controlVisible(node, panelSelector) {
+    if (hudBlocked()) return false;
     if (isVisible(node)) return true;
     const panel = node?.closest(panelSelector);
-    // La única excepción es hidden en el tab interno inactivo del juego.
-    if (!panel?.hidden || ![PANEL, FLEET_PANEL].some(selector => isVisible(document.querySelector(selector)))) return false;
-    if (!isVisible(panel.parentElement)) return false;
-    for (let item = node; item && item !== panel.parentElement; item = item.parentElement) {
-      const style = getComputedStyle(item);
-      if (item.matches('[inert], [aria-hidden="true"]') || style.visibility !== 'visible' ||
-          (item !== panel && (item.hidden || style.display === 'none'))) return false;
-    }
-    return true;
+    if (!panel || ![PANEL, FLEET_PANEL].some(selector => hudPanelAvailable(document.querySelector(selector)))) return false;
+    const block = responsiveBuildingsBlock(panel);
+    if (block) return hudPathAvailable(node, block.parentElement, panel.hidden === true ? panel : null, block);
+    // The inactive internal tab remains readable when its sibling is visible.
+    return panel.hidden === true && hudPathAvailable(node, panel.parentElement, panel);
   }
+
+  function garrisonAvailable(node) {
+    if (hudBlocked()) return false;
+    if (isVisible(node)) return true;
+    const block = node?.closest('.hud-block.hud-active');
+    if (!mobileHudBlock(block, '.hud-block.hud-active')) return false;
+    const fleetWrap = node.closest('[data-field="active-fleet-wrap"]');
+    if (!fleetWrap || fleetWrap.parentElement !== block || !node.matches('[data-field="garrison"]')) return false;
+    const mode = document.body.dataset.mobileMode;
+    const layoutHidden = mode === 'move' ? block
+      : mode === 'star' && document.body.dataset.starTab === 'structures' ? fleetWrap : null;
+    return Boolean(layoutHidden && hudPathAvailable(node, block.parentElement, null, layoutHidden));
+  }
+  // END NATIVE HUD AVAILABILITY
 
   function isAvailable(button, panelSelector = PANEL) {
     return controlVisible(button, panelSelector) && !button.matches(':disabled') &&
@@ -733,7 +792,7 @@
     const garrison = document.querySelector('[data-field="garrison"].active-garrison-chip--full');
     const treasuryAlert = document.querySelector(`${FLEET_PANEL} .shipyard-deficit-alert`);
     return { active: maintain || waiting, contextReady, resources, ships: targets,
-      cooldownMs: Math.max(0, nextClickAt - Date.now()), docksFull: Boolean(garrison && isVisible(garrison)),
+      cooldownMs: Math.max(0, nextClickAt - Date.now()), docksFull: Boolean(garrison && garrisonAvailable(garrison)),
       treasuryBlocked: Boolean(treasuryAlert && controlVisible(treasuryAlert, FLEET_PANEL))
         || targets.some(row => /^Treasury in deficit:/i.test(row.nativeReason)),
       queue: { full: ships.some(row => /^Build queue full\.?$/i.test(row.button.getAttribute('title') || '')),
@@ -904,7 +963,7 @@
     else if (pending) forecast = state('busy', pending.kind === 'ship' ? 'Esperando confirmación del pedido de naves.'
       : 'Esperando confirmación de la mejora solicitada.', pending);
     else if (document.hidden) forecast = state('blocked', 'Vuelve a esta pestaña para leer los datos actuales.');
-    else if (![PANEL, FLEET_PANEL].some(selector => isVisible(document.querySelector(selector)))) {
+    else if (![PANEL, FLEET_PANEL].some(selector => hudPanelAvailable(document.querySelector(selector)))) {
       forecast = state('blocked', 'Abre Structures o Shipyard para calcular la ETA.');
     } else if (!systemId() || SHIPS.some(([id]) => fleetCounts(id) === null)) {
       forecast = state('blocked', 'Selecciona un solo sistema con datos disponibles.');
@@ -2045,7 +2104,7 @@
     const focused = root.activeElement;
     const hadFocus = focused && ui.choices.contains(focused);
     const current = new Map(rows().map(row => [row.id, row]));
-    const canRead = !!systemId() && [PANEL, FLEET_PANEL].some(selector => isVisible(document.querySelector(selector)));
+    const canRead = !!systemId() && [PANEL, FLEET_PANEL].some(selector => hudPanelAvailable(document.querySelector(selector)));
     setText(ui.buildingCount, `${BUILDINGS.length - settings.excluded.length} / ${BUILDINGS.length} activos`);
     for (const [index, id] of settings.order.entries()) {
       const controls = ui.items.get(id);
@@ -2167,9 +2226,9 @@
     const ships = shipRows();
     const now = Date.now();
     const observeNotifications = notifier.isEnabled() && !document.hidden &&
-      (isVisible(panel) || isVisible(fleetPanel));
+      (hudPanelAvailable(panel) || hudPanelAvailable(fleetPanel));
     const watchAttacks = attackRetry.isObservingReports();
-    const visibleHud = !document.hidden && (isVisible(panel) || isVisible(fleetPanel));
+    const visibleHud = !document.hidden && (hudPanelAvailable(panel) || hudPanelAvailable(fleetPanel));
     observingNotifications = visibleHud && (observeNotifications || watchAttacks);
     if (observeNotifications || (watchAttacks && visibleHud)) acquireLeadership();
     const reportsState = reports.tick({ active: leader && visibleHud && (observeNotifications || watchAttacks),
@@ -2257,7 +2316,7 @@
       show('Esperando datos actuales en una pestaña visible del juego');
       return;
     }
-    if (!isVisible(panel) && !isVisible(fleetPanel)) {
+    if (!hudPanelAvailable(panel) && !hudPanelAvailable(fleetPanel)) {
       releaseLeadership(); show('Abre Structures o Shipyard para continuar'); return;
     }
     if (!current.length && !ships.length) { releaseLeadership(); show('Selecciona uno de tus sistemas'); return; }
@@ -6267,7 +6326,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       && !reports.isRecovering()
       && context.scope && context.originId && context.selectionCount === 1
       && !document.querySelector(`${PANEL} .b-loading, ${FLEET_PANEL} .b-loading`)
-      && (isVisible(document.querySelector(PANEL)) || isVisible(document.querySelector(FLEET_PANEL))));
+      && (hudPanelAvailable(document.querySelector(PANEL)) || hudPanelAvailable(document.querySelector(FLEET_PANEL))));
   }
 
   function missionQueueContext() {
@@ -9742,7 +9801,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     childList: true,
     characterData: true,
     attributes: true,
-    attributeFilter: ['disabled', 'aria-disabled', 'aria-hidden', 'aria-label', 'hidden', 'inert', 'class', 'style', 'title', 'data-tutorial'],
+    attributeFilter: ['disabled', 'aria-disabled', 'aria-hidden', 'aria-label', 'hidden', 'inert', 'class', 'style', 'title', 'data-tutorial', 'data-mobile-mode', 'data-star-tab'],
   });
   window.addEventListener('storage', event => {
     if (event.key !== KEY && event.key !== null) return;
@@ -9760,6 +9819,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     ui?.cancelPanelDrag?.();
     ui?.cancelResize?.();
     layoutHelper();
+    schedule();
   });
   document.addEventListener('visibilitychange', schedule);
   window.addEventListener('pageshow', schedule);

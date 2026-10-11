@@ -1,12 +1,12 @@
 # Old Light Auto Upgrade
 
-Userscript para [Old Light](https://oldlight.io/play) que da prioridad a la flota, reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.10.0**, con edición de tipos y cantidades de nave en misiones pendientes y campañas, borradores guardados automáticamente y sincronización entre ambas tarjetas. La versión cargada aparece en la cabecera del helper, también al minimizarlo.
+Userscript para [Old Light](https://oldlight.io/play) que da prioridad a la flota, reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.10.1**, con funcionamiento en las vistas estrechas Galaxy y Movements y flotas editables en misiones y campañas, con borradores guardados automáticamente. La versión cargada aparece en la cabecera del helper, también al minimizarlo.
 
 ## Instalación
 
 1. Instala [Tampermonkey](https://www.tampermonkey.net/) o [Violentmonkey](https://violentmonkey.github.io/get-it/).
 2. Abre **[Instalar o actualizar el userscript](https://raw.githubusercontent.com/alexx-ftw/old-light-auto-upgrade/main/old-light-auto-upgrade.user.js)** y confirma la instalación en el gestor.
-3. Recarga Old Light, selecciona un sistema y abre **Structures** o **Shipyard**.
+3. Recarga Old Light y selecciona un sistema. En escritorio, abre **Structures** o **Shipyard**; en la vista estrecha también puedes permanecer en **Galaxy** o **Movements**.
 
 Si el enlace muestra texto, utiliza la opción de instalar desde URL de tu gestor con ese mismo enlace.
 
@@ -28,6 +28,12 @@ Los controles de uso habitual aparecen primero. La conexión de Telegram, los l�
 Puedes **mover** el helper arrastrando la cabecera y **minimizarlo** con **−**. La barra compacta conserva la versión, la pausa de automatización y la ETA. Para **cambiar el ancho**, arrastra el borde izquierdo o usa **Datos → Ventana del helper → Ancho**; admite de **300 a 560 px** y se adapta al espacio disponible. **Restablecer tamaño y posición** recupera el ancho de 360 px y la esquina inferior derecha. La posición, el ancho, la última pestaña, el estado minimizado y los desplegables se guardan localmente y viajan en las copias.
 
 También se puede navegar con el teclado: **← / →**, **Inicio** y **Fin** cambian de pestaña cuando su botón tiene el foco. **↑ / ↓** sobre el asa de una prioridad la mueve, y los botones de flecha ofrecen la misma acción. En el borde de ancho, **← / →** ajustan 20 px e **Inicio / Fin** llevan a los límites; un doble clic restablece 360 px. **Escape** cancela un arrastre de ventana, ancho o prioridad. El foco se conserva mientras llegan actualizaciones del juego.
+
+### Ventanas estrechas
+
+Con **900 px de ancho o menos**, Old Light pasa a una navegación con **Star**, **Movements** y **Galaxy**. En estas dos últimas vistas oculta visualmente los paneles de construcción, pero sigue actualizando sus controles y datos. Desde **1.10.1**, el helper mantiene la lectura de niveles, ETA, producción, mejoras, misiones pendientes y observación de eventos en esas vistas. No necesita cambiar de pantalla ni abrir el menú de navegación.
+
+La pestaña del navegador debe seguir visible y los datos del sistema deben estar cargados. Los controles deshabilitados, el astillero bloqueado, una pantalla de carga o error y la pausa del helper siguen deteniendo las acciones correspondientes. La detección de muelles llenos también funciona cuando la vista estrecha oculta el indicador de flota. Cambiar de ancho o de vista actualiza el helper automáticamente.
 
 ## Edificios y prioridades
 
@@ -61,7 +67,7 @@ La ETA corresponde a cuándo se podrá **encolar el siguiente pedido automático
 
 Se actualiza con los datos del juego y la comprobación habitual de cada segundo. La cuenta atrás continúa entre actualizaciones de las cantidades enteras del HUD; si llega a cero antes de que el juego habilite el pedido, espera su confirmación. El símbolo **≈** indica una estimación con las tasas actuales, que el juego redondea. Los pedidos, otros gastos, las naves que regresen, los recursos que lleguen y las construcciones que terminen pueden cambiarla; se recalcula al observar esos cambios. Funciona también si todos los edificios están desmarcados y solo mantienes mínimos de flota.
 
-Requiere **un único sistema**, una pestaña visible y **Structures o Shipyard** abierto. La previsión usa los datos disponibles sin iniciar peticiones, modificar prioridades ni generar notificaciones. No se guarda una cuenta atrás antigua: al recargar se calcula de nuevo.
+Requiere **un único sistema**, una pestaña visible y los datos de **Structures o Shipyard** cargados. En escritorio, deja uno de esos paneles abierto; en la vista estrecha también funciona desde **Galaxy o Movements**. La previsión usa los datos disponibles sin iniciar peticiones, modificar prioridades ni generar notificaciones. No se guarda una cuenta atrás antigua: al recargar se calcula de nuevo.
 
 ## Mínimos de naves
 
@@ -103,7 +109,7 @@ Por ejemplo, un preset de **4 Probe + 2 Marauder**, con **1 Probe en base**, **2
 
 En **Flota → Misiones pendientes** puedes cambiar ambas opciones, pausar, reanudar o cancelar la espera. Cancelar retira la misión del helper; las naves que el juego ya haya aceptado construir siguen en su cola. Si sólo activas producción, el encargo termina cuando reúne la flota y queda preparado para envío manual. No modifica tus mínimos permanentes ni los suma al déficit: utiliza la cantidad mayor de ambos objetivos cuando coinciden.
 
-Cada misión queda vinculada a la **cuenta, galaxia, sistema de origen y coordenadas exactas del destino**. Esta función requiere un **único origen seleccionado** y admite una misión pendiente por origen. Selecciona ese origen, mantén el helper activo y deja **Structures o Shipyard** abierto en una pestaña visible. Si cambias de sistema, la misión espera a que vuelvas. Los despachos inmediatos completos siguen admitiendo el comportamiento nativo por lotes.
+Cada misión queda vinculada a la **cuenta, galaxia, sistema de origen y coordenadas exactas del destino**. Esta función requiere un **único origen seleccionado** y admite una misión pendiente por origen. Selecciona ese origen, mantén el helper activo y deja la pestaña del navegador visible. En escritorio, abre **Structures o Shipyard**; en la vista estrecha puedes permanecer en **Galaxy o Movements**. Si cambias de sistema, la misión espera a que vuelvas. Los despachos inmediatos completos siguen admitiendo el comportamiento nativo por lotes.
 
 Las misiones pendientes se guardan localmente. Tras recargar, el helper puede recuperar el destino mediante los controles del mapa y comprobar de nuevo la ruta antes de enviar; esa recuperación puede desplazar la vista del mapa. Una interacción tuya durante la preparación la interrumpe. Si el juego no permite comprobar el destino o cambia el preset, queda pausada para revisión. También puedes reconectarla seleccionando el mismo destino y preset con **Shift + clic**.
 
@@ -142,7 +148,7 @@ El incremento se aplica a la flota completa que se enviará. Si se perdieron los
 - **Máximo de reintentos:** por defecto, **3 por campaña**, además del ataque original. **0** permite continuar sin ese límite. Se cuentan los envíos confirmados. Reducir el máximo detiene un reintento pendiente que exceda el nuevo límite.
 - Cada campaña muestra el objetivo, origen, cantidades, estado y número de reintentos enviados. Puedes **Editar flota** mientras el ataque esté pendiente, **Pausar**, **Reanudar** o **Cancelar campaña**. Si el ataque editado vuelve a perder, el siguiente incremento de **+1 Marauder** parte de la composición que realmente se envió. Desactivar la función pausa sus ataques pendientes; las construcciones o misiones ya aceptadas por el juego continúan.
 
-La función verifica la cuenta, galaxia, origen y coordenadas exactas. Requiere tener seleccionado el sistema de origen, el helper activo, la pestaña visible y **Structures o Shipyard** abierto. La comprobación puede mover la vista del mapa. Si hay otra misión pendiente de ese origen, espera su turno sin reemplazarla. Los reintentos utilizan las cantidades del ataque y no crean ni cambian presets guardados del juego.
+La función verifica la cuenta, galaxia, origen y coordenadas exactas. Requiere tener seleccionado el sistema de origen, el helper activo, la pestaña visible y **Structures o Shipyard** abierto en escritorio; en la vista estrecha también funciona desde **Galaxy o Movements**. La comprobación del destino puede mover la vista del mapa. Si hay otra misión pendiente de ese origen, espera su turno sin reemplazarla. Los reintentos utilizan las cantidades del ataque y no crean ni cambian presets guardados del juego.
 
 Solo escala derrotas confirmadas de tus ataques con flota ofensiva conocida. No convierte sondeos, defensas, un botín vacío ni pérdidas de texto sin resultado en órdenes de ataque. Un empate pausa la campaña; un informe incompatible o un envío sin confirmar exige revisión y no provoca un nuevo envío automático. Antes de confirmar, vuelve a comprobar que el objetivo admite **Attack**, que la ruta y las cantidades coinciden y que la campaña continúa autorizada.
 
@@ -228,7 +234,7 @@ La primera comprobación crea una referencia silenciosa. Después revisa la list
 
 Solo hace lecturas **GET** a las rutas de informes que usa el cliente nativo. **No abre los informes ni los marca como leídos.** Si un detalle desaparece o falla repetidamente, envía el resumen disponible indicando que falta el detalle. Los informes largos se resumen hasta el límite de Telegram. El estado de la consulta aparece en **Avisos → Estado y diagnóstico**; los errores activos también se muestran junto a la ETA.
 
-Necesita una ruta válida de galaxia, sesión del juego y una pestaña visible con **Structures o Shipyard** abierto. Si la ruta no admite esta lectura, conserva el aviso básico del contador. Los errores de sesión o de red se muestran y se reintentan con espera.
+Necesita una ruta válida de galaxia, sesión del juego y una pestaña visible con los datos de **Structures o Shipyard** cargados. En la vista estrecha puede seguir leyendo los informes desde **Galaxy o Movements**. Si la ruta no admite esta lectura, conserva el aviso básico del contador. Los errores de sesión o de red se muestran y se reintentan con espera.
 
 ## Pausa y funcionamiento
 
@@ -238,11 +244,11 @@ Pulsa **Pausar** en la cabecera para detener las mejoras, la reposición y las m
 
 El script respeta los costes, requisitos y colas del juego. Comparte una única petición pendiente entre edificios y naves, y espera su confirmación antes de enviar otra. Si una orden de naves queda sin confirmar y vence su plazo, **se pausa y pide comprobar la cola** antes de reanudar. Con Web Locks disponible, una sola pestaña controla los clics.
 
-Deja **Structures o Shipyard abierto y la pestaña visible**. Los dos paneles del juego actualizan sus datos aunque uno esté oculto dentro de la página; no necesitas alternarlos. El script espera recuentos actualizados para decidir qué construir.
+Deja **la pestaña del navegador visible**. En escritorio, abre **Structures o Shipyard**; en la vista estrecha también puedes permanecer en **Galaxy o Movements**. Los dos paneles del juego actualizan sus datos aunque la navegación oculte uno o ambos; no necesitas alternarlos. El script espera recuentos actualizados para decidir qué construir.
 
 Cuando la pestaña está oculta, el cliente del juego aplaza el refresco de sus contadores y **el script no inicia nuevas acciones**. Los avisos dependen de los cambios que lleguen a la interfaz mientras se observa. No ofrece una cobertura completa de eventos del servidor ni actividad continua en segundo plano; al cerrar, suspender o descartar la pestaña, deja de actuar.
 
-La versión **1.10.0** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las copias antiguas siguen siendo compatibles: las misiones y campañas sin borrador conservan su flota, y los campos de interfaz ausentes usan sus valores iniciales. Las construcciones ya encoladas mantienen su orden en el juego.
+La versión **1.10.1** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las copias antiguas siguen siendo compatibles: las misiones y campañas sin borrador conservan su flota, y los campos de interfaz ausentes usan sus valores iniciales. Las construcciones ya encoladas mantienen su orden en el juego.
 
 ## Guardado local, exportación e importación
 
