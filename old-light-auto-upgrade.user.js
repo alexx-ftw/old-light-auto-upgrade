@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.6.1
-// @description  Flota prioritaria con reserva de recursos y ETA, mejoras por prioridad, presets y misiones pendientes, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
+// @version      1.7.0
+// @description  Flota prioritaria con reserva de recursos y ETA, mejoras por prioridad, presets, misiones pendientes y reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
 // @supportURL   https://github.com/alexx-ftw/old-light-auto-upgrade/issues
@@ -58,8 +58,10 @@
   let missionAdapter = null;
   let fleetWait = null;
   let missionTargetResolver = null;
+  let attackRetry = null;
+  const retryOriginChecks = new Map();
   const shiftPresets = createShiftPresetMenu({
-    isEnabled: () => settings.shiftPresetShortcut && !missionAdapter?.isBusy(), onPreset: offerPresetMission,
+    isEnabled: () => settings.shiftPresetShortcut && !missionAdapter?.isBusy() && !attackRetry?.isBusy(), onPreset: offerPresetMission,
     readPresetCache: readMissionPresetCache, savePresetCache: saveMissionPresetCache,
     canUseEmptyFleet: () => missionContext().selectionCount === 1 && SHIPS.every(([id]) => fleetCounts(id)?.parked === 0),
     captureEmptyTarget: (button, quantities, key) => missionAdapter?.captureRadial(button, quantities, key),
@@ -68,7 +70,10 @@
   const levelTargets = createLevelTargets({ buildings: BUILDINGS, send: event => notifier.emit(event),
     canNotify: () => notifier.isEventEnabled('game.level_target'),
     getSnapshot: () => readLevelTargetSnapshot(rows()), onSettingsChange: settingsChanged });
-  const reports = createReportsWatcher({ send: event => notifier.emit(event) });
+  const reports = createReportsWatcher({ send: event => notifier.emit(event),
+    getAccount: () => missionContext().scope.split('/')[1] || '',
+    getBaselineSince: () => attackRetry?.isEnabled() ? attackRetry.getEnabledAt() : null,
+    onReport: report => attackRetry?.observeReport(report) });
   let driveBackup = null;
   let importingBackup = false;
   const notificationSession = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
@@ -99,13 +104,13 @@
 
   missionTargetResolver = createMissionTargetResolver({ getContext: missionContext, canAct: canOperateMission });
   missionAdapter = createNativeMissionAdapter({ getContext: missionContext, getFleet: fleetCounts,
-    canAct: canOperateMission, onBusyChange: schedule, onChange: schedule,
+    canAct: job => canOperateMission() && isRetryMissionAllowed(job), onBusyChange: schedule, onChange: schedule,
     resolveTarget: (job, options) => missionTargetResolver.resolveTarget(job, options) });
   fleetWait = createFleetWaitQueue({
     getContext: missionQueueContext, getFleet: currentMissionFleet,
     dispatch: async job => {
       const result = await missionAdapter.dispatch(job);
-      if (result.status === 'sent') emitEvent('request.sent',
+      if (result.status === 'sent' && !job.id.startsWith('retry:')) emitEvent('request.sent',
         `Misión enviada: ${job.originName} → ${job.target.label}. ` + SHIPS.filter(([id]) => job.quantities[id] > 0)
           .map(([id, name]) => `${job.quantities[id]} ${name}`).join(' · '), `mission:${job.id}`, job.originName);
       else if (result.status === 'uncertain') emitEvent('request.unconfirmed',
@@ -113,6 +118,19 @@
         `mission-uncertain:${job.id}`, job.originName);
       return result;
     },
+    onSettingsChange: () => { settingsChanged(); schedule(); },
+  });
+
+  attackRetry = createAttackRetryController({
+    getContext: () => ({ ...missionQueueContext(), canAct: canOperateMission()
+      && !missionAdapter?.isBusy() && !document.querySelector('dialog[open]') }),
+    verifyOrigin: verifyAttackRetryOrigin,
+    getJobs: () => fleetWait.list(),
+    queueOnce: (spec, options) => fleetWait.queue(spec, options),
+    pauseJob: id => fleetWait.pause(id),
+    resumeJob: id => fleetWait.resume(id),
+    cancelJob: id => fleetWait.cancel(id),
+    send: event => notifier.emit(event),
     onSettingsChange: () => { settingsChanged(); schedule(); },
   });
 
@@ -541,7 +559,7 @@
   function readFleetPrioritySnapshot(ships = shipRows(), resources = readResourceSnapshot()) {
     const maintain = fleetEnabled();
     const job = currentMissionJob();
-    const waiting = job?.status === 'waiting';
+    const waiting = job?.status === 'waiting' && isRetryMissionAllowed(job);
     const fleet = new Map(settings.shipOrder.map(id => [id, fleetCounts(id)]));
     // Reading the forecast must not finish or persist a mission job. Keep its
     // demand even while a native dialog temporarily prevents acting on it.
@@ -765,7 +783,7 @@
     } else if (!systemId() || SHIPS.some(([id]) => fleetCounts(id) === null)) {
       forecast = state('blocked', 'Selecciona un solo sistema con datos disponibles.');
     }
-    else if (importingBackup || missionAdapter?.isBusy()
+    else if (importingBackup || missionAdapter?.isBusy() || attackRetry?.isBusy()
         || document.querySelector(`${PANEL} .b-loading, ${FLEET_PANEL} .b-loading`)) {
       forecast = state('busy', 'Se recalculará al terminar la operación en curso.');
     } else if (!leader) forecast = state('blocked', 'Esperando control de esta pestaña.');
@@ -993,6 +1011,7 @@
             <label class="count-away"><input type="checkbox">Contar también las naves en misión</label>
             <button type="button" class="reset-ships">Restablecer orden de naves</button>
             <p class="hint">Se descuentan las naves ya en construcción. La flota tiene prioridad y reserva recursos antes de mejorar edificios.</p>
+            <div data-field="attack-retry"></div>
             <div data-field="fleet-wait"></div>
             <div class="fleet-shortcut">
               <label><input type="checkbox" data-setting="shift-preset-shortcut">Shift + clic: mostrar presets de flota</label>
@@ -1045,6 +1064,7 @@
         items: new Map(),
         fleetDetails: shadow.querySelector('.fleet-details'),
         fleetChoices: shadow.querySelector('.fleet-choices'),
+        attackRetryContainer: shadow.querySelector('[data-field="attack-retry"]'),
         fleetWaitContainer: shadow.querySelector('[data-field="fleet-wait"]'),
         countAway: shadow.querySelector('.count-away input'),
         shiftPresetShortcut: shadow.querySelector('[data-setting="shift-preset-shortcut"]'),
@@ -1218,6 +1238,7 @@
       }
       notifier.mount(ui.notificationContainer);
       levelTargets.mount(ui.levelTargetContainer);
+      attackRetry.mount(ui.attackRetryContainer);
       fleetWait.mount(ui.fleetWaitContainer);
       if (driveBackup) driveBackup.mount(ui.driveContainer);
       else {
@@ -1250,12 +1271,13 @@
     return {
       format: 'old-light-auto-upgrade-backup',
       schemaVersion: 1,
-      scriptVersion: '1.6.1',
+      scriptVersion: '1.7.0',
       exportedAt: new Date().toISOString(),
       settings: normalizeSettings(settings),
       notifications: notifier.exportConfig(),
       levelTargets: levelTargets.exportConfig(),
       fleetMissions: fleetWait.exportConfig(),
+      attackRetries: attackRetry.exportConfig(),
       drive: driveBackup?.exportConfig?.() || { clientId: '', autoBackup: false },
     };
   }
@@ -1305,18 +1327,22 @@
     let missions;
     try { missions = fleetWait.validateConfig(value.fleetMissions === undefined ? {} : value.fleetMissions); }
     catch { throw backupError('La copia contiene misiones pendientes inválidas.'); }
-    return { settings: normalizeSettings(next), notifications, drive, levelTargets: targets, fleetMissions: missions };
+    let retries;
+    try { retries = attackRetry.validateConfig(value.attackRetries === undefined ? {} : value.attackRetries); }
+    catch { throw backupError('La copia contiene reintentos de ataques inválidos.'); }
+    return { settings: normalizeSettings(next), notifications, drive, levelTargets: targets, fleetMissions: missions, attackRetries: retries };
   }
 
   function applyBackup(value) {
-    if (missionAdapter.isBusy()) throw backupError('Espera a que termine el intento de envío antes de importar una copia.');
+    if (missionAdapter.isBusy() || attackRetry.isBusy()) throw backupError('Espera a que termine la preparación o el intento de envío antes de importar una copia.');
     const next = validateBackup(value);
     shiftPresets.cancel();
     cancelNumericDraftTimers();
     ui?.cancelPriorityDrag?.();
     ui?.cancelPanelDrag?.();
     const previous = { settings, raw: localStorage.getItem(KEY), notifications: notifier.exportConfig(),
-      drive: driveBackup?.exportConfig?.(), levelTargets: levelTargets.exportConfig(), fleetMissionsCheckpoint: fleetWait.backupCheckpoint() };
+      drive: driveBackup?.exportConfig?.(), levelTargets: levelTargets.exportConfig(), fleetMissionsCheckpoint: fleetWait.backupCheckpoint(),
+      attackRetriesCheckpoint: attackRetry.backupCheckpoint() };
     importingBackup = true;
     try {
       localStorage.setItem(KEY, JSON.stringify(next.settings));
@@ -1324,6 +1350,7 @@
       levelTargets.importConfig(next.levelTargets);
       if (driveBackup) driveBackup.importConfig(next.drive);
       fleetWait.importConfig(next.fleetMissions);
+      attackRetry.importConfig(next.attackRetries);
       settings = next.settings;
       restoreNumericInputs();
       if (settings.enabled) { error = ''; unconfirmed = 0; }
@@ -1339,6 +1366,7 @@
       try { levelTargets.importConfig(previous.levelTargets); } catch { restored = false; }
       try { if (driveBackup && previous.drive) driveBackup.importConfig(previous.drive); } catch { restored = false; }
       try { fleetWait.restoreCheckpoint(previous.fleetMissionsCheckpoint); } catch { restored = false; }
+      try { attackRetry.restoreCheckpoint(previous.attackRetriesCheckpoint); } catch { restored = false; }
       settings = previous.settings;
       restoreNumericInputs();
       syncSettingsTabs();
@@ -1653,7 +1681,7 @@
   }
 
   function releaseLeadership() {
-    if (pending || observingNotifications || missionAdapter?.isBusy()) return;
+    if (pending || observingNotifications || missionAdapter?.isBusy() || attackRetry?.isBusy()) return;
     if (releaseLock) releaseLock();
     else leader = false;
   }
@@ -1681,7 +1709,7 @@
     const fleetPanel = document.querySelector(FLEET_PANEL);
     if ((!panel && !fleetPanel) || !document.body) {
       observingNotifications = false;
-      reports.tick({ active: false, enabled: notifier.isEventEnabled('game.reports') });
+      reports.tick({ active: false, enabled: notifier.isEventEnabled('game.reports') || attackRetry.isEnabled() });
       observeGameEvents([], false);
       // Si la página desmonta el panel durante una petición, conserva el bloqueo
       // hasta que se agote su plazo para no enviar otro clic desde otra pestaña.
@@ -1705,10 +1733,12 @@
     const now = Date.now();
     const observeNotifications = notifier.isEnabled() && !document.hidden &&
       (isVisible(panel) || isVisible(fleetPanel));
-    observingNotifications = observeNotifications;
-    if (observeNotifications) acquireLeadership();
-    const reportsState = reports.tick({ active: leader && observeNotifications,
-      enabled: notifier.isEventEnabled('game.reports'), unread: readUnread('reports') });
+    const watchAttacks = attackRetry.isEnabled();
+    const visibleHud = !document.hidden && (isVisible(panel) || isVisible(fleetPanel));
+    observingNotifications = visibleHud && (observeNotifications || watchAttacks);
+    if (observeNotifications || (watchAttacks && visibleHud)) acquireLeadership();
+    const reportsState = reports.tick({ active: leader && visibleHud && (observeNotifications || watchAttacks),
+      enabled: notifier.isEventEnabled('game.reports') || watchAttacks, unread: readUnread('reports') });
     setText(ui.reportsStatus, reportsState.status);
     observeGameEvents(current, leader && observeNotifications, reportsState.apiAvailable);
 
@@ -1777,7 +1807,7 @@
     }
 
     if (!settings.enabled) {
-      if (!observeNotifications) releaseLeadership();
+      if (!observingNotifications) releaseLeadership();
       show(error || 'Automatización pausada'); return;
     }
     if (document.hidden) {
@@ -1792,7 +1822,7 @@
     const maintainFleet = fleetEnabled();
     const waitingMission = currentMissionJob();
     const hasWaitingMission = waitingMission?.status === 'waiting';
-    if (settings.excluded.length === BUILDINGS.length && !maintainFleet && !hasWaitingMission) {
+    if (settings.excluded.length === BUILDINGS.length && !maintainFleet && !hasWaitingMission && !watchAttacks) {
       if (observeNotifications) acquireLeadership(); else releaseLeadership();
       show('Marca un edificio o configura un mínimo de naves'); return;
     }
@@ -1802,6 +1832,8 @@
       return;
     }
     if (missionAdapter.isBusy()) { show('Preparando la misión pendiente…'); return; }
+    void attackRetry.tick().catch(() => wakeAt(Date.now() + RETRY_GAP_MS));
+    if (attackRetry.isBusy()) { show('Comprobando el origen del reintento de ataque…'); return; }
     if (hasWaitingMission && !document.querySelector('dialog[open]')) {
       void fleetWait.tick();
       if (missionAdapter.isBusy()) { show('Preparando la misión pendiente…'); return; }
@@ -2697,490 +2729,557 @@
   // END SHIFT PRESETS
 
   // BEGIN NATIVE MISSION ADAPTER
-// Native UI adapter for a single-origin deferred fleet mission.
-// No network methods are used: all dispatches pass through the game's buttons.
-function createNativeMissionAdapter({
-  getContext, getFleet, canAct = () => true, onBusyChange = () => {},
-  onChange = () => {}, resolveTarget = null,
-} = {}) {
-  const SHIPS = ['probe', 'marauder', 'sentinel', 'vanguard'];
-  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const SCOPE = /^[A-Za-z0-9_-]{1,64}\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const MASK = 'data-oldlight-mission-preparing';
-  const GUARD_MS = 130;
-  const SETTLE_MS = 8000;
-  const captures = new WeakMap();
-  const attached = new Map();
-  const attempted = new Set();
-  const lifetime = new AbortController();
-  const style = document.createElement('style');
-  style.textContent = `dialog[${MASK}] {display:none!important}dialog[${MASK}]::backdrop {display:none!important;background:transparent!important}`;
-  document.head.append(style);
-  let active = null;
-  let capturing = false;
-  let destroyed = false;
+  // Native UI adapter for a single-origin deferred fleet mission.
+  // No network methods are used: all dispatches pass through the game's buttons.
+  function createNativeMissionAdapter({
+    getContext, getFleet, canAct = () => true, onBusyChange = () => {},
+    onChange = () => {}, resolveTarget = null,
+  } = {}) {
+    const SHIPS = ['probe', 'marauder', 'sentinel', 'vanguard'];
+    const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const SCOPE = /^[A-Za-z0-9_-]{1,64}\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const MASK = 'data-oldlight-mission-preparing';
+    const GUARD_MS = 130;
+    const SETTLE_MS = 8000;
+    const captures = new WeakMap();
+    const attached = new Map();
+    const attempted = new Set();
+    const lifetime = new AbortController();
+    const style = document.createElement('style');
+    style.textContent = `dialog[${MASK}] {display:none!important}dialog[${MASK}]::backdrop {display:none!important;background:transparent!important}`;
+    document.head.append(style);
+    let active = null;
+    let capturing = false;
+    let destroyed = false;
 
-  const clean = value => String(value ?? '').normalize('NFKC').replace(/\s+/g, ' ').trim();
-  const keyOf = button => clean(button?.getAttribute('aria-label') || button?.textContent);
-  const unavailable = button => !(button instanceof HTMLButtonElement) || button.disabled
-    || button.getAttribute('aria-disabled') === 'true'
-    || Boolean(button.closest('.dispatch-preset-tile-locked'));
-  const nativeDialog = () => {
-    const nodes = document.querySelectorAll('#dispatch-dialog');
-    return nodes.length === 1 && nodes[0] instanceof HTMLDialogElement ? nodes[0] : null;
-  };
-  const route = dialog => dialog?.querySelector('[data-field="dispatch-route-slot"] .route-header');
-  const columns = dialog => [...route(dialog)?.querySelectorAll(':scope > .route-header-tile-col') || []];
-  const routeKey = dialog => {
-    const cols = columns(dialog);
-    return cols.length === 2 ? cols.map(col => col.innerHTML).join('\n') : null;
-  };
-  const inform = value => { try { onChange(value); } catch (_) {} };
-  const busyChanged = () => { try { onBusyChange(Boolean(active || capturing)); } catch (_) {} };
+    const clean = value => String(value ?? '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+    const keyOf = button => clean(button?.getAttribute('aria-label') || button?.textContent);
+    const unavailable = button => !(button instanceof HTMLButtonElement) || button.disabled
+      || button.getAttribute('aria-disabled') === 'true'
+      || Boolean(button.closest('.dispatch-preset-tile-locked'));
+    const nativeDialog = () => {
+      const nodes = document.querySelectorAll('#dispatch-dialog');
+      return nodes.length === 1 && nodes[0] instanceof HTMLDialogElement ? nodes[0] : null;
+    };
+    const route = dialog => dialog?.querySelector('[data-field="dispatch-route-slot"] .route-header');
+    const columns = dialog => [...route(dialog)?.querySelectorAll(':scope > .route-header-tile-col') || []];
+    const routeKey = dialog => {
+      const cols = columns(dialog);
+      return cols.length === 2 ? cols.map(col => col.innerHTML).join('\n') : null;
+    };
+    const inform = value => { try { onChange(value); } catch (_) {} };
+    const busyChanged = () => { try { onBusyChange(Boolean(active || capturing)); } catch (_) {} };
 
-  function context() {
-    let value;
-    try { value = getContext?.(); } catch (_) { return null; }
-    if (!value || !SCOPE.test(value.scope || '') || !UUID.test(value.originId || '')
-        || value.selectionCount !== 1) return null;
-    const originName = clean(value.originName);
-    if (!originName || originName.length > 400 || /^\d+ systems selected$/i.test(originName)) return null;
-    return { scope: value.scope, originId: value.originId.toLowerCase(), originName, selectionCount: 1 };
-  }
-
-  function quantities(value) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)
-        || Object.keys(value).some(key => !SHIPS.includes(key))) return null;
-    const result = {};
-    for (const type of SHIPS) {
-      const amount = value[type] ?? 0;
-      if (!Number.isSafeInteger(amount) || amount < 0 || amount > 50000) return null;
-      result[type] = amount;
-    }
-    return SHIPS.some(type => result[type] > 0) ? result : null;
-  }
-
-  function presetAmounts(button) {
-    const result = Object.fromEntries(SHIPS.map(type => [type, 0]));
-    const label = keyOf(button).replace(/^Use\s+/i, '');
-    if (!label) return null;
-    for (const part of label.split(/,\s+(?=\d)/)) {
-      const match = /^([\d\s,.'’]+)\s+(Probe|Marauder|Sentinel|Vanguard)$/i.exec(part);
-      const amount = match ? Number(match[1].replace(/[^\d]/g, '')) : NaN;
-      if (!Number.isSafeInteger(amount) || amount <= 0 || amount > 50000) return null;
-      const type = match[2].toLowerCase();
-      if (result[type]) return null;
-      result[type] = amount;
-    }
-    return quantities(result);
-  }
-
-  function sameAmounts(left, right) {
-    return Boolean(left && right && SHIPS.every(type => left[type] === right[type]));
-  }
-
-  function exactCounts() {
-    const result = {};
-    for (const type of SHIPS) {
+    function context() {
       let value;
-      try { value = getFleet?.(type); } catch (_) { return null; }
-      if (!value || !['parked', 'away', 'building'].every(key =>
-        Number.isSafeInteger(value[key]) && value[key] >= 0)) return null;
-      result[type] = { parked: value.parked, away: value.away, building: value.building };
+      try { value = getContext?.(); } catch (_) { return null; }
+      if (!value || !SCOPE.test(value.scope || '') || !UUID.test(value.originId || '')
+          || value.selectionCount !== 1) return null;
+      const originName = clean(value.originName);
+      if (!originName || originName.length > 400 || /^\d+ systems selected$/i.test(originName)) return null;
+      return { scope: value.scope, originId: value.originId.toLowerCase(), originName, selectionCount: 1 };
     }
-    return result;
-  }
 
-  function enough(expected) {
-    const counts = exactCounts();
-    return Boolean(counts && SHIPS.every(type => counts[type].parked >= expected[type]));
-  }
-
-  function coordinate(value) {
-    return value && Number.isSafeInteger(value.q) && Number.isSafeInteger(value.r)
-      && Math.abs(value.q) <= 10000000 && Math.abs(value.r) <= 10000000
-      ? { q: value.q, r: value.r } : null;
-  }
-
-  const sameCoordinate = (left, right) => Boolean(left && right && left.q === right.q && left.r === right.r);
-
-  function inspectCoordinate(inspector) {
-    if (!(inspector instanceof HTMLDialogElement)
-        || !inspector.matches('.info-modal[data-content-type="inspect"]')) return null;
-    const copy = inspector.querySelector('.inspect-copy-coord');
-    let text = copy?.getAttribute('aria-label')?.replace(/^(?:Copy|Copied) coordinates\s+/i, '')
-      || copy?.textContent || '';
-    if (!text) {
-      const label = [...inspector.querySelectorAll('.inspect-facts dt')]
-        .find(node => clean(node.textContent) === 'Coordinates');
-      text = label?.nextElementSibling?.textContent || '';
-    }
-    const match = /^\s*(-?\d+)\s*,\s*(-?\d+)\s*$/.exec(text);
-    return match ? coordinate({ q: Number(match[1]), r: Number(match[2]) }) : null;
-  }
-
-  function specOf(job) {
-    const value = job?.spec || job;
-    const requested = quantities(value?.quantities);
-    const point = coordinate(value?.target?.coordinate);
-    const key = clean(value?.target?.presetKey);
-    const routeSignature = value?.target?.routeKey;
-    if (!value || !SCOPE.test(value.scope || '') || !UUID.test(value.originId || '')
-        || !requested || !point || !key || key.length > 2000
-        || typeof routeSignature !== 'string' || routeSignature.length > 200000) return null;
-    return { scope: value.scope, originId: value.originId.toLowerCase(),
-      originName: clean(value.originName).slice(0, 400),
-      target: { coordinate: point, routeKey: routeSignature, presetKey: key,
-        label: clean(value.target.label).slice(0, 400) }, quantities: requested };
-  }
-
-  function signature(spec) {
-    return JSON.stringify([spec.scope, spec.originId, spec.target.coordinate,
-      spec.target.routeKey, spec.target.presetKey, spec.quantities]);
-  }
-
-  function attemptKey(job) {
-    const claimedAt = Number.isSafeInteger(job?.claimedAt) && job.claimedAt >= 0
-      ? job.claimedAt : null;
-    // The durable queue creates a fresh claim only after an explicit review of
-    // an uncertain send. Retrying that same claim must never send twice.
-    return JSON.stringify([job?.id, claimedAt]);
-  }
-
-  function sameContext(spec) {
-    const current = context();
-    return Boolean(current && current.scope === spec.scope && current.originId === spec.originId);
-  }
-
-  function result(status, message) { return { status, message }; }
-  function failure(message) { return { spec: null, handle: null, message }; }
-  function readyToAct() { try { return !destroyed && canAct() !== false; } catch (_) { return false; } }
-
-  function resetPreparedDialog(dialog) {
-    // A prepared dialog never entered the native modal stack. Do not queue a
-    // delayed close event that could erase a later dispatch's native origins.
-    if (dialog.open) dialog.removeAttribute('open');
-    dialog.dispatchEvent(new Event('close'));
-  }
-
-  function maskedInspector(click, allowedDialog = null) {
-    const modals = [...document.querySelectorAll('dialog.info-modal')];
-    if (!modals.length || modals.some(modal => modal.open)
-        || [...document.querySelectorAll('dialog[open]')].some(dialog => dialog !== allowedDialog)) {
-      throw new Error('Cierra los diálogos del juego antes de preparar esta misión.');
-    }
-    const previousFocus = document.activeElement;
-    const saved = modals.map(modal => ({ modal, mask: modal.getAttribute(MASK),
-      content: modal.dataset.contentType, body: modal.querySelector('.info-modal-body')?.firstChild }));
-    let opened = null;
-    try {
-      for (const { modal } of saved) { modal.setAttribute(MASK, 'inspect'); modal.setAttribute('open', ''); }
-      click();
-      const changed = saved.filter(({ modal, content, body }) => modal.dataset.contentType === 'inspect'
-        && (content !== 'inspect' || modal.querySelector('.info-modal-body')?.firstChild !== body));
-      if (changed.length !== 1) throw new Error('No se pudo identificar el destino del despacho.');
-      opened = changed[0].modal;
-      const point = inspectCoordinate(opened);
-      if (!point) throw new Error('El juego no ha mostrado unas coordenadas válidas para el destino.');
-      const action = opened.querySelector('.inspect-actions > button.inspect-action-btn');
-      return { coordinate: point, label: clean(opened.querySelector('.inspect-system-name-text')?.textContent),
-        isActive: !opened.querySelector('.info-modal-trailing .info-modal-header-btn'),
-        action: unavailable(action) ? null : action };
-    } finally {
-      for (const { modal, mask, content, body } of saved) {
-        modal.removeAttribute('open');
-        const changed = modal === opened || modal.dataset.contentType !== content
-          || modal.querySelector('.info-modal-body')?.firstChild !== body;
-        if (changed) modal.dispatchEvent(new Event('close'));
-        if (mask === null) modal.removeAttribute(MASK); else modal.setAttribute(MASK, mask);
+    function quantities(value) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)
+          || Object.keys(value).some(key => !SHIPS.includes(key))) return null;
+      const result = {};
+      for (const type of SHIPS) {
+        const amount = value[type] ?? 0;
+        if (!Number.isSafeInteger(amount) || amount < 0 || amount > 50000) return null;
+        result[type] = amount;
       }
-      if (previousFocus instanceof HTMLElement && previousFocus.isConnected && document.activeElement !== previousFocus) {
-        try { previousFocus.focus({ preventScroll: true }); } catch (_) {}
+      return SHIPS.some(type => result[type] > 0) ? result : null;
+    }
+
+    function presetAmounts(button) {
+      const result = Object.fromEntries(SHIPS.map(type => [type, 0]));
+      const label = keyOf(button).replace(/^Use\s+/i, '');
+      if (!label) return null;
+      for (const part of label.split(/,\s+(?=\d)/)) {
+        const match = /^([\d\s,.'’]+)\s+(Probe|Marauder|Sentinel|Vanguard)$/i.exec(part);
+        const amount = match ? Number(match[1].replace(/[^\d]/g, '')) : NaN;
+        if (!Number.isSafeInteger(amount) || amount <= 0 || amount > 50000) return null;
+        const type = match[2].toLowerCase();
+        if (result[type]) return null;
+        result[type] = amount;
+      }
+      return quantities(result);
+    }
+
+    function sameAmounts(left, right) {
+      return Boolean(left && right && SHIPS.every(type => left[type] === right[type]));
+    }
+
+    function exactCounts() {
+      const result = {};
+      for (const type of SHIPS) {
+        let value;
+        try { value = getFleet?.(type); } catch (_) { return null; }
+        if (!value || !['parked', 'away', 'building'].every(key =>
+          Number.isSafeInteger(value[key]) && value[key] >= 0)) return null;
+        result[type] = { parked: value.parked, away: value.away, building: value.building };
+      }
+      return result;
+    }
+
+    function enough(expected) {
+      const counts = exactCounts();
+      return Boolean(counts && SHIPS.every(type => counts[type].parked >= expected[type]));
+    }
+
+    function coordinate(value) {
+      return value && Number.isSafeInteger(value.q) && Number.isSafeInteger(value.r)
+        && Math.abs(value.q) <= 10000000 && Math.abs(value.r) <= 10000000
+        ? { q: value.q, r: value.r } : null;
+    }
+
+    const sameCoordinate = (left, right) => Boolean(left && right && left.q === right.q && left.r === right.r);
+
+    function inspectCoordinate(inspector) {
+      if (!(inspector instanceof HTMLDialogElement)
+          || !inspector.matches('.info-modal[data-content-type="inspect"]')) return null;
+      const copy = inspector.querySelector('.inspect-copy-coord');
+      let text = copy?.getAttribute('aria-label')?.replace(/^(?:Copy|Copied) coordinates\s+/i, '')
+        || copy?.textContent || '';
+      if (!text) {
+        const label = [...inspector.querySelectorAll('.inspect-facts dt')]
+          .find(node => clean(node.textContent) === 'Coordinates');
+        text = label?.nextElementSibling?.textContent || '';
+      }
+      const match = /^\s*(-?\d+)\s*,\s*(-?\d+)\s*$/.exec(text);
+      return match ? coordinate({ q: Number(match[1]), r: Number(match[2]) }) : null;
+    }
+
+    function specOf(job) {
+      const value = job?.spec || job;
+      const requested = quantities(value?.quantities);
+      const point = coordinate(value?.target?.coordinate);
+      const key = clean(value?.target?.presetKey);
+      const routeSignature = value?.target?.routeKey;
+      const amountsMode = value?.target?.mode === 'amounts';
+      const originPoint = coordinate(value?.target?.originCoordinate);
+      if (!value || !SCOPE.test(value.scope || '') || !UUID.test(value.originId || '')
+          || !requested || !point || key.length > 2000
+          || typeof routeSignature !== 'string' || routeSignature.length > 200000) return null;
+      if (amountsMode) {
+        if (!originPoint || sameCoordinate(originPoint, point) || key || routeSignature !== '') return null;
+      } else if (value.target.mode !== undefined || value.target.originCoordinate !== undefined || !key) return null;
+      return { scope: value.scope, originId: value.originId.toLowerCase(),
+        originName: clean(value.originName).slice(0, 400),
+        target: { coordinate: point, routeKey: routeSignature, presetKey: key,
+          label: clean(value.target.label).slice(0, 400),
+          ...(amountsMode ? { mode: 'amounts', originCoordinate: originPoint } : {}) }, quantities: requested };
+    }
+
+    function signature(spec) {
+      const parts = [spec.scope, spec.originId, spec.target.coordinate,
+        spec.target.routeKey, spec.target.presetKey, spec.quantities];
+      if (spec.target.mode === 'amounts') parts.push(spec.target.mode, spec.target.originCoordinate);
+      return JSON.stringify(parts);
+    }
+
+    function attemptKey(job) {
+      const claimedAt = Number.isSafeInteger(job?.claimedAt) && job.claimedAt >= 0
+        ? job.claimedAt : null;
+      // The durable queue creates a fresh claim only after an explicit review of
+      // an uncertain send. Retrying that same claim must never send twice.
+      return JSON.stringify([job?.id, claimedAt]);
+    }
+
+    function sameContext(spec) {
+      const current = context();
+      return Boolean(current && current.scope === spec.scope && current.originId === spec.originId);
+    }
+
+    function result(status, message) { return { status, message }; }
+    function failure(message) { return { spec: null, handle: null, message }; }
+  function readyToAct(job = active?.job) { try { return !destroyed && canAct(job) !== false; } catch (_) { return false; } }
+
+    function resetPreparedDialog(dialog) {
+      // A prepared dialog never entered the native modal stack. Do not queue a
+      // delayed close event that could erase a later dispatch's native origins.
+      if (dialog.open) dialog.removeAttribute('open');
+      dialog.dispatchEvent(new Event('close'));
+    }
+
+    function maskedInspector(click, allowedDialog = null) {
+      const modals = [...document.querySelectorAll('dialog.info-modal')];
+      if (!modals.length || modals.some(modal => modal.open)
+          || [...document.querySelectorAll('dialog[open]')].some(dialog => dialog !== allowedDialog)) {
+        throw new Error('Cierra los diálogos del juego antes de preparar esta misión.');
+      }
+      const previousFocus = document.activeElement;
+      const saved = modals.map(modal => ({ modal, mask: modal.getAttribute(MASK),
+        content: modal.dataset.contentType, body: modal.querySelector('.info-modal-body')?.firstChild }));
+      let opened = null;
+      try {
+        for (const { modal } of saved) { modal.setAttribute(MASK, 'inspect'); modal.setAttribute('open', ''); }
+        click();
+        const changed = saved.filter(({ modal, content, body }) => modal.dataset.contentType === 'inspect'
+          && (content !== 'inspect' || modal.querySelector('.info-modal-body')?.firstChild !== body));
+        if (changed.length !== 1) throw new Error('No se pudo identificar el destino del despacho.');
+        opened = changed[0].modal;
+        const point = inspectCoordinate(opened);
+        if (!point) throw new Error('El juego no ha mostrado unas coordenadas válidas para el destino.');
+        const action = opened.querySelector('.inspect-actions > button.inspect-action-btn');
+        return { coordinate: point, label: clean(opened.querySelector('.inspect-system-name-text')?.textContent),
+          isActive: !opened.querySelector('.info-modal-trailing .info-modal-header-btn'),
+          action: unavailable(action) ? null : action };
+      } finally {
+        for (const { modal, mask, content, body } of saved) {
+          modal.removeAttribute('open');
+          const changed = modal === opened || modal.dataset.contentType !== content
+            || modal.querySelector('.info-modal-body')?.firstChild !== body;
+          if (changed) modal.dispatchEvent(new Event('close'));
+          if (mask === null) modal.removeAttribute(MASK); else modal.setAttribute(MASK, mask);
+        }
+        if (previousFocus instanceof HTMLElement && previousFocus.isConnected && document.activeElement !== previousFocus) {
+          try { previousFocus.focus({ preventScroll: true }); } catch (_) {}
+        }
       }
     }
-  }
 
-  function makeCapture(current, requested, presetKey, target, binding) {
-    const spec = specOf({ ...current, quantities: requested,
-      target: { ...target, presetKey: clean(presetKey) } });
-    if (!spec || !sameContext(spec) || !exactCounts()) return failure('El sistema de origen ha cambiado. Selecciona un solo sistema y vuelve a intentarlo.');
-    const handle = binding ? {} : null;
-    if (handle) captures.set(handle, { spec, ...binding });
-    inform({ type: 'captured', spec });
-    return { spec, handle };
-  }
-
-  function capture(dialog, requestedInput, presetKey) {
-    if (destroyed || active || capturing) return failure('Ya hay una misión en preparación.');
-    const current = context(), requested = quantities(requestedInput);
-    if (!current || !requested || !exactCounts()) return failure('La misión diferida necesita un único sistema de origen con recuentos exactos.');
-    const cols = columns(dialog), originalRoute = routeKey(dialog);
-    if (!(dialog instanceof HTMLDialogElement) || dialog !== nativeDialog() || !dialog.open
-        || dialog.dataset.mode !== 'dispatch' || dialog.dataset.direction !== 'forward'
-        || cols.length !== 2 || !originalRoute
-        || /^\d+ systems selected$/i.test(clean(cols[0].querySelector('.route-header-tile-name')?.textContent))) {
-      return failure('Abre un despacho desde un único sistema antes de guardar la misión.');
+    function makeCapture(current, requested, presetKey, target, binding) {
+      const spec = specOf({ ...current, quantities: requested,
+        target: { ...target, presetKey: clean(presetKey) } });
+      if (!spec || !sameContext(spec) || !exactCounts()) return failure('El sistema de origen ha cambiado. Selecciona un solo sistema y vuelve a intentarlo.');
+      const handle = binding ? {} : null;
+      if (handle) captures.set(handle, { spec, ...binding });
+      inform({ type: 'captured', spec });
+      return { spec, handle };
     }
-    const sourceButton = cols[0].querySelector('button.route-header-hex-clickable');
-    const button = cols[1].querySelector('button.route-header-hex-clickable');
-    const preset = [...dialog.querySelectorAll('[data-field="dispatch-presets"] .dispatch-preset-apply')]
-      .find(node => keyOf(node) === clean(presetKey) && sameAmounts(presetAmounts(node), requested));
-    if (unavailable(sourceButton) || unavailable(button) || unavailable(preset)) return failure('El preset o el destino ya no está disponible.');
-    capturing = true; busyChanged();
-    try {
-      const source = maskedInspector(() => sourceButton.click(), dialog);
-      if (!source.isActive) return failure('El origen del despacho ya no es tu sistema activo. Vuelve a abrir el preset.');
-      const endpoint = maskedInspector(() => button.click(), dialog);
-      if (routeKey(dialog) !== originalRoute) return failure('La ruta ha cambiado durante la preparación.');
-      return makeCapture(current, requested, presetKey, { routeKey: originalRoute,
-        label: endpoint.label || clean(cols[1].querySelector('.route-header-tile-name')?.textContent),
-        coordinate: endpoint.coordinate }, { kind: 'inspect', button });
-    } catch (error) { return failure(error.message || 'No se pudo preparar el destino de la misión.'); }
-    finally { capturing = false; busyChanged(); }
-  }
 
-  function captureInspect(inspector, requestedInput, presetKey) {
-    if (destroyed || active || capturing) return failure('Ya hay una misión en preparación.');
-    const current = context(), requested = quantities(requestedInput), point = inspectCoordinate(inspector);
-    if (!current || !requested || !point || !exactCounts()) return failure('La misión diferida necesita un único origen y las coordenadas del destino.');
-    if (!inspector.querySelector('.info-modal-trailing .info-modal-header-btn')) return failure('El destino es tu sistema activo. Elige otro sistema para enviar la misión.');
-    const action = inspector.querySelector('.inspect-actions > button.inspect-action-btn');
-    return makeCapture(current, requested, presetKey, { routeKey: '', coordinate: point,
-      label: clean(inspector.querySelector('.inspect-system-name-text')?.textContent) },
-    unavailable(action) ? null : { kind: 'dispatch', button: action });
-  }
-
-  function captureRadial(inspectButton, requestedInput, presetKey) {
-    if (destroyed || active || capturing) return failure('Ya hay una misión en preparación.');
-    const current = context(), requested = quantities(requestedInput);
-    const radial = inspectButton?.closest('.star-actions');
-    if (!current || !requested || !exactCounts()) return failure('La misión diferida necesita un único sistema de origen con recuentos exactos.');
-    if (unavailable(inspectButton) || !radial?.isConnected || inspectButton.dataset.actionKey !== 'inspect'
-        || inspectButton.dataset.enabled !== 'true' || getComputedStyle(radial).display === 'none') {
-      return failure('Vuelve a seleccionar el destino en el mapa.');
-    }
-    capturing = true; busyChanged();
-    try {
-      const endpoint = maskedInspector(() => inspectButton.click());
-      if (endpoint.isActive) return failure('El destino es tu sistema activo. Elige otro sistema para enviar la misión.');
-      // The radial button reads the current radial target on every invocation.
-      // Keep only the coordinates, never retain this mutable button as a handle.
-      // This identity-only capture can be paired with another cached preset.
-      return makeCapture(current, requested, presetKey, { routeKey: '',
-        label: endpoint.label, coordinate: endpoint.coordinate }, null);
-    } catch (error) { return failure(error.message || 'No se pudo identificar el destino del mapa.'); }
-    finally { capturing = false; busyChanged(); }
-  }
-
-  function attach(jobId, captured) {
-    if (destroyed || typeof jobId !== 'string' || !jobId || jobId.length > 128) return false;
-    const spec = specOf(captured?.spec), binding = captured?.handle ? captures.get(captured.handle) : null;
-    if (!spec || (binding && signature(binding.spec) !== signature(spec))) return false;
-    if (binding) attached.set(jobId, binding); else attached.delete(jobId);
-    inform({ type: 'attached', jobId, connected: Boolean(binding) });
-    return true;
-  }
-
-  function connected(job) {
-    const spec = specOf(job), binding = attached.get(job?.id);
-    return Boolean(!destroyed && spec && !attempted.has(attemptKey(job))
-      && ((binding && signature(binding.spec) === signature(spec)) || typeof resolveTarget === 'function'));
-  }
-
-  function delay(ms, operation) {
-    return new Promise((resolve, reject) => {
-      const abort = () => { clearTimeout(timer); reject(new Error(operation.reason || 'Preparación cancelada.')); };
-      const timer = setTimeout(() => { operation.controller.signal.removeEventListener('abort', abort); resolve(); }, ms);
-      if (operation.controller.signal.aborted) abort();
-      else operation.controller.signal.addEventListener('abort', abort, { once: true });
-    });
-  }
-
-  function validOperation(operation) {
-    return active === operation && !operation.controller.signal.aborted && readyToAct() && sameContext(operation.spec);
-  }
-
-  function assertOperation(operation) {
-    if (!validOperation(operation)) throw new Error(operation.reason || 'El origen, la selección o el estado del helper ha cambiado.');
-  }
-
-  function readError(dialog) {
-    const error = dialog?.querySelector('[data-field="dispatch-error"]');
-    return error && !error.hidden ? clean(error.textContent) : '';
-  }
-
-  function singleNativeRoute(dialog) {
-    const cols = columns(dialog);
-    return cols.length === 2 && !/^\d+ systems selected$/i.test(clean(cols[0].querySelector('.route-header-tile-name')?.textContent));
-  }
-
-  function inputsMatch(dialog, requested) {
-    const inputs = [...dialog.querySelectorAll('[data-field="dispatch-quantities"] input.dispatch-step-input')];
-    return SHIPS.every(type => {
-      const matches = inputs.filter(input => clean(input.getAttribute('aria-label')).toLowerCase() === `number of ${type} to send`);
-      return matches.length === 1 && Number(matches[0].value) === requested[type];
-    });
-  }
-
-  function restoreMask(operation) {
-    if (!operation.dialog) return;
-    if (operation.previousMask === null) operation.dialog.removeAttribute(MASK);
-    else operation.dialog.setAttribute(MASK, operation.previousMask);
-  }
-
-  function expose(operation, message) {
-    operation.keepDialog = true;
-    restoreMask(operation);
-    if (message && operation.dialog?.open && !readError(operation.dialog)) {
-      const error = operation.dialog.querySelector('[data-field="dispatch-error"]');
-      if (error) { error.textContent = message; error.hidden = false; }
-    }
-  }
-
-  async function actionFor(operation, binding) {
-    if (binding?.kind === 'inspect') {
-      const endpoint = maskedInspector(() => binding.button.click());
-      if (!sameCoordinate(endpoint.coordinate, operation.spec.target.coordinate)) throw new Error('El destino ya no coincide con la misión guardada.');
-      return endpoint.action;
-    }
-    if (binding?.kind === 'dispatch') return unavailable(binding.button) ? null : binding.button;
-    if (typeof resolveTarget !== 'function') return null;
-    const resolved = await resolveTarget(operation.job, { signal: operation.controller.signal });
-    try {
-      assertOperation(operation);
-      const inspector = resolved?.inspector;
-      if (!sameCoordinate(inspectCoordinate(inspector), operation.spec.target.coordinate)) throw new Error('No se ha podido recuperar el destino guardado.');
-      const action = inspector.querySelector('.inspect-actions > button.inspect-action-btn');
-      return unavailable(action) ? null : action;
-    } finally { if (typeof resolved?.cleanup === 'function') await resolved.cleanup(); }
-  }
-
-  async function dispatch(job) {
-    const spec = specOf(job), jobId = job?.id;
-    if (destroyed || !spec || typeof jobId !== 'string') return result('paused', 'La misión guardada no tiene un origen, destino o preset válido.');
-    const claim = attemptKey(job);
-    if (attempted.has(claim)) return result('uncertain', 'Esta misión ya pasó al juego. Comprueba sus movimientos antes de volver a enviarla.');
-    if (active || capturing) return result('waiting', 'Hay otra misión en preparación.');
-    if (!readyToAct()) return result('waiting', 'Esperando a que el helper pueda actuar.');
-    if (!sameContext(spec)) return result('waiting', `Selecciona ${spec.originName || 'el sistema de origen'} para continuar esta misión.`);
-    if (!enough(spec.quantities)) return result('waiting', 'Esperando a que todas las naves del preset estén en base.');
-    let binding = attached.get(jobId);
-    if (binding && signature(binding.spec) !== signature(spec)) return result('paused', 'La misión ha cambiado. Reconecta el preset y el destino antes de continuar.');
-    if (!binding && typeof resolveTarget !== 'function') return result('paused', 'Misión guardada. Reconecta su destino con Shift + clic y el mismo preset para reanudarla.');
-    if (document.querySelector('dialog[open]')) return result('waiting', 'Cierra los diálogos del juego para continuar la misión.');
-    const operation = { job, jobId, spec, controller: new AbortController(), dialog: null,
-      previousMask: null, confirmed: false, permitConfirm: false, keepDialog: false,
-      closed: false, reason: '', guard: null };
-    active = operation; busyChanged();
-    let outcome;
-    try {
-      const action = await actionFor(operation, binding);
-      // Let previously queued native close handlers finish before opening a new
-      // dispatch session, otherwise they may clear the new native origin list.
-      await delay(0, operation);
-      assertOperation(operation);
-      if (unavailable(action) || !enough(spec.quantities)) return outcome = result('waiting', 'El juego todavía no permite preparar la flota completa.');
-      const dialog = nativeDialog();
-      if (!dialog || document.querySelector('dialog[open]')) throw new Error('Hay otro diálogo del juego abierto. Se ha pausado la preparación.');
-      operation.dialog = dialog; operation.previousMask = dialog.getAttribute(MASK);
-      const oldRoute = route(dialog);
-      dialog.setAttribute(MASK, 'dispatch'); dialog.setAttribute('open', '');
-      action.click();
-      if (!dialog.open || dialog.dataset.mode !== 'dispatch' || dialog.dataset.direction !== 'forward'
-          || route(dialog) === oldRoute || !singleNativeRoute(dialog)) throw new Error('El juego no ha abierto un despacho de un único origen.');
-      await delay(GUARD_MS, operation);
-      assertOperation(operation);
-      const openedRoute = routeKey(dialog);
-      if (!openedRoute || (spec.target.routeKey && openedRoute !== spec.target.routeKey)) throw new Error('La ruta ha cambiado. Reconecta el destino antes de enviar.');
-      const endpoint = columns(dialog)[1].querySelector('button.route-header-hex-clickable');
-      if (unavailable(endpoint)) throw new Error('No se puede comprobar el destino del despacho.');
-      const identity = maskedInspector(() => endpoint.click(), dialog);
-      if (!sameCoordinate(identity.coordinate, spec.target.coordinate)) throw new Error('Las coordenadas del destino no coinciden con la misión.');
-      assertOperation(operation);
-      if (!enough(spec.quantities)) return outcome = result('waiting', 'Las naves disponibles han cambiado; se esperará al preset completo.');
+    function capture(dialog, requestedInput, presetKey) {
+      if (destroyed || active || capturing) return failure('Ya hay una misión en preparación.');
+      const current = context(), requested = quantities(requestedInput);
+      if (!current || !requested || !exactCounts()) return failure('La misión diferida necesita un único sistema de origen con recuentos exactos.');
+      const cols = columns(dialog), originalRoute = routeKey(dialog);
+      if (!(dialog instanceof HTMLDialogElement) || dialog !== nativeDialog() || !dialog.open
+          || dialog.dataset.mode !== 'dispatch' || dialog.dataset.direction !== 'forward'
+          || cols.length !== 2 || !originalRoute
+          || /^\d+ systems selected$/i.test(clean(cols[0].querySelector('.route-header-tile-name')?.textContent))) {
+        return failure('Abre un despacho desde un único sistema antes de guardar la misión.');
+      }
+      const sourceButton = cols[0].querySelector('button.route-header-hex-clickable');
+      const button = cols[1].querySelector('button.route-header-hex-clickable');
       const preset = [...dialog.querySelectorAll('[data-field="dispatch-presets"] .dispatch-preset-apply')]
-        .find(button => keyOf(button) === spec.target.presetKey && sameAmounts(presetAmounts(button), spec.quantities));
-      const confirm = dialog.querySelector('[data-field="dispatch-confirm"]');
-      if (unavailable(preset) || !(confirm instanceof HTMLButtonElement) || confirm.hidden) throw new Error('El preset guardado ya no está disponible. Vuelve a seleccionarlo.');
-      operation.guard = event => {
-        if (event.target !== confirm) return;
-        if (operation.permitConfirm && !operation.confirmed) {
-          operation.confirmed = true; attempted.add(claim); return;
-        }
-        event.preventDefault(); event.stopImmediatePropagation();
-      };
-      window.addEventListener('click', operation.guard, true);
-      preset.click();
-      assertOperation(operation);
-      if (routeKey(dialog) !== openedRoute || !singleNativeRoute(dialog)) throw new Error('La ruta ha cambiado al aplicar el preset.');
-      if (!enough(spec.quantities) || !inputsMatch(dialog, spec.quantities)) return outcome = result('waiting', 'El preset aún no está completo. Se esperará sin enviar una flota parcial.');
-      const error = readError(dialog);
-      if (confirm.disabled || error) { expose(operation); return outcome = result('paused', error || 'El juego no permite enviar esta misión. Revisa el despacho.'); }
-      const onClose = () => { operation.closed = true; };
-      dialog.addEventListener('close', onClose, { once: true, signal: operation.controller.signal });
-      operation.permitConfirm = true;
-      try { confirm.click(); } finally { operation.permitConfirm = false; }
-      if (!operation.confirmed) throw new Error('El juego no aceptó el clic de envío.');
-      const started = performance.now();
-      while (performance.now() - started < SETTLE_MS) {
-        if (operation.controller.signal.aborted) throw new Error(operation.reason || 'Se ha interrumpido la espera de confirmación.');
-        const other = [...document.querySelectorAll('dialog[open]')].find(node => node !== dialog);
-        const nativeError = readError(dialog);
-        if (other || nativeError) {
-          expose(operation);
-          return outcome = result('uncertain', other
-            ? 'El juego requiere una confirmación especial. Resuélvela en su diálogo; la misión no se reenviará automáticamente.'
-            : `${nativeError} Comprueba la misión en el juego antes de reintentar.`);
-        }
-        if (!dialog.open && operation.closed) return outcome = result('sent', 'El juego ha aceptado el envío de la misión.');
-        await delay(25, operation);
-      }
-      expose(operation);
-      return outcome = result('uncertain', 'No se ha recibido una confirmación clara del juego. Comprueba sus movimientos antes de volver a enviar.');
-    } catch (error) {
-      if (operation.confirmed) {
-        expose(operation);
-        return outcome = result('uncertain', `${error.message || 'Envío sin confirmar.'} Comprueba sus movimientos antes de reintentar.`);
-      }
-      return outcome = result('paused', error.message || 'No se pudo preparar la misión.');
-    } finally {
-      if (operation.guard) window.removeEventListener('click', operation.guard, true);
-      if (operation.dialog && !operation.keepDialog && operation.dialog.open) resetPreparedDialog(operation.dialog);
-      restoreMask(operation);
-      operation.controller.abort();
-      if (active === operation) active = null;
-      busyChanged(); inform({ type: 'dispatch', jobId, result: outcome });
+        .find(node => keyOf(node) === clean(presetKey) && sameAmounts(presetAmounts(node), requested));
+      if (unavailable(sourceButton) || unavailable(button) || unavailable(preset)) return failure('El preset o el destino ya no está disponible.');
+      capturing = true; busyChanged();
+      try {
+        const source = maskedInspector(() => sourceButton.click(), dialog);
+        if (!source.isActive) return failure('El origen del despacho ya no es tu sistema activo. Vuelve a abrir el preset.');
+        const endpoint = maskedInspector(() => button.click(), dialog);
+        if (routeKey(dialog) !== originalRoute) return failure('La ruta ha cambiado durante la preparación.');
+        return makeCapture(current, requested, presetKey, { routeKey: originalRoute,
+          label: endpoint.label || clean(cols[1].querySelector('.route-header-tile-name')?.textContent),
+          coordinate: endpoint.coordinate }, { kind: 'inspect', button });
+      } catch (error) { return failure(error.message || 'No se pudo preparar el destino de la misión.'); }
+      finally { capturing = false; busyChanged(); }
     }
-  }
 
-  function cancel(jobId = null, message = 'Preparación cancelada.') {
-    if (!active || (jobId !== null && active.jobId !== jobId)) return false;
-    active.reason = message;
-    active.controller.abort();
-    return true;
-  }
+    function captureInspect(inspector, requestedInput, presetKey) {
+      if (destroyed || active || capturing) return failure('Ya hay una misión en preparación.');
+      const current = context(), requested = quantities(requestedInput), point = inspectCoordinate(inspector);
+      if (!current || !requested || !point || !exactCounts()) return failure('La misión diferida necesita un único origen y las coordenadas del destino.');
+      if (!inspector.querySelector('.info-modal-trailing .info-modal-header-btn')) return failure('El destino es tu sistema activo. Elige otro sistema para enviar la misión.');
+      const action = inspector.querySelector('.inspect-actions > button.inspect-action-btn');
+      return makeCapture(current, requested, presetKey, { routeKey: '', coordinate: point,
+        label: clean(inspector.querySelector('.inspect-system-name-text')?.textContent) },
+      unavailable(action) ? null : { kind: 'dispatch', button: action });
+    }
 
-  function detach(jobId) {
-    cancel(jobId, 'Se ha retirado esta misión de la cola.');
-    const removed = attached.delete(jobId);
-    inform({ type: 'detached', jobId });
-    return removed;
-  }
+    function captureRadial(inspectButton, requestedInput, presetKey) {
+      if (destroyed || active || capturing) return failure('Ya hay una misión en preparación.');
+      const current = context(), requested = quantities(requestedInput);
+      const radial = inspectButton?.closest('.star-actions');
+      if (!current || !requested || !exactCounts()) return failure('La misión diferida necesita un único sistema de origen con recuentos exactos.');
+      if (unavailable(inspectButton) || !radial?.isConnected || inspectButton.dataset.actionKey !== 'inspect'
+          || inspectButton.dataset.enabled !== 'true' || getComputedStyle(radial).display === 'none') {
+        return failure('Vuelve a seleccionar el destino en el mapa.');
+      }
+      capturing = true; busyChanged();
+      try {
+        const endpoint = maskedInspector(() => inspectButton.click());
+        if (endpoint.isActive) return failure('El destino es tu sistema activo. Elige otro sistema para enviar la misión.');
+        // The radial button reads the current radial target on every invocation.
+        // Keep only the coordinates, never retain this mutable button as a handle.
+        // This identity-only capture can be paired with another cached preset.
+        return makeCapture(current, requested, presetKey, { routeKey: '',
+          label: endpoint.label, coordinate: endpoint.coordinate }, null);
+      } catch (error) { return failure(error.message || 'No se pudo identificar el destino del mapa.'); }
+      finally { capturing = false; busyChanged(); }
+    }
 
-  function destroy() {
-    if (destroyed) return;
-    destroyed = true; cancel(null, 'El helper se ha detenido.');
-    attached.clear(); lifetime.abort(); style.remove();
-  }
+    function attach(jobId, captured) {
+      if (destroyed || typeof jobId !== 'string' || !jobId || jobId.length > 128) return false;
+      const spec = specOf(captured?.spec), binding = captured?.handle ? captures.get(captured.handle) : null;
+      if (!spec || (binding && signature(binding.spec) !== signature(spec))) return false;
+      if (binding) attached.set(jobId, binding); else attached.delete(jobId);
+      inform({ type: 'attached', jobId, connected: Boolean(binding) });
+      return true;
+    }
 
-  for (const eventName of ['pointerdown', 'keydown', 'wheel']) {
-    window.addEventListener(eventName, event => {
-      if (active && event.isTrusted) cancel(active.jobId, 'Has interactuado con el juego durante la preparación.');
-    }, { capture: true, signal: lifetime.signal });
+    function connected(job) {
+      const spec = specOf(job), binding = attached.get(job?.id);
+      return Boolean(!destroyed && spec && !attempted.has(attemptKey(job))
+        && ((binding && signature(binding.spec) === signature(spec)) || typeof resolveTarget === 'function'));
+    }
+
+    function delay(ms, operation) {
+      return new Promise((resolve, reject) => {
+        const abort = () => { clearTimeout(timer); reject(new Error(operation.reason || 'Preparación cancelada.')); };
+        const timer = setTimeout(() => { operation.controller.signal.removeEventListener('abort', abort); resolve(); }, ms);
+        if (operation.controller.signal.aborted) abort();
+        else operation.controller.signal.addEventListener('abort', abort, { once: true });
+      });
+    }
+
+    function validOperation(operation) {
+      return active === operation && !operation.controller.signal.aborted && readyToAct() && sameContext(operation.spec);
+    }
+
+    function assertOperation(operation) {
+      if (!validOperation(operation)) throw new Error(operation.reason || 'El origen, la selección o el estado del helper ha cambiado.');
+    }
+
+    function readError(dialog) {
+      const error = dialog?.querySelector('[data-field="dispatch-error"]');
+      return error && !error.hidden ? clean(error.textContent) : '';
+    }
+
+    function singleNativeRoute(dialog) {
+      const cols = columns(dialog);
+      return cols.length === 2 && !/^\d+ systems selected$/i.test(clean(cols[0].querySelector('.route-header-tile-name')?.textContent));
+    }
+
+    function inputsMatch(dialog, requested) {
+      const inputs = [...dialog.querySelectorAll('[data-field="dispatch-quantities"] input.dispatch-step-input')];
+      return SHIPS.every(type => {
+        const matches = inputs.filter(input => clean(input.getAttribute('aria-label')).toLowerCase() === `number of ${type} to send`);
+        return matches.length === 1 && Number(matches[0].value) === requested[type];
+      });
+    }
+
+    function applyAmounts(operation) {
+      const dialog = operation.dialog, requested = operation.spec.quantities;
+      const inputs = [...dialog.querySelectorAll('[data-field="dispatch-quantities"] input.dispatch-step-input')];
+      const disabled = input => input.matches(':disabled') || input.getAttribute('aria-disabled') === 'true';
+      const withinBounds = (input, amount) => amount === 0 || (input.max !== '' &&
+        Number.isSafeInteger(Number(input.max)) && Number(input.max) >= amount &&
+        (input.min === '' || (Number.isSafeInteger(Number(input.min)) && Number(input.min) <= amount)));
+      if (inputs.length !== SHIPS.length) return false;
+      const byType = new Map();
+      for (const type of SHIPS) {
+        const matches = inputs.filter(input => clean(input.getAttribute('aria-label')).toLowerCase() === `number of ${type} to send`);
+        if (matches.length !== 1 || !(matches[0] instanceof HTMLInputElement) || matches[0].type !== 'number') return false;
+        const input = matches[0];
+        // A locked zero row stays untouched. Never enable a native control or
+        // exceed a native clamp merely to match the requested attack size.
+        if (disabled(input) && (requested[type] !== 0 || Number(input.value) !== 0)) return false;
+        if (!withinBounds(input, requested[type])) return false;
+        byType.set(type, input);
+      }
+      for (const type of SHIPS) {
+        const input = byType.get(type);
+        if (disabled(input) || Number(input.value) === requested[type]) continue;
+        input.value = String(requested[type]);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        assertOperation(operation);
+        if (!input.isConnected) return false;
+        // Native typing updates the route on input and clamps the count on blur.
+        // Commit that normal blur path before comparing the final full fleet.
+        input.dispatchEvent(new Event('blur'));
+        assertOperation(operation);
+        if (!input.isConnected || Number(input.value) !== requested[type] || !withinBounds(input, requested[type])) return false;
+      }
+      return inputsMatch(dialog, requested);
+    }
+
+    function isAttackAction(button) {
+      return button instanceof HTMLButtonElement && clean(button.textContent) === 'Attack';
+    }
+
+    function restoreMask(operation) {
+      if (!operation.dialog) return;
+      if (operation.previousMask === null) operation.dialog.removeAttribute(MASK);
+      else operation.dialog.setAttribute(MASK, operation.previousMask);
+    }
+
+    function expose(operation, message) {
+      operation.keepDialog = true;
+      restoreMask(operation);
+      if (message && operation.dialog?.open && !readError(operation.dialog)) {
+        const error = operation.dialog.querySelector('[data-field="dispatch-error"]');
+        if (error) { error.textContent = message; error.hidden = false; }
+      }
+    }
+
+    async function actionFor(operation, binding) {
+      if (binding?.kind === 'inspect') {
+        const endpoint = maskedInspector(() => binding.button.click());
+        if (!sameCoordinate(endpoint.coordinate, operation.spec.target.coordinate)) throw new Error('El destino ya no coincide con la misión guardada.');
+        return endpoint.action;
+      }
+      if (binding?.kind === 'dispatch') return unavailable(binding.button) ? null : binding.button;
+      if (typeof resolveTarget !== 'function') return null;
+      const resolved = await resolveTarget(operation.job, { signal: operation.controller.signal });
+      try {
+        assertOperation(operation);
+        const inspector = resolved?.inspector;
+        if (!sameCoordinate(inspectCoordinate(inspector), operation.spec.target.coordinate)) throw new Error('No se ha podido recuperar el destino guardado.');
+        const action = inspector.querySelector('.inspect-actions > button.inspect-action-btn');
+        return unavailable(action) ? null : action;
+      } finally { if (typeof resolved?.cleanup === 'function') await resolved.cleanup(); }
+    }
+
+    async function dispatch(job) {
+      const spec = specOf(job), jobId = job?.id;
+      if (destroyed || !spec || typeof jobId !== 'string') return result('paused', 'La misión guardada no tiene un origen, destino o preset válido.');
+      const claim = attemptKey(job);
+      if (attempted.has(claim)) return result('uncertain', 'Esta misión ya pasó al juego. Comprueba sus movimientos antes de volver a enviarla.');
+      if (active || capturing) return result('waiting', 'Hay otra misión en preparación.');
+    if (!readyToAct(job)) return result('waiting', 'Esperando a que el helper pueda actuar.');
+      if (!sameContext(spec)) return result('waiting', `Selecciona ${spec.originName || 'el sistema de origen'} para continuar esta misión.`);
+      if (!enough(spec.quantities)) return result('waiting', 'Esperando a que todas las naves del preset estén en base.');
+      let binding = attached.get(jobId);
+      if (binding && signature(binding.spec) !== signature(spec)) return result('paused', 'La misión ha cambiado. Reconecta el preset y el destino antes de continuar.');
+      if (!binding && typeof resolveTarget !== 'function') return result('paused', 'Misión guardada. Reconecta su destino con Shift + clic y el mismo preset para reanudarla.');
+      if (document.querySelector('dialog[open]')) return result('waiting', 'Cierra los diálogos del juego para continuar la misión.');
+      const operation = { job, jobId, spec, controller: new AbortController(), dialog: null,
+        previousMask: null, confirmed: false, permitConfirm: false, keepDialog: false,
+        closed: false, reason: '', guard: null };
+      active = operation; busyChanged();
+      let outcome;
+      try {
+        const action = await actionFor(operation, binding);
+        if (spec.target.mode === 'amounts' && action && !isAttackAction(action)) {
+          throw new Error('El destino ya no ofrece la acción Attack. El reintento se ha pausado.');
+        }
+        // Let previously queued native close handlers finish before opening a new
+        // dispatch session, otherwise they may clear the new native origin list.
+        await delay(0, operation);
+        assertOperation(operation);
+        if (unavailable(action) || !enough(spec.quantities)) return outcome = result('waiting', 'El juego todavía no permite preparar la flota completa.');
+        const dialog = nativeDialog();
+        if (!dialog || document.querySelector('dialog[open]')) throw new Error('Hay otro diálogo del juego abierto. Se ha pausado la preparación.');
+        operation.dialog = dialog; operation.previousMask = dialog.getAttribute(MASK);
+        const oldRoute = route(dialog);
+        dialog.setAttribute(MASK, 'dispatch'); dialog.setAttribute('open', '');
+        action.click();
+        if (!dialog.open || dialog.dataset.mode !== 'dispatch' || dialog.dataset.direction !== 'forward'
+            || route(dialog) === oldRoute || !singleNativeRoute(dialog)) throw new Error('El juego no ha abierto un despacho de un único origen.');
+        await delay(GUARD_MS, operation);
+        assertOperation(operation);
+        const openedRoute = routeKey(dialog);
+        if (!openedRoute || (spec.target.routeKey && openedRoute !== spec.target.routeKey)) throw new Error('La ruta ha cambiado. Reconecta el destino antes de enviar.');
+        if (spec.target.mode === 'amounts') {
+          const source = columns(dialog)[0].querySelector('button.route-header-hex-clickable');
+          if (unavailable(source)) throw new Error('No se puede comprobar el origen del ataque.');
+          const identity = maskedInspector(() => source.click(), dialog);
+          if (!identity.isActive || !sameCoordinate(identity.coordinate, spec.target.originCoordinate)) {
+            throw new Error('Las coordenadas del origen no coinciden con el ataque guardado.');
+          }
+          assertOperation(operation);
+        }
+        const endpoint = columns(dialog)[1].querySelector('button.route-header-hex-clickable');
+        if (unavailable(endpoint)) throw new Error('No se puede comprobar el destino del despacho.');
+        const identity = maskedInspector(() => endpoint.click(), dialog);
+        if (!sameCoordinate(identity.coordinate, spec.target.coordinate)) throw new Error('Las coordenadas del destino no coinciden con la misión.');
+        if (spec.target.mode === 'amounts' && (identity.isActive || !isAttackAction(identity.action))) {
+          throw new Error('El destino ya no permite un ataque. El reintento se ha pausado.');
+        }
+        assertOperation(operation);
+        if (!enough(spec.quantities)) return outcome = result('waiting', 'Las naves disponibles han cambiado; se esperará al preset completo.');
+        const amountsMode = spec.target.mode === 'amounts';
+        const preset = amountsMode ? null : [...dialog.querySelectorAll('[data-field="dispatch-presets"] .dispatch-preset-apply')]
+          .find(button => keyOf(button) === spec.target.presetKey && sameAmounts(presetAmounts(button), spec.quantities));
+        const confirm = dialog.querySelector('[data-field="dispatch-confirm"]');
+        if ((!amountsMode && unavailable(preset)) || !(confirm instanceof HTMLButtonElement) || confirm.hidden) throw new Error('El preset guardado ya no está disponible. Vuelve a seleccionarlo.');
+        if (amountsMode && !isAttackAction(confirm)) throw new Error('El juego ya no ofrece la confirmación Attack para este destino.');
+        operation.guard = event => {
+          if (event.target !== confirm) return;
+          if (operation.permitConfirm && !operation.confirmed) {
+            operation.confirmed = true; attempted.add(claim); return;
+          }
+          event.preventDefault(); event.stopImmediatePropagation();
+        };
+        window.addEventListener('click', operation.guard, true);
+        if (amountsMode) {
+          if (!applyAmounts(operation)) return outcome = result('waiting', 'El juego ha ajustado las cantidades. Se esperará a la flota completa sin enviar un ataque parcial.');
+        } else preset.click();
+        assertOperation(operation);
+        if (routeKey(dialog) !== openedRoute || !singleNativeRoute(dialog)) throw new Error('La ruta ha cambiado al aplicar el preset.');
+        if (!enough(spec.quantities) || !inputsMatch(dialog, spec.quantities)) return outcome = result('waiting', 'El preset aún no está completo. Se esperará sin enviar una flota parcial.');
+        if (amountsMode && !isAttackAction(confirm)) throw new Error('El destino ha cambiado y ya no permite Attack.');
+        const error = readError(dialog);
+        if (confirm.disabled || error) { expose(operation); return outcome = result('paused', error || 'El juego no permite enviar esta misión. Revisa el despacho.'); }
+        const onClose = () => { operation.closed = true; };
+        dialog.addEventListener('close', onClose, { once: true, signal: operation.controller.signal });
+        operation.permitConfirm = true;
+        try { confirm.click(); } finally { operation.permitConfirm = false; }
+        if (!operation.confirmed) throw new Error('El juego no aceptó el clic de envío.');
+        const started = performance.now();
+        while (performance.now() - started < SETTLE_MS) {
+          if (operation.controller.signal.aborted) throw new Error(operation.reason || 'Se ha interrumpido la espera de confirmación.');
+          const other = [...document.querySelectorAll('dialog[open]')].find(node => node !== dialog);
+          const nativeError = readError(dialog);
+          if (other || nativeError) {
+            expose(operation);
+            return outcome = result('uncertain', other
+              ? 'El juego requiere una confirmación especial. Resuélvela en su diálogo; la misión no se reenviará automáticamente.'
+              : `${nativeError} Comprueba la misión en el juego antes de reintentar.`);
+          }
+          if (!dialog.open && operation.closed) return outcome = result('sent', 'El juego ha aceptado el envío de la misión.');
+          await delay(25, operation);
+        }
+        expose(operation);
+        return outcome = result('uncertain', 'No se ha recibido una confirmación clara del juego. Comprueba sus movimientos antes de volver a enviar.');
+      } catch (error) {
+        if (operation.confirmed) {
+          expose(operation);
+          return outcome = result('uncertain', `${error.message || 'Envío sin confirmar.'} Comprueba sus movimientos antes de reintentar.`);
+        }
+        return outcome = result('paused', error.message || 'No se pudo preparar la misión.');
+      } finally {
+        if (operation.guard) window.removeEventListener('click', operation.guard, true);
+        if (operation.dialog && !operation.keepDialog && operation.dialog.open) resetPreparedDialog(operation.dialog);
+        restoreMask(operation);
+        operation.controller.abort();
+        if (active === operation) active = null;
+        busyChanged(); inform({ type: 'dispatch', jobId, result: outcome });
+      }
+    }
+
+    function cancel(jobId = null, message = 'Preparación cancelada.') {
+      if (!active || (jobId !== null && active.jobId !== jobId)) return false;
+      active.reason = message;
+      active.controller.abort();
+      return true;
+    }
+
+    function detach(jobId) {
+      cancel(jobId, 'Se ha retirado esta misión de la cola.');
+      const removed = attached.delete(jobId);
+      inform({ type: 'detached', jobId });
+      return removed;
+    }
+
+    function destroy() {
+      if (destroyed) return;
+      destroyed = true; cancel(null, 'El helper se ha detenido.');
+      attached.clear(); lifetime.abort(); style.remove();
+    }
+
+    for (const eventName of ['pointerdown', 'keydown', 'wheel']) {
+      window.addEventListener(eventName, event => {
+        if (active && event.isTrusted) cancel(active.jobId, 'Has interactuado con el juego durante la preparación.');
+      }, { capture: true, signal: lifetime.signal });
+    }
+    return { capture, captureInspect, captureRadial, attach, dispatch, connected, detach, cancel, destroy,
+      isBusy: () => Boolean(active || capturing) };
   }
-  return { capture, captureInspect, captureRadial, attach, dispatch, connected, detach, cancel, destroy,
-    isBusy: () => Boolean(active || capturing) };
-}
   // END NATIVE MISSION ADAPTER
 
   // BEGIN MISSION TARGET RESOLVER
@@ -3567,6 +3666,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     let notice = '';
     let mounted = null;
     let renderKey = '';
+    let rendering = false;
     let destroyed = false;
     let running = false;
     let idSequence = 0;
@@ -3597,12 +3697,18 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     }
 
     function target(value) {
-      if (!keys(value, ['routeKey', 'label', 'coordinate', 'presetKey']) || typeof value.routeKey !== 'string' ||
+      if (!keys(value, ['routeKey', 'label', 'coordinate', 'presetKey', 'mode', 'originCoordinate']) || typeof value.routeKey !== 'string' ||
           (value.routeKey !== '' && !value.routeKey.trim()) || value.routeKey.length > 32768 || /[\u0000\u007f]/.test(value.routeKey)) {
         throw new TypeError('Destino de misión no válido.');
       }
+      const amountsMode = value.mode === 'amounts';
+      if (amountsMode) {
+        if (value.routeKey !== '' || value.presetKey !== '' || !keys(value.originCoordinate, ['q', 'r']) ||
+            !['q', 'r'].every(key => Number.isSafeInteger(value.originCoordinate[key]) &&
+              Math.abs(value.originCoordinate[key]) <= 10000000)) throw new TypeError('Origen de ataque no válido.');
+      } else if (value.mode !== undefined || value.originCoordinate !== undefined) throw new TypeError('Modo de misión no válido.');
       const result = { routeKey: value.routeKey, label: label(value.label, 500),
-        presetKey: label(label(value.presetKey, 500).normalize('NFKC').replace(/\s+/g, ' ').trim(), 500) };
+        presetKey: amountsMode ? '' : label(label(value.presetKey, 500).normalize('NFKC').replace(/\s+/g, ' ').trim(), 500) };
       if (value.coordinate !== undefined) {
         if (!keys(value.coordinate, ['q', 'r']) || !['q', 'r'].every(key =>
           Number.isSafeInteger(value.coordinate[key]) && Math.abs(value.coordinate[key]) <= 1000000000)) {
@@ -3611,6 +3717,14 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         result.coordinate = { q: value.coordinate.q, r: value.coordinate.r };
       }
       if (value.routeKey === '' && !result.coordinate) throw new TypeError('Faltan las coordenadas del destino.');
+      if (amountsMode) {
+        if (!result.coordinate || ['q', 'r'].some(key => Math.abs(result.coordinate[key]) > 10000000) ||
+            (result.coordinate.q === value.originCoordinate.q && result.coordinate.r === value.originCoordinate.r)) {
+          throw new TypeError('El destino del ataque no es válido.');
+        }
+        result.mode = 'amounts';
+        result.originCoordinate = { q: value.originCoordinate.q, r: value.originCoordinate.r };
+      }
       return result;
     }
 
@@ -3620,9 +3734,13 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
           typeof value.produce !== 'boolean' || typeof value.autoSend !== 'boolean') {
         throw new TypeError('Configuración de misión no válida.');
       }
+      const destination = target(value.target), requested = quantities(value.quantities);
+      if (destination.mode === 'amounts' && SHIPS.some(id => requested[id] > 50000)) {
+        throw new TypeError('El ataque supera el límite nativo de naves por tipo.');
+      }
       return { scope: value.scope, originId: value.originId.toLowerCase(),
-        originName: label(value.originName, 400), target: target(value.target),
-        quantities: quantities(value.quantities), produce: value.produce, autoSend: value.autoSend };
+        originName: label(value.originName, 400), target: destination,
+        quantities: requested, produce: value.produce, autoSend: value.autoSend };
     }
 
     function validateConfig(value = {}) {
@@ -3787,9 +3905,21 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       return commit({ ...config, jobs: config.jobs.map(item => item.id === id ? result : item) });
     }
 
-    function queue(value) {
+    function queue(value, options = {}) {
       ensureReady();
       const clean = spec(value);
+      if (!keys(options, ['id']) || (options.id !== undefined && (typeof options.id !== 'string' || !ID.test(options.id)))) {
+        throw new TypeError('Identificador de misión no válido.');
+      }
+      if (options.id !== undefined) {
+        const sameId = config.jobs.find(item => item.id === options.id);
+        if (sameId) {
+          const existingSpec = spec({ scope: sameId.scope, originId: sameId.originId, originName: sameId.originName,
+            target: sameId.target, quantities: sameId.quantities, produce: sameId.produce, autoSend: sameId.autoSend });
+          if (JSON.stringify(existingSpec) !== JSON.stringify(clean)) throw new Error('Este identificador ya pertenece a otra misión.');
+          return copy(sameId);
+        }
+      }
       if (!clean.produce && !clean.autoSend) throw new Error('Activa la producción o el envío cuando se complete la flota.');
       const existing = config.jobs.find(item => item.scope === clean.scope && item.originId === clean.originId);
       if (existing && existing.status !== 'sent') throw new Error('Este origen ya tiene una misión pendiente. Cancélala antes de sustituirla.');
@@ -3797,7 +3927,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       if (retained.length >= MAX_JOBS) throw new Error('Se ha alcanzado el límite de misiones pendientes.');
       const time = now();
       const random = globalThis.crypto?.randomUUID?.();
-      let id = random || 'fleet-' + time.toString(36) + '-' + (++idSequence).toString(36);
+      let id = options.id || random || 'fleet-' + time.toString(36) + '-' + (++idSequence).toString(36);
       while (config.jobs.some(item => item.id === id)) id = 'fleet-' + time.toString(36) + '-' + (++idSequence).toString(36);
       const job = { id, ...clean, status: 'waiting', createdAt: time, updatedAt: time,
         claimedAt: null, sentAt: null, message: '', needsReview: false };
@@ -3826,7 +3956,9 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         const previous = job.target.coordinate;
         const next = refreshedTarget.coordinate;
         if (!previous || !next || previous.q !== next.q || previous.r !== next.r ||
-            job.target.presetKey !== refreshedTarget.presetKey) {
+            job.target.presetKey !== refreshedTarget.presetKey || job.target.mode !== refreshedTarget.mode ||
+            (job.target.mode === 'amounts' && (job.target.originCoordinate.q !== refreshedTarget.originCoordinate.q ||
+              job.target.originCoordinate.r !== refreshedTarget.originCoordinate.r))) {
           throw new Error('El destino o el preset no coincide con la misión guardada.');
         }
         return { ...job, target: refreshedTarget };
@@ -4036,91 +4168,94 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     function fleetText(amounts) { return SHIPS.filter(id => amounts[id] > 0).map(id => amounts[id] + ' ' + NAMES[id]).join(' · '); }
 
     function render() {
-      if (!mounted || destroyed) return;
-      const current = currentContext();
-      const jobs = (config?.jobs || []).map(job => ({ job,
-        plan: matches(job, current) ? productionPlan(job, currentFleet(job)) : null }));
-      const key = JSON.stringify({ jobs, context: current, notice, readError, storageError });
-      if (key === renderKey) return;
-      renderKey = key;
-      const doc = mounted.ownerDocument;
-      const el = (tag, text, className) => {
-        const element = doc.createElement(tag);
-        if (text !== undefined) element.textContent = text;
-        if (className) element.className = className;
-        return element;
-      };
-      const section = el('section', undefined, 'oldlight-fleet-wait');
-      section.setAttribute('aria-label', 'Misiones pendientes');
-      section.hidden = !jobs.length && !notice;
-      const style = el('style');
-      style.textContent = '.oldlight-fleet-wait{font:inherit;color:inherit;max-width:100%;min-width:0}' +
-        '.oldlight-fleet-wait h4{font-size:13px;margin:12px 0 8px}.oldlight-fleet-wait article{padding:10px;border:1px solid #3b4b60;border-radius:8px;margin:8px 0;min-width:0;overflow-wrap:anywhere}' +
-        '.oldlight-fleet-wait p{font-size:12px;line-height:1.45;margin:4px 0;overflow-wrap:anywhere}' +
-        '.oldlight-fleet-wait .fw-muted{opacity:.75}.oldlight-fleet-wait .fw-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}' +
-        '.oldlight-fleet-wait button{font:inherit;font-size:12px;padding:5px 8px;max-width:100%;white-space:normal;border-radius:6px;border:1px solid #52647c;background:#223046;color:inherit;cursor:pointer}' +
-        '.oldlight-fleet-wait button:disabled{opacity:.5;cursor:default}.oldlight-fleet-wait label{display:flex;align-items:flex-start;gap:6px;font-size:12px;margin-top:6px}' +
-        '.oldlight-fleet-wait input{margin:2px 0 0}.oldlight-fleet-wait .fw-error{color:#f8c58a}';
-      section.append(style, el('h4', 'Misiones pendientes'));
-      if (notice) {
-        const warning = el('p', notice, 'fw-error');
-        warning.setAttribute('role', 'status');
-        section.append(warning);
-      }
-      const safeAction = action => {
-        try { action(); } catch (error) { notice = error.message; renderKey = ''; render(); }
-      };
-      for (const { job, plan } of jobs) {
-        const article = el('article');
-        article.dataset.fleetWaitJob = job.id;
-        article.append(el('strong', job.target.label), el('p', 'Desde ' + job.originName, 'fw-muted'),
-          el('p', fleetText(job.quantities)));
-        const statuses = { paused: 'Pausada', sending: 'Enviando…', sent: 'Enviada',
-          uncertain: 'Envío sin confirmar. Comprueba las misiones del juego.' };
-        let state = statuses[job.status];
-        if (job.status === 'waiting') {
-          state = plan?.ready ? (job.autoSend ? 'Flota completa; lista para enviar.' : 'Flota completa. Envío automático desactivado.')
-            : plan ? 'Esperando: ' + fleetText(plan.missing) : 'Selecciona este origen para comprobar su flota.';
-        }
-        const status = el('p', state);
-        status.setAttribute('role', 'status');
-        article.append(status);
-        if (job.message && job.message !== state) article.append(el('p', job.message, 'fw-muted'));
-        if (job.produce && job.status === 'waiting' && plan && fleetText(plan.production)) {
-          article.append(el('p', 'Por producir: ' + fleetText(plan.production), 'fw-muted'));
-        }
-        if (['waiting', 'paused', 'uncertain'].includes(job.status)) {
-          for (const [field, text] of [['produce', 'Producir las naves que faltan'], ['autoSend', 'Enviar cuando la flota esté completa']]) {
-            const row = el('label');
-            const input = el('input');
-            input.type = 'checkbox';
-            input.checked = job[field];
-            input.disabled = readError;
-            input.dataset.fleetWaitOption = field;
-            input.addEventListener('change', () => safeAction(() => update(job.id, { [field]: input.checked })));
-            row.append(input, el('span', text));
-            article.append(row);
-          }
-        }
-        const actions = el('div', undefined, 'fw-actions');
-        const button = (text, action, disabled = false) => {
-          const control = el('button', text);
-          control.type = 'button';
-          control.disabled = disabled || readError;
-          control.addEventListener('click', () => safeAction(action));
-          actions.append(control);
+      if (!mounted || destroyed || rendering) return;
+      rendering = true;
+      try {
+        const current = currentContext();
+        const jobs = (config?.jobs || []).map(job => ({ job,
+          plan: matches(job, current) ? productionPlan(job, currentFleet(job)) : null }));
+        const key = JSON.stringify({ jobs, context: current, notice, readError, storageError });
+        if (key === renderKey) return;
+        renderKey = key;
+        const doc = mounted.ownerDocument;
+        const el = (tag, text, className) => {
+          const element = doc.createElement(tag);
+          if (text !== undefined) element.textContent = text;
+          if (className) element.className = className;
+          return element;
         };
-        if (job.status === 'waiting') button('Pausar', () => pause(job.id));
-        if (job.status === 'paused' && !job.needsReview) button('Reanudar', () => resume(job.id));
-        if (job.status === 'uncertain' || job.needsReview) button('He comprobado que no se envió: reanudar', () => acknowledge(job.id, { notSent: true }));
-        button(job.status === 'sent' ? 'Quitar' : 'Cancelar pendiente', () => cancel(job.id), job.status === 'sending');
-        article.append(actions);
-        section.append(article);
-      }
-      if (jobs.some(({ job }) => job.produce && job.status !== 'sent')) {
-        section.append(el('p', 'Pausar o cancelar detiene este pendiente. Las naves ya encargadas siguen en la cola del juego.', 'fw-muted'));
-      }
-      mounted.replaceChildren(section);
+        const section = el('section', undefined, 'oldlight-fleet-wait');
+        section.setAttribute('aria-label', 'Misiones pendientes');
+        section.hidden = !jobs.length && !notice;
+        const style = el('style');
+        style.textContent = '.oldlight-fleet-wait{font:inherit;color:inherit;max-width:100%;min-width:0}' +
+          '.oldlight-fleet-wait h4{font-size:13px;margin:12px 0 8px}.oldlight-fleet-wait article{padding:10px;border:1px solid #3b4b60;border-radius:8px;margin:8px 0;min-width:0;overflow-wrap:anywhere}' +
+          '.oldlight-fleet-wait p{font-size:12px;line-height:1.45;margin:4px 0;overflow-wrap:anywhere}' +
+          '.oldlight-fleet-wait .fw-muted{opacity:.75}.oldlight-fleet-wait .fw-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}' +
+          '.oldlight-fleet-wait button{font:inherit;font-size:12px;padding:5px 8px;max-width:100%;white-space:normal;border-radius:6px;border:1px solid #52647c;background:#223046;color:inherit;cursor:pointer}' +
+          '.oldlight-fleet-wait button:disabled{opacity:.5;cursor:default}.oldlight-fleet-wait label{display:flex;align-items:flex-start;gap:6px;font-size:12px;margin-top:6px}' +
+          '.oldlight-fleet-wait input{margin:2px 0 0}.oldlight-fleet-wait .fw-error{color:#f8c58a}';
+        section.append(style, el('h4', 'Misiones pendientes'));
+        if (notice) {
+          const warning = el('p', notice, 'fw-error');
+          warning.setAttribute('role', 'status');
+          section.append(warning);
+        }
+        const safeAction = action => {
+          try { action(); } catch (error) { notice = error.message; renderKey = ''; render(); }
+        };
+        for (const { job, plan } of jobs) {
+          const article = el('article');
+          article.dataset.fleetWaitJob = job.id;
+          article.append(el('strong', job.target.label), el('p', 'Desde ' + job.originName, 'fw-muted'),
+            el('p', fleetText(job.quantities)));
+          const statuses = { paused: 'Pausada', sending: 'Enviando…', sent: 'Enviada',
+            uncertain: 'Envío sin confirmar. Comprueba las misiones del juego.' };
+          let state = statuses[job.status];
+          if (job.status === 'waiting') {
+            state = plan?.ready ? (job.autoSend ? 'Flota completa; lista para enviar.' : 'Flota completa. Envío automático desactivado.')
+              : plan ? 'Esperando: ' + fleetText(plan.missing) : 'Selecciona este origen para comprobar su flota.';
+          }
+          const status = el('p', state);
+          status.setAttribute('role', 'status');
+          article.append(status);
+          if (job.message && job.message !== state) article.append(el('p', job.message, 'fw-muted'));
+          if (job.produce && job.status === 'waiting' && plan && fleetText(plan.production)) {
+            article.append(el('p', 'Por producir: ' + fleetText(plan.production), 'fw-muted'));
+          }
+          if (['waiting', 'paused', 'uncertain'].includes(job.status)) {
+            for (const [field, text] of [['produce', 'Producir las naves que faltan'], ['autoSend', 'Enviar cuando la flota esté completa']]) {
+              const row = el('label');
+              const input = el('input');
+              input.type = 'checkbox';
+              input.checked = job[field];
+              input.disabled = readError;
+              input.dataset.fleetWaitOption = field;
+              input.addEventListener('change', () => safeAction(() => update(job.id, { [field]: input.checked })));
+              row.append(input, el('span', text));
+              article.append(row);
+            }
+          }
+          const actions = el('div', undefined, 'fw-actions');
+          const button = (text, action, disabled = false) => {
+            const control = el('button', text);
+            control.type = 'button';
+            control.disabled = disabled || readError;
+            control.addEventListener('click', () => safeAction(action));
+            actions.append(control);
+          };
+          if (job.status === 'waiting') button('Pausar', () => pause(job.id));
+          if (job.status === 'paused' && !job.needsReview) button('Reanudar', () => resume(job.id));
+          if (job.status === 'uncertain' || job.needsReview) button('He comprobado que no se envió: reanudar', () => acknowledge(job.id, { notSent: true }));
+          button(job.status === 'sent' ? 'Quitar' : 'Cancelar pendiente', () => cancel(job.id), job.status === 'sending');
+          article.append(actions);
+          section.append(article);
+        }
+        if (jobs.some(({ job }) => job.produce && job.status !== 'sent')) {
+          section.append(el('p', 'Pausar o cancelar detiene este pendiente. Las naves ya encargadas siguen en la cola del juego.', 'fw-muted'));
+        }
+        mounted.replaceChildren(section);
+      } finally { rendering = false; }
     }
 
     function mount(root) {
@@ -4161,7 +4296,784 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   }
   // END FLEET WAIT QUEUE
 
+  // BEGIN ATTACK RETRY CONTROLLER
+  // Reports establish intent; the existing native mission queue owns every game order.
+  function createAttackRetryController(deps = {}) {
+    const KEY = 'old-light-attack-retry:v1';
+    const SHIPS = ['probe', 'marauder', 'sentinel', 'vanguard'];
+    const NAMES = { probe: 'Probe', marauder: 'Marauder', sentinel: 'Sentinel', vanguard: 'Vanguard' };
+    const STATES = ['waiting_origin', 'waiting_slot', 'queued', 'awaiting_report', 'paused', 'uncertain', 'completed', 'cancelled', 'limit'];
+    const ACTIVE = ['waiting_origin', 'waiting_slot', 'queued', 'awaiting_report'];
+    const TERMINAL = ['completed', 'cancelled', 'limit'];
+    const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const SCOPE = /^[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{1,96}$/;
+    const MAX_TIME = 8640000000000000;
+    const MAX_QUANTITY = 50000;
+    const MAX_CAMPAIGNS = 32;
+    const MAX_HISTORY = 512;
+    const MAX_BYTES = 300 * 1024;
+    const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+    const copy = value => JSON.parse(JSON.stringify(value));
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const zeros = () => Object.fromEntries(SHIPS.map(id => [id, 0]));
+    const defaults = () => ({ schemaVersion: 1, enabled: false, enabledAt: 0, produceMissing: true,
+      maxRetries: 3, maxRetriesDraft: '3', expanded: true, campaigns: [], processed: [], outcomes: [], floorAt: 0 });
+    const gmGet = deps.gmGetValue || (typeof GM_getValue === 'function' ? GM_getValue : null);
+    const gmSet = deps.gmSetValue || (typeof GM_setValue === 'function' ? GM_setValue : null);
+    const checkpoints = new WeakMap();
+    const retryAfter = new Map();
+    let config = null;
+    let readError = false;
+    let storageError = false;
+    let notice = '';
+    let destroyed = false;
+    let running = false;
+    let mounted = null;
+    let ui = null;
+    let cardsKey = '';
+    let epoch = 0;
+
+    function keys(value, allowed) {
+      return object(value) && Object.keys(value).every(key => allowed.includes(key));
+    }
+    function text(value, maximum, optional = false) {
+      if (optional && value === undefined) return '';
+      if (typeof value !== 'string' || value.length > maximum || (!optional && !value.trim()) ||
+          /[\u0000-\u001f\u007f]/.test(value)) throw new TypeError('Texto de reintento no válido.');
+      return value;
+    }
+    function time(value) {
+      if (!Number.isSafeInteger(value) || value < 0 || value > MAX_TIME) throw new TypeError('Fecha de reintento no válida.');
+      return value;
+    }
+    function stamp(value) {
+      if (typeof value === 'string' && value.length <= 80 && value.trim()) value = Date.parse(value);
+      try { return time(value); } catch (_) { return null; }
+    }
+    function now() { return time(deps.now ? deps.now() : Date.now()); }
+    function coordinate(value) {
+      if (!keys(value, ['q', 'r']) || !['q', 'r'].every(key =>
+        Number.isSafeInteger(value[key]) && Math.abs(value[key]) <= 10000000)) {
+        throw new TypeError('Coordenadas de reintento no válidas.');
+      }
+      return { q: value.q, r: value.r };
+    }
+    function sameCoordinate(a, b) { return Boolean(a && b && a.q === b.q && a.r === b.r); }
+    function quantities(value) {
+      if (!keys(value, SHIPS)) throw new TypeError('Tipos de nave de reintento no válidos.');
+      const result = zeros();
+      for (const id of SHIPS) {
+        const amount = value[id] === undefined ? 0 : value[id];
+        if (!Number.isSafeInteger(amount) || amount < 0 || amount > MAX_QUANTITY) {
+          throw new TypeError('Cantidades de nave de reintento no válidas.');
+        }
+        result[id] = amount;
+      }
+      if (result.marauder === 0 && result.sentinel === 0) throw new TypeError('Faltan naves de combate en el ataque.');
+      return result;
+    }
+    function sameQuantities(a, b) { return Boolean(a && b && SHIPS.every(id => a[id] === b[id])); }
+    function routeKey(value) {
+      return JSON.stringify([value.scope, value.originCoordinate.q, value.originCoordinate.r,
+        value.targetCoordinate.q, value.targetCoordinate.r]);
+    }
+    function validateConfig(value = {}) {
+      if (!keys(value, ['schemaVersion', 'enabled', 'enabledAt', 'produceMissing', 'maxRetries', 'maxRetriesDraft',
+        'expanded', 'campaigns', 'processed', 'outcomes', 'floorAt'])) throw new TypeError('Los reintentos guardados no son válidos.');
+      const next = { ...defaults(), ...value };
+      if (value.maxRetriesDraft === undefined) next.maxRetriesDraft = String(next.maxRetries);
+      if (next.schemaVersion !== 1 || !['enabled', 'produceMissing', 'expanded'].every(key => typeof next[key] === 'boolean') ||
+          !Number.isSafeInteger(next.maxRetries) || next.maxRetries < 0 || next.maxRetries > 100 ||
+          typeof next.maxRetriesDraft !== 'string' || next.maxRetriesDraft.length > 16 || /[\u0000-\u001f\u007f]/.test(next.maxRetriesDraft)) {
+        throw new TypeError('Los ajustes de reintento no son válidos.');
+      }
+      time(next.enabledAt); time(next.floorAt);
+      if (next.enabled && next.enabledAt === 0) throw new TypeError('Falta la fecha de activación de los reintentos.');
+      if (!Array.isArray(next.campaigns) || next.campaigns.length > MAX_CAMPAIGNS ||
+          !Array.isArray(next.processed) || next.processed.length > MAX_HISTORY ||
+          !Array.isArray(next.outcomes) || next.outcomes.length > MAX_HISTORY) throw new TypeError('Hay demasiados reintentos guardados.');
+      const ids = new Set(), activeRoutes = new Set();
+      next.campaigns = next.campaigns.map(item => {
+        if (!keys(item, ['id', 'scope', 'originId', 'originName', 'originCoordinate', 'targetName', 'targetCoordinate',
+          'status', 'resumeStatus', 'createdAt', 'updatedAt', 'lastOutcomeAt', 'triggerReportId', 'retries', 'quantities',
+          'lastSentQuantities', 'sentAt', 'queueJobId', 'queueConfirmed', 'produce', 'message']) ||
+            typeof item.id !== 'string' || !item.id.startsWith('attack:') || !UUID.test(item.id.slice(7)) || ids.has(item.id.toLowerCase()) ||
+            !SCOPE.test(item.scope || '') || (item.originId !== null && !UUID.test(item.originId || '')) ||
+            !STATES.includes(item.status) || (item.resumeStatus !== null && !ACTIVE.includes(item.resumeStatus)) ||
+            !UUID.test(item.triggerReportId || '') || !Number.isSafeInteger(item.retries) || item.retries < 0 || item.retries > MAX_QUANTITY ||
+            typeof item.queueConfirmed !== 'boolean' || typeof item.produce !== 'boolean') throw new TypeError('Una campaña de reintentos no es válida.');
+        const clean = { id: 'attack:' + item.id.slice(7).toLowerCase(), scope: item.scope,
+          originId: item.originId === null ? null : item.originId.toLowerCase(), originName: text(item.originName, 400),
+          originCoordinate: coordinate(item.originCoordinate), targetName: text(item.targetName, 500),
+          targetCoordinate: coordinate(item.targetCoordinate), status: item.status, resumeStatus: item.resumeStatus,
+          createdAt: time(item.createdAt), updatedAt: time(item.updatedAt), lastOutcomeAt: time(item.lastOutcomeAt),
+          triggerReportId: item.triggerReportId.toLowerCase(), retries: item.retries, quantities: quantities(item.quantities),
+          lastSentQuantities: item.lastSentQuantities === null ? null : quantities(item.lastSentQuantities),
+          sentAt: item.sentAt === null ? null : time(item.sentAt), queueJobId: item.queueJobId,
+          queueConfirmed: item.queueConfirmed, produce: item.produce, message: text(item.message, 600, true) };
+        if (clean.updatedAt < clean.createdAt || clean.lastOutcomeAt > clean.updatedAt ||
+            (clean.sentAt !== null && (clean.sentAt > clean.updatedAt || clean.lastSentQuantities === null)) ||
+            (clean.queueJobId !== null && clean.queueJobId !== 'retry:' + clean.triggerReportId) ||
+            (clean.queueJobId !== null && clean.originId === null) || (clean.queueConfirmed && !clean.queueJobId) ||
+            (clean.status === 'queued' && !clean.queueJobId) ||
+            (clean.status === 'awaiting_report' && (clean.sentAt === null || clean.retries < 1)) ||
+            (clean.status !== 'paused' && clean.resumeStatus !== null) ||
+            sameCoordinate(clean.originCoordinate, clean.targetCoordinate)) throw new TypeError('El estado de una campaña no es coherente.');
+        const route = routeKey(clean);
+        if (!TERMINAL.includes(clean.status)) {
+          if (activeRoutes.has(route)) throw new TypeError('Hay dos campañas activas para el mismo destino y origen.');
+          activeRoutes.add(route);
+        }
+        ids.add(clean.id);
+        return clean;
+      });
+      const processedIds = new Set();
+      next.processed = next.processed.map(item => {
+        if (!keys(item, ['scope', 'id', 'takenAt']) || !SCOPE.test(item.scope || '') || !UUID.test(item.id || '')) {
+          throw new TypeError('El historial de informes no es válido.');
+        }
+        const id = item.scope + '/' + item.id.toLowerCase();
+        if (processedIds.has(id)) throw new TypeError('El historial contiene informes repetidos.');
+        processedIds.add(id);
+        return { scope: item.scope, id: item.id.toLowerCase(), takenAt: time(item.takenAt) };
+      });
+      const routes = new Set();
+      next.outcomes = next.outcomes.map(item => {
+        if (!keys(item, ['scope', 'originCoordinate', 'targetCoordinate', 'takenAt', 'reportId', 'verdict']) ||
+            !SCOPE.test(item.scope || '') || !UUID.test(item.reportId || '') ||
+            !['Defeat', 'Victory', 'Captured', 'Draw'].includes(item.verdict)) throw new TypeError('El historial de resultados no es válido.');
+        const clean = { scope: item.scope, originCoordinate: coordinate(item.originCoordinate),
+          targetCoordinate: coordinate(item.targetCoordinate), takenAt: time(item.takenAt),
+          reportId: item.reportId.toLowerCase(), verdict: item.verdict };
+        const route = routeKey(clean);
+        if (routes.has(route)) throw new TypeError('El historial contiene rutas repetidas.');
+        routes.add(route);
+        return clean;
+      });
+      const json = JSON.stringify(next);
+      const bytes = typeof TextEncoder === 'function' ? new TextEncoder().encode(json).byteLength : unescape(encodeURIComponent(json)).length;
+      if (bytes > MAX_BYTES) throw new TypeError('Los reintentos guardados ocupan demasiado espacio.');
+      return next;
+    }
+    function syncResult(value) {
+      if (value && typeof value.then === 'function') throw new Error('El guardado local debe ser síncrono.');
+      return value;
+    }
+    function cloneRaw(value) {
+      if (typeof globalThis.structuredClone === 'function') return globalThis.structuredClone(value);
+      if (value === null || typeof value !== 'object') return value;
+      if (Array.isArray(value)) return value.map(cloneRaw);
+      const out = {};
+      for (const key of Object.keys(value)) Object.defineProperty(out, key,
+        { value: cloneRaw(value[key]), enumerable: true, writable: true, configurable: true });
+      return out;
+    }
+    function readRaw() {
+      if (typeof deps.load === 'function') return { kind: 'value', value: cloneRaw(syncResult(deps.load())) };
+      if (typeof gmGet === 'function' && typeof gmSet === 'function') return { kind: 'value', value: cloneRaw(syncResult(gmGet(KEY, defaults()))) };
+      if (!globalThis.localStorage) throw new Error('No hay almacenamiento local disponible.');
+      return { kind: 'text', value: globalThis.localStorage.getItem(KEY) };
+    }
+    function configFromRaw(raw) { return validateConfig(raw.kind === 'text' ? raw.value === null ? {} : JSON.parse(raw.value) : raw.value ?? {}); }
+    function writeRaw(raw) {
+      if (raw.kind === 'text') {
+        if (!globalThis.localStorage) throw new Error('No hay almacenamiento local disponible.');
+        if (raw.value === null) globalThis.localStorage.removeItem(KEY);
+        else globalThis.localStorage.setItem(KEY, raw.value);
+      } else if (typeof deps.save === 'function') {
+        if (syncResult(deps.save(cloneRaw(raw.value))) === false) throw new Error('No se pudo confirmar el guardado.');
+      } else if (typeof gmGet === 'function' && typeof gmSet === 'function') {
+        if (syncResult(gmSet(KEY, cloneRaw(raw.value))) === false) throw new Error('No se pudo confirmar el guardado.');
+      } else {
+        if (!globalThis.localStorage) throw new Error('No hay almacenamiento local disponible.');
+        globalThis.localStorage.setItem(KEY, JSON.stringify(raw.value));
+      }
+    }
+    function refreshConfig() {
+      if (destroyed) return false;
+      try {
+        const next = configFromRaw(readRaw());
+        if (!same(next, config)) { config = next; epoch += 1; }
+        readError = false;
+        render();
+        return true;
+      } catch (_) {
+        readError = true; storageError = true;
+        notice = 'No se pueden leer los reintentos guardados. El envío automático está detenido.';
+        render();
+        return false;
+      }
+    }
+    function ensureReady() {
+      if (destroyed) throw new Error('Los reintentos están cerrados.');
+      if (!refreshConfig() || !config) throw new Error('No se puede usar una configuración de reintentos inválida.');
+    }
+    function commit(value) {
+      if (destroyed) throw new Error('Los reintentos están cerrados.');
+      const next = validateConfig(value);
+      try { writeRaw({ kind: 'value', value: next }); }
+      catch (_) {
+        storageError = true;
+        notice = 'No se pudo guardar el cambio. Los reintentos necesitan guardar su estado antes de preparar una misión.';
+        render();
+        throw new Error('No se pudieron guardar los reintentos.');
+      }
+      config = next; epoch += 1; readError = false; storageError = false; notice = '';
+      render();
+      try { deps.onSettingsChange?.(); } catch (_) { /* Intent is already persisted. */ }
+      return copy(next);
+    }
+    function updateCampaign(id, transform) {
+      ensureReady();
+      const previous = config.campaigns.find(item => item.id === id);
+      if (!previous) throw new Error('La campaña ya no existe.');
+      const next = transform(copy(previous));
+      if (same(previous, next)) return copy(previous);
+      next.updatedAt = Math.max(now(), previous.updatedAt, next.updatedAt || 0);
+      commit({ ...config, campaigns: config.campaigns.map(item => item.id === id ? next : item) });
+      return copy(next);
+    }
+    function emit(campaign, stage, message) {
+      try { deps.send?.({ type: 'attack.retry', id: 'attack-retry:' + campaign.id + ':' + campaign.triggerReportId + ':' + stage,
+        title: 'Old Light', systemName: campaign.originName, message }); } catch (_) { /* Notifications do not change mission intent. */ }
+    }
+    function fleetText(value) { return SHIPS.filter(id => value[id] > 0).map(id => value[id] + ' ' + NAMES[id]).join(' · '); }
+    function currentContext() {
+      try {
+        const value = deps.getContext?.();
+        if (!object(value) || !SCOPE.test(value.scope || '') || !UUID.test(value.originId || '')) return null;
+        return { scope: value.scope, originId: value.originId.toLowerCase(), originName: value.originName,
+          selectionCount: value.selectionCount, active: value.active === true, canAct: value.canAct === true };
+      } catch (_) { return null; }
+    }
+    function mayAct(value) { return Boolean(value?.active && value.canAct && value.selectionCount === 1); }
+    function jobs() {
+      const value = syncResult(deps.getJobs?.());
+      if (!Array.isArray(value)) throw new Error('No se puede comprobar la cola de misiones.');
+      return value;
+    }
+    function specFor(campaign) {
+      return { scope: campaign.scope, originId: campaign.originId, originName: campaign.originName,
+        target: { mode: 'amounts', routeKey: '', presetKey: '', label: campaign.targetName,
+          coordinate: copy(campaign.targetCoordinate), originCoordinate: copy(campaign.originCoordinate) },
+        quantities: copy(campaign.quantities), produce: campaign.produce, autoSend: true };
+    }
+    function jobMatches(campaign, job) {
+      return Boolean(job && job.id === campaign.queueJobId && job.scope === campaign.scope && job.originId === campaign.originId &&
+        job.originName === campaign.originName && job.target?.mode === 'amounts' && job.target.routeKey === '' &&
+        job.target.presetKey === '' && job.target.label === campaign.targetName &&
+        sameCoordinate(job.target.coordinate, campaign.targetCoordinate) && sameCoordinate(job.target.originCoordinate, campaign.originCoordinate) &&
+        sameQuantities(job.quantities, campaign.quantities) && job.produce === campaign.produce && job.autoSend === true);
+    }
+    function jobOwned(campaign, job) {
+      return Boolean(job && job.id === campaign.queueJobId && job.scope === campaign.scope && job.originId === campaign.originId &&
+        sameCoordinate(job.target?.coordinate, campaign.targetCoordinate) &&
+        sameCoordinate(job.target?.originCoordinate, campaign.originCoordinate));
+    }
+    function controlOwnJob(campaign, action) {
+      if (!campaign.queueJobId) return true;
+      const job = jobs().find(item => item.id === campaign.queueJobId);
+      if (!job || !jobOwned(campaign, job)) return !job;
+      if (['sending', 'sent', 'uncertain'].includes(job.status) || job.needsReview) return false;
+      if ((action === 'pause' && job.status === 'paused') || (action === 'resume' && job.status === 'waiting')) return true;
+      const fn = action === 'cancel' ? deps.cancelJob : action === 'resume' ? deps.resumeJob : deps.pauseJob;
+      if (typeof fn !== 'function') return false;
+      syncResult(fn(job.id));
+      return true;
+    }
+    function canRunJob(job) {
+      // Ordinary preset missions retain their existing authorization. A retry must have
+      // current persisted authorization, including during the native adapter's final guard.
+      if (typeof job?.id !== 'string' || !job.id.startsWith('retry:')) return true;
+      if (destroyed) return false;
+      try {
+        const saved = configFromRaw(readRaw());
+        if (!saved.enabled) return false;
+        const campaign = saved.campaigns.find(item => item.queueJobId === job.id);
+        if (!campaign || campaign.status !== 'queued' ||
+            (saved.maxRetries !== 0 && campaign.retries >= saved.maxRetries) ||
+            !['waiting', 'sending'].includes(job.status) || job.needsReview || !jobMatches(campaign, job)) return false;
+        const live = jobs().find(item => item.id === job.id);
+        return Boolean(live && live.status === job.status && live.claimedAt === job.claimedAt &&
+          live.createdAt === job.createdAt && !live.needsReview && jobMatches(campaign, live));
+      } catch (_) { return false; }
+    }
+    function uncertain(campaign, message) {
+      return { ...campaign, status: 'uncertain', resumeStatus: null, message };
+    }
+    function reconcileOne(campaign, queue) {
+      if (!campaign.queueJobId || TERMINAL.includes(campaign.status)) return campaign;
+      const job = queue.find(item => item.id === campaign.queueJobId);
+      if (!job) {
+        if (campaign.sentAt !== null && campaign.lastSentQuantities) return campaign;
+        return uncertain(campaign, 'La misión pendiente ya no está en la cola. Comprueba si se envió o se canceló; no se recreará automáticamente.');
+      }
+      if (!jobMatches(campaign, job)) return uncertain(campaign, 'La misión guardada cambió. Comprueba su destino y su flota antes de continuar.');
+      if (job.status === 'uncertain' || job.needsReview) return uncertain(campaign, 'El envío no está confirmado. Comprueba las misiones del juego antes de volver a atacar.');
+      if (job.status === 'sent') {
+        const sentAt = stamp(job.sentAt);
+        if (sentAt === null || sentAt <= campaign.lastOutcomeAt) return uncertain(campaign, 'La confirmación de envío no tiene una fecha válida.');
+        if (campaign.sentAt !== null && campaign.sentAt !== sentAt) return uncertain(campaign, 'Hay dos confirmaciones distintas para el mismo reintento.');
+        const paused = campaign.status === 'paused';
+        return { ...campaign, status: paused ? 'paused' : 'awaiting_report', resumeStatus: paused ? 'awaiting_report' : null,
+          queueConfirmed: true, sentAt, lastSentQuantities: copy(campaign.quantities),
+          retries: campaign.sentAt === null ? campaign.retries + 1 : campaign.retries,
+          updatedAt: Math.max(campaign.updatedAt, sentAt), message: 'Ataque enviado. Esperando su resultado.' };
+      }
+      if (campaign.sentAt !== null) return uncertain(campaign, 'El estado del envío retrocedió. Comprueba las misiones del juego.');
+      if (job.status === 'paused' && campaign.status !== 'paused') return { ...campaign, status: 'paused',
+        resumeStatus: 'queued', queueConfirmed: true, message: 'La misión pendiente está en pausa.' };
+      if (!['waiting', 'paused', 'sending'].includes(job.status)) return uncertain(campaign, 'El estado de la misión no se reconoce.');
+      return { ...campaign, queueConfirmed: true, message: job.status === 'sending' ? 'Confirmando el envío del reintento…'
+        : campaign.status === 'paused' ? campaign.message : 'Esperando la flota completa para atacar.' };
+    }
+    function reconcile() {
+      ensureReady();
+      const queue = jobs();
+      const sent = [];
+      const campaigns = config.campaigns.map(previous => {
+        const next = reconcileOne(previous, queue);
+        if (previous.sentAt === null && next.sentAt !== null) sent.push(next);
+        return next;
+      });
+      if (!same(campaigns, config.campaigns)) commit({ ...config, campaigns });
+      for (const campaign of sent) emit(campaign, 'sent', 'Reintento ' + campaign.retries + ' enviado a ' + campaign.targetName + '.\n' + fleetText(campaign.quantities));
+      return queue;
+    }
+    function parseReport(value) {
+      if (!object(value) || !SCOPE.test(value.scope || '') || !object(value.item) || !object(value.detail)) return null;
+      const { item, detail } = value;
+      if (!UUID.test(item.id || '') || !UUID.test(detail.id || '') || item.id.toLowerCase() !== detail.id.toLowerCase()) return null;
+      const takenAt = stamp(item.takenAt), createdAt = stamp(detail.createdAt);
+      if (takenAt === null || (detail.createdAt !== undefined && (createdAt === null || createdAt !== takenAt)) || takenAt > now()) return null;
+      const route = detail.route, sections = detail.sections, variant = detail.variant;
+      if (!object(route) || !object(route.from) || !object(route.to) || !object(sections) || !object(sections.battle) ||
+          route.from.ownerKind !== 'owned' || !['human', 'npc', 'dormant'].includes(route.to.ownerKind) ||
+          sections.incoming != null || sections.probe != null || item.verdict === 'Probed' ||
+          sections.battle.targetOwnerKind === 'owned' || (variant != null && !object(variant)) ||
+          (variant?.kind && variant.kind !== 'capture_success')) return null;
+      let originCoordinate, targetCoordinate;
+      try { originCoordinate = coordinate({ q: route.from.q, r: route.from.r }); targetCoordinate = coordinate({ q: route.to.q, r: route.to.r }); }
+      catch (_) { return null; }
+      if (sameCoordinate(originCoordinate, targetCoordinate)) return null;
+      let verdict = item.verdict;
+      if (variant?.kind === 'capture_success' || sections.battle.loyaltyChange?.captured === true) verdict = 'Captured';
+      if (!['Defeat', 'Victory', 'Captured', 'Draw'].includes(verdict)) return null;
+      let amounts = null;
+      if (Array.isArray(sections.battle.attackerShips) && sections.battle.attackerShips.length <= SHIPS.length) {
+        const out = zeros(), found = new Set();
+        let valid = true;
+        for (const entry of sections.battle.attackerShips) {
+          if (!object(entry) || !SHIPS.includes(entry.type) || found.has(entry.type) || entry.kind !== 'exact' ||
+              entry.approximate === true || !Number.isSafeInteger(entry.quantity) || entry.quantity < 0 || entry.quantity > MAX_QUANTITY) { valid = false; break; }
+          found.add(entry.type); out[entry.type] = entry.quantity;
+        }
+        if (valid) try { amounts = quantities(out); } catch (_) { /* No exact offensive fleet. */ }
+      }
+      if ((verdict === 'Defeat' || verdict === 'Draw') && !amounts) return null;
+      let originName, targetName;
+      try { originName = text(route.from.name, 400); targetName = text(route.to.name, 500); } catch (_) { return null; }
+      return { scope: value.scope, id: item.id.toLowerCase(), takenAt, verdict, originCoordinate, targetCoordinate, originName, targetName, quantities: amounts };
+    }
+    function remember(value, report) {
+      const route = routeKey(report);
+      const next = { ...value,
+        processed: [...value.processed, { scope: report.scope, id: report.id, takenAt: report.takenAt }],
+        outcomes: [...value.outcomes.filter(item => routeKey(item) !== route), { scope: report.scope,
+          originCoordinate: copy(report.originCoordinate), targetCoordinate: copy(report.targetCoordinate),
+          takenAt: report.takenAt, reportId: report.id, verdict: report.verdict }] };
+      for (const field of ['processed', 'outcomes']) {
+        next[field].sort((a, b) => a.takenAt - b.takenAt);
+        const removed = next[field].splice(0, Math.max(0, next[field].length - MAX_HISTORY));
+        for (const item of removed) next.floorAt = Math.max(next.floorAt, item.takenAt);
+      }
+      return next;
+    }
+    function observeReport(value) {
+      if (destroyed) return false;
+      if (!refreshConfig()) throw new Error('No se pudieron leer los reintentos guardados. El informe sigue pendiente.');
+      if (!config.enabled) return false;
+      const report = parseReport(value);
+      if (!report || report.takenAt <= Math.max(config.enabledAt, config.floorAt) ||
+          config.processed.some(item => item.scope === report.scope && item.id === report.id)) return false;
+      const route = routeKey(report);
+      const outcome = config.outcomes.find(item => routeKey(item) === route);
+      if (outcome && report.takenAt <= outcome.takenAt) return false;
+      try { reconcile(); } catch (_) {
+        notice = 'No se puede comprobar la cola. El informe esperará antes de preparar otro ataque.'; render();
+        throw new Error(notice);
+      }
+      const previous = config.campaigns.find(item => routeKey(item) === route && !TERMINAL.includes(item.status));
+      let next = remember(copy(config), report), campaign = previous ? copy(previous) : null;
+      let stage = '', message = '';
+      if (report.verdict === 'Victory' || report.verdict === 'Captured') {
+        if (campaign) {
+          campaign.status = 'completed'; campaign.resumeStatus = null; campaign.lastOutcomeAt = report.takenAt;
+          campaign.updatedAt = Math.max(now(), campaign.updatedAt, report.takenAt);
+          campaign.message = report.verdict === 'Captured' ? 'Sistema capturado. No habrá más reintentos.' : 'Victoria confirmada. No habrá más reintentos.';
+          next.campaigns = next.campaigns.map(item => item.id === campaign.id ? campaign : item);
+          stage = 'completed'; message = campaign.message + '\nDestino: ' + campaign.targetName;
+        }
+      } else if (report.verdict === 'Draw') {
+        if (campaign) {
+          campaign.status = 'paused'; campaign.resumeStatus = null; campaign.lastOutcomeAt = report.takenAt;
+          campaign.updatedAt = Math.max(now(), campaign.updatedAt, report.takenAt);
+          campaign.message = 'Empate. Revisa este resultado antes de preparar otro ataque.';
+          next.campaigns = next.campaigns.map(item => item.id === campaign.id ? campaign : item);
+          stage = 'draw'; message = 'Reintentos en pausa tras un empate en ' + campaign.targetName + '.';
+        }
+      } else {
+        const stopped = !campaign && next.campaigns.find(item => routeKey(item) === route && TERMINAL.includes(item.status) &&
+          (sameQuantities(report.quantities, item.quantities) || sameQuantities(report.quantities, item.lastSentQuantities)));
+        if (stopped) { commit(next); return true; }
+        const continuing = campaign && (campaign.status === 'awaiting_report' || (campaign.status === 'paused' && campaign.resumeStatus === 'awaiting_report'));
+        if (campaign && (!continuing || campaign.sentAt === null || report.takenAt <= campaign.sentAt ||
+            !sameQuantities(report.quantities, campaign.lastSentQuantities))) {
+          campaign = uncertain(campaign, 'Otro informe de esta ruta no coincide con la flota del reintento esperado. Revisa los ataques antes de continuar.');
+          campaign.lastOutcomeAt = report.takenAt; campaign.updatedAt = Math.max(now(), campaign.updatedAt, report.takenAt);
+          next.campaigns = next.campaigns.map(item => item.id === campaign.id ? campaign : item);
+          stage = 'ambiguous'; message = 'Reintentos detenidos en ' + campaign.targetName + ': el resultado no coincide con el ataque esperado.';
+        } else if (!campaign && next.campaigns.length >= MAX_CAMPAIGNS) {
+          // Retain history even at capacity; otherwise the same report could create a delayed surprise attack.
+          commit(next); notice = 'Se alcanzó el límite de 32 campañas. Quita una campaña terminada antes de añadir más reintentos.'; render(); return false;
+        } else {
+          const paused = campaign?.status === 'paused';
+          const retries = campaign?.retries || 0;
+          const reached = config.maxRetries !== 0 && retries >= config.maxRetries;
+          const overflow = report.quantities.marauder >= MAX_QUANTITY;
+          const amounts = { ...report.quantities, marauder: report.quantities.marauder + (overflow || reached ? 0 : 1) };
+          campaign = { id: campaign?.id || 'attack:' + report.id, scope: report.scope,
+            originId: campaign?.originId || null, originName: campaign?.originName || report.originName,
+            originCoordinate: copy(report.originCoordinate), targetName: report.targetName, targetCoordinate: copy(report.targetCoordinate),
+            status: reached || overflow ? 'limit' : paused ? 'paused' : 'waiting_origin',
+            resumeStatus: paused && !reached && !overflow ? 'waiting_origin' : null,
+            createdAt: campaign?.createdAt || now(), updatedAt: Math.max(now(), campaign?.updatedAt || 0, report.takenAt),
+            lastOutcomeAt: report.takenAt, triggerReportId: report.id, retries, quantities: amounts,
+            lastSentQuantities: campaign?.lastSentQuantities || null, sentAt: null, queueJobId: null, queueConfirmed: false,
+            produce: config.produceMissing, message: reached ? 'Se alcanzó el máximo de reintentos configurado.'
+              : overflow ? 'Se alcanzó el límite de 50.000 Marauder. No se incrementará automáticamente.'
+                : paused ? 'Nueva derrota registrada. La campaña sigue en pausa.' : 'Selecciona el sistema de origen para preparar el siguiente ataque.' };
+          next.campaigns = previous ? next.campaigns.map(item => item.id === previous.id ? campaign : item) : [...next.campaigns, campaign];
+          stage = reached || overflow ? 'limit' : 'planned';
+          message = reached || overflow ? campaign.message + '\nDestino: ' + campaign.targetName
+            : 'Derrota en ' + campaign.targetName + '.\nSiguiente intento: ' + fleetText(campaign.quantities) + '.\n+1 Marauder respecto al ataque perdido.';
+        }
+      }
+      commit(next);
+      if (previous && campaign && ['completed', 'paused', 'uncertain'].includes(campaign.status)) {
+        try { controlOwnJob(previous, campaign.status === 'completed' ? 'cancel' : 'pause'); }
+        catch (_) { notice = 'No se pudo detener la misión pendiente. Comprueba la cola de misiones.'; render(); }
+      }
+      if (campaign && stage) emit(campaign, stage, message);
+      return true;
+    }
+    async function tick() {
+      if (destroyed || running || !refreshConfig()) return null;
+      let queue;
+      try { queue = reconcile(); } catch (_) { render(); return null; }
+      if (!config.enabled) {
+        for (const campaign of config.campaigns.filter(item => item.queueJobId && !TERMINAL.includes(item.status))) {
+          try { controlOwnJob(campaign, 'pause'); } catch (_) { /* Keep disabled even if native queue is unavailable. */ }
+        }
+        return null;
+      }
+      for (const campaign of config.campaigns) {
+        if (campaign.status === 'completed' || campaign.status === 'cancelled') {
+          try { controlOwnJob(campaign, 'cancel'); } catch (_) { /* Authorization gate remains closed until cleanup succeeds. */ }
+        }
+        if (campaign.status === 'paused' || campaign.status === 'uncertain' || campaign.status === 'limit') {
+          try { controlOwnJob(campaign, 'pause'); } catch (_) { /* Never create another order here. */ }
+        }
+      }
+      const current = currentContext();
+      if (!mayAct(current)) return null;
+      const candidate = config.campaigns.find(item => ['waiting_origin', 'waiting_slot'].includes(item.status) &&
+        item.scope === current.scope && (!item.originId || item.originId === current.originId) &&
+        (retryAfter.get(item.id) || 0) <= now());
+      if (!candidate || typeof deps.verifyOrigin !== 'function' || typeof deps.queueOnce !== 'function') return null;
+      if (config.maxRetries !== 0 && candidate.retries >= config.maxRetries) {
+        updateCampaign(candidate.id, item => ({ ...item, status: 'limit', message: 'Se alcanzó el máximo de reintentos configurado.' }));
+        return null;
+      }
+      if (queue.some(item => item.scope === current.scope && item.originId === current.originId && item.status !== 'sent')) {
+        updateCampaign(candidate.id, item => ({ ...item, status: 'waiting_slot', message: 'Este origen ya tiene una misión pendiente. El reintento esperará su turno.' }));
+        retryAfter.set(candidate.id, now() + 1000); return null;
+      }
+      running = true;
+      const token = epoch;
+      try {
+        const verified = await deps.verifyOrigin(copy(candidate), copy(current));
+        if (destroyed || !refreshConfig() || token !== epoch || !config.enabled) return null;
+        const latestContext = currentContext();
+        const saved = config.campaigns.find(item => item.id === candidate.id);
+        if (!saved || !['waiting_origin', 'waiting_slot'].includes(saved.status) || !mayAct(latestContext) ||
+            latestContext.scope !== current.scope || latestContext.originId !== current.originId ||
+            !verified || verified.originId?.toLowerCase() !== current.originId ||
+            !sameCoordinate(verified.coordinate, saved.originCoordinate)) {
+          retryAfter.set(candidate.id, now() + 2000); return null;
+        }
+        queue = jobs();
+        if (queue.some(item => item.scope === current.scope && item.originId === current.originId && item.status !== 'sent')) {
+          updateCampaign(saved.id, item => ({ ...item, status: 'waiting_slot', message: 'Este origen ya tiene una misión pendiente. El reintento esperará su turno.' }));
+          retryAfter.set(saved.id, now() + 1000); return null;
+        }
+        const originName = text(verified.name || saved.originName, 400);
+        const claimed = updateCampaign(saved.id, item => ({ ...item, originId: current.originId, originName,
+          status: 'queued', queueJobId: 'retry:' + item.triggerReportId, queueConfirmed: false,
+          produce: config.produceMissing, message: 'Guardando el siguiente ataque…' }));
+        // The claim is durable before the existing queue can create any mission or production demand.
+        if (destroyed || !refreshConfig() || !config.enabled) return null;
+        const live = config.campaigns.find(item => item.id === claimed.id);
+        const beforeQueue = currentContext();
+        if (!live || !same(live, claimed) || !mayAct(beforeQueue) || beforeQueue.scope !== current.scope ||
+            beforeQueue.originId !== current.originId) return null;
+        let created;
+        try { created = syncResult(deps.queueOnce(specFor(claimed), { id: claimed.queueJobId })); }
+        catch (_) {
+          try {
+            const existing = jobs().find(item => item.id === claimed.queueJobId);
+            if (!jobMatches(claimed, existing)) updateCampaign(claimed.id, item => uncertain(item,
+              'No se pudo confirmar que la misión quedara guardada. Comprueba la cola antes de volver a atacar.'));
+          } catch (_) { /* Durable claim prevents an automatic second enqueue. */ }
+          return null;
+        }
+        if (destroyed || !refreshConfig()) return null;
+        const active = config.campaigns.find(item => item.id === claimed.id);
+        if (!active || active.queueJobId !== claimed.queueJobId || active.status !== 'queued' || !config.enabled) {
+          try { controlOwnJob(claimed, 'pause'); } catch (_) { /* No new mission is created on invalidated intent. */ }
+          return null;
+        }
+        if (!jobMatches(claimed, created)) {
+          updateCampaign(claimed.id, item => uncertain(item, 'La cola no confirmó exactamente el destino y la flota previstos.'));
+          try { controlOwnJob(claimed, 'pause'); } catch (_) { /* Preserve the uncertainty. */ }
+          return null;
+        }
+        const result = updateCampaign(claimed.id, item => ({ ...item, queueConfirmed: true,
+          message: 'Esperando la flota completa para atacar.' }));
+        emit(result, 'queued', 'Reintento ' + (result.retries + 1) + ' preparado para ' + result.targetName + '.\n' + fleetText(result.quantities)
+          + (result.produce ? '\nSe producirán las naves necesarias y se enviará la flota cuando esté completa.' : '\nEsperando a que la flota completa esté en base.'));
+        return result;
+      } catch (_) {
+        retryAfter.set(candidate.id, now() + 2000); return null;
+      } finally { running = false; render(); }
+    }
+    function setConfig(patch) {
+      ensureReady();
+      if (!keys(patch, ['enabled', 'produceMissing', 'maxRetries', 'maxRetriesDraft', 'expanded'])) throw new TypeError('Ajustes de reintento no válidos.');
+      const next = { ...config, ...patch };
+      if (patch.enabled === true && !config.enabled) next.enabledAt = Math.max(1, now());
+      if (patch.maxRetries !== undefined && patch.maxRetriesDraft === undefined) next.maxRetriesDraft = String(patch.maxRetries);
+      const previous = copy(config);
+      if (patch.enabled === false) next.campaigns = next.campaigns.map(item => ACTIVE.includes(item.status)
+        ? { ...item, status: 'paused', resumeStatus: item.status, updatedAt: Math.max(now(), item.updatedAt), message: 'Reintentos desactivados. La campaña está en pausa.' } : item);
+      if (patch.maxRetries !== undefined && next.maxRetries !== 0) next.campaigns = next.campaigns.map(item =>
+        ACTIVE.includes(item.status) && item.sentAt === null && item.retries >= next.maxRetries
+          ? { ...item, status: 'limit', resumeStatus: null, updatedAt: Math.max(now(), item.updatedAt),
+            message: 'Se alcanzó el máximo de reintentos configurado.' } : item);
+      const saved = commit(next);
+      if (patch.enabled === false) for (const campaign of previous.campaigns) {
+        if (!TERMINAL.includes(campaign.status)) try { controlOwnJob(campaign, 'pause'); } catch (_) { /* State remains disabled. */ }
+      }
+      if (patch.maxRetries !== undefined) for (const campaign of saved.campaigns.filter(item => item.status === 'limit')) {
+        try { controlOwnJob(campaign, 'pause'); } catch (_) { /* Authorization gate enforces the new limit. */ }
+      }
+      return saved;
+    }
+    function pause(id) {
+      const saved = updateCampaign(id, item => {
+        if (!ACTIVE.includes(item.status)) throw new Error('Esta campaña no está activa.');
+        return { ...item, status: 'paused', resumeStatus: item.status, message: 'Campaña en pausa.' };
+      });
+      try { controlOwnJob(saved, 'pause'); } catch (_) { notice = 'Comprueba que la misión pendiente esté en pausa.'; render(); }
+      return saved;
+    }
+    function resume(id) {
+      ensureReady();
+      if (!config.enabled) throw new Error('Activa los reintentos antes de reanudar una campaña.');
+      const campaign = config.campaigns.find(item => item.id === id);
+      if (!campaign || campaign.status !== 'paused' || !campaign.resumeStatus) throw new Error('Esta campaña necesita revisión y no puede reanudarse automáticamente.');
+      const queue = jobs();
+      if (campaign.queueJobId && campaign.sentAt === null) {
+        const job = queue.find(item => item.id === campaign.queueJobId);
+        if (!jobMatches(campaign, job) || !['waiting', 'paused'].includes(job.status) || job.needsReview) {
+          throw new Error('No hay una misión pendiente confirmada que se pueda reanudar.');
+        }
+      }
+      if (config.maxRetries !== 0 && campaign.retries >= config.maxRetries && campaign.resumeStatus !== 'awaiting_report') {
+        throw new Error('Aumenta el máximo de reintentos antes de continuar.');
+      }
+      const saved = updateCampaign(id, item => ({ ...item, status: item.resumeStatus, resumeStatus: null, message: 'Campaña reanudada.' }));
+      if (saved.queueJobId && saved.sentAt === null) {
+        try { if (!controlOwnJob(saved, 'resume')) throw new Error('Misión no disponible.'); }
+        catch (_) {
+          updateCampaign(id, item => ({ ...item, status: 'paused', resumeStatus: saved.status, message: 'No se pudo reanudar la misión pendiente.' }));
+          throw new Error('No se pudo reanudar la misión pendiente.');
+        }
+      }
+      return saved;
+    }
+    function cancel(id) {
+      const saved = updateCampaign(id, item => ({ ...item, status: 'cancelled', resumeStatus: null, message: 'Campaña cancelada. No se prepararán más ataques.' }));
+      try { controlOwnJob(saved, 'cancel'); } catch (_) { notice = 'La campaña está cancelada; comprueba la misión que ya estaba pendiente.'; render(); }
+      return saved;
+    }
+    function remove(id) {
+      ensureReady();
+      const campaign = config.campaigns.find(item => item.id === id);
+      if (!campaign || !TERMINAL.includes(campaign.status)) throw new Error('Cancela la campaña antes de quitarla.');
+      commit({ ...config, campaigns: config.campaigns.filter(item => item.id !== id) });
+      return true;
+    }
+    function exportConfig() { ensureReady(); return copy(config); }
+    function importConfig(value) {
+      const next = validateConfig(value);
+      let previous = [];
+      try { previous = configFromRaw(readRaw()).campaigns; } catch (_) { /* Explicit import can repair corrupt configuration. */ }
+      next.enabled = false; next.enabledAt = 0;
+      next.campaigns = next.campaigns.map(item => TERMINAL.includes(item.status) ? item : { ...item,
+        status: 'paused', resumeStatus: item.status === 'uncertain' ? null : item.status === 'paused' ? item.resumeStatus : item.status,
+        updatedAt: Math.max(now(), item.updatedAt), message: item.status === 'uncertain'
+          ? 'Importada en pausa con un envío sin confirmar. Comprueba las misiones del juego.'
+          : 'Importada en pausa. Revisa el origen, el destino y la flota antes de reanudar.' });
+      const saved = commit(next);
+      for (const campaign of previous) {
+        try { controlOwnJob(campaign, 'pause'); } catch (_) { /* Imports never authorize outstanding old retry jobs. */ }
+      }
+      return saved;
+    }
+    function backupCheckpoint() {
+      if (destroyed) throw new Error('Los reintentos están cerrados.');
+      const token = Object.freeze({});
+      checkpoints.set(token, readRaw());
+      return token;
+    }
+    function restoreCheckpoint(token) {
+      if (destroyed) throw new Error('Los reintentos están cerrados.');
+      const raw = token && checkpoints.get(token);
+      if (!raw) throw new TypeError('El punto de recuperación de reintentos no es válido.');
+      writeRaw(raw); checkpoints.delete(token); epoch += 1;
+      refreshConfig();
+      try { deps.onSettingsChange?.(); } catch (_) { /* Exact original raw data is already restored. */ }
+      return true;
+    }
+    function showError(error) { notice = error?.message || 'No se pudo guardar el cambio.'; render(); }
+    function render() {
+      if (!mounted || !ui || destroyed) return;
+      const value = config || defaults();
+      ui.enable.checked = value.enabled;
+      ui.produce.checked = value.produceMissing;
+      ui.details.open = value.expanded;
+      if (ui.limit !== ui.limit.getRootNode().activeElement) ui.limit.value = value.maxRetriesDraft;
+      ui.limit.setAttribute('aria-invalid', /^(?:0|[1-9]\d{0,2})$/.test(value.maxRetriesDraft) && Number(value.maxRetriesDraft) <= 100 ? 'false' : 'true');
+      ui.limitHint.textContent = ui.limit.getAttribute('aria-invalid') === 'true'
+        ? 'Escribe un número de 0 a 100. Sigue vigente: ' + (value.maxRetries === 0 ? 'sin límite' : value.maxRetries) + '.'
+        : value.maxRetries === 0 ? 'Sin límite: seguirá sumando 1 Marauder tras cada derrota hasta ganar o pausar la campaña.'
+          : 'Como máximo ' + value.maxRetries + ' reintentos por campaña. 0 significa sin límite.';
+      ui.status.textContent = notice || (!value.enabled ? 'Desactivado. Al activarlo solo se procesarán informes nuevos.' : 'Activo para nuevos ataques fallidos.');
+      for (const input of [ui.enable, ui.produce, ui.limit]) input.disabled = readError;
+      const key = JSON.stringify([value.campaigns, value.enabled, readError]);
+      if (key === cardsKey) return;
+      cardsKey = key;
+      const doc = mounted.ownerDocument;
+      const el = (tag, content, className) => { const result = doc.createElement(tag); if (content !== undefined) result.textContent = content; if (className) result.className = className; return result; };
+      const labels = { waiting_origin: 'Esperando el origen', waiting_slot: 'Esperando turno', queued: 'Preparando flota',
+        awaiting_report: 'Esperando resultado', paused: 'En pausa', uncertain: 'Revisión necesaria', completed: 'Completada', cancelled: 'Cancelada', limit: 'Límite alcanzado' };
+      const cards = value.campaigns.map(campaign => {
+        const card = el('article'); card.dataset.attackRetryCampaign = campaign.id;
+        card.append(el('strong', campaign.targetName), el('p', 'Desde ' + campaign.originName + ' · (' + campaign.originCoordinate.q + ', ' + campaign.originCoordinate.r + ')', 'ar-muted'),
+          el('p', 'Destino: (' + campaign.targetCoordinate.q + ', ' + campaign.targetCoordinate.r + ')', 'ar-muted'),
+          el('p', fleetText(campaign.quantities)), el('p', labels[campaign.status] + ' · Reintentos enviados: ' + campaign.retries), el('p', campaign.message, 'ar-muted'));
+        const actions = el('div', undefined, 'ar-actions');
+        const button = (label, action, disabled = false) => { const control = el('button', label); control.type = 'button'; control.disabled = disabled || readError;
+          control.addEventListener('click', () => { try { action(); } catch (error) { showError(error); } }); actions.append(control); };
+        if (ACTIVE.includes(campaign.status)) button('Pausar', () => pause(campaign.id));
+        if (campaign.status === 'paused' && campaign.resumeStatus) button('Reanudar', () => resume(campaign.id), !value.enabled);
+        if (!TERMINAL.includes(campaign.status)) button('Cancelar campaña', () => cancel(campaign.id));
+        else button('Quitar', () => remove(campaign.id));
+        card.append(actions); return card;
+      });
+      ui.cards.replaceChildren(...cards);
+    }
+    function mount(container) {
+      if (destroyed || !container?.ownerDocument || typeof container.replaceChildren !== 'function') throw new TypeError('Contenedor de reintentos no válido.');
+      if (mounted === container && ui) { render(); return; }
+      if (mounted) mounted.replaceChildren();
+      mounted = container; cardsKey = '';
+      const doc = container.ownerDocument;
+      const el = (tag, content, className) => { const result = doc.createElement(tag); if (content !== undefined) result.textContent = content; if (className) result.className = className; return result; };
+      const details = el('details', undefined, 'oldlight-attack-retry');
+      details.dataset.attackRetry = '';
+      const style = el('style');
+      style.textContent = '.oldlight-attack-retry{font:inherit;color:inherit;min-width:0;max-width:100%;margin:12px 0}.oldlight-attack-retry summary{font-size:13px;font-weight:600;cursor:pointer}' +
+        '.oldlight-attack-retry p{font-size:12px;line-height:1.45;margin:7px 0;overflow-wrap:anywhere}.oldlight-attack-retry label{display:flex;align-items:flex-start;gap:7px;font-size:12px;margin:9px 0}' +
+        '.oldlight-attack-retry input[type=checkbox]{margin-top:2px}.oldlight-attack-retry input[type=text]{font:inherit;width:65px;max-width:100%;background:#152333;color:inherit;border:1px solid #52647c;border-radius:5px;padding:5px}' +
+        '.oldlight-attack-retry input[aria-invalid=true]{border-color:#e9a267}.oldlight-attack-retry .ar-muted{opacity:.75}.oldlight-attack-retry article{padding:10px;border:1px solid #3b4b60;border-radius:8px;margin:8px 0;min-width:0;overflow-wrap:anywhere}' +
+        '.oldlight-attack-retry .ar-actions{display:flex;flex-wrap:wrap;gap:6px}.oldlight-attack-retry button{font:inherit;font-size:12px;padding:5px 8px;max-width:100%;white-space:normal;border-radius:6px;border:1px solid #52647c;background:#223046;color:inherit;cursor:pointer}' +
+        '.oldlight-attack-retry button:disabled{opacity:.5;cursor:default}.oldlight-attack-retry .ar-status{color:#b8cbd9}';
+      details.append(style, el('summary', 'Reintentar ataques fallidos'));
+      const checkbox = (label, field) => { const row = el('label'), input = el('input'); input.type = 'checkbox'; input.dataset.attackRetryOption = field;
+        input.addEventListener('change', () => { try { setConfig({ [field]: input.checked }); } catch (error) { showError(error); } }); row.append(input, el('span', label)); details.append(row); return input; };
+      const enable = checkbox('Reintentar automáticamente con +1 Marauder tras una derrota', 'enabled');
+      const produce = checkbox('Producir las naves necesarias para nuevos reintentos', 'produceMissing');
+      const row = el('label'), limit = el('input'); limit.type = 'text'; limit.inputMode = 'numeric'; limit.maxLength = 16;
+      limit.dataset.attackRetryOption = 'maxRetries'; limit.setAttribute('aria-label', 'Máximo de reintentos; cero significa sin límite');
+      limit.addEventListener('input', () => {
+        const draft = limit.value.slice(0, 16); const patch = { maxRetriesDraft: draft };
+        if (/^(?:0|[1-9]\d{0,2})$/.test(draft) && Number(draft) <= 100) patch.maxRetries = Number(draft);
+        try { setConfig(patch); } catch (error) { showError(error); }
+      });
+      row.append(el('span', 'Máximo de reintentos'), limit); details.append(row);
+      const limitHint = el('p', '', 'ar-muted'), status = el('p', '', 'ar-status'), cards = el('div');
+      status.setAttribute('role', 'status'); limitHint.setAttribute('role', 'status');
+      details.append(limitHint, el('p', 'Conserva las demás naves del ataque. Espera a tener la flota completa en base y se detiene al ganar, capturar el sistema o encontrar un resultado dudoso.', 'ar-muted'), status, cards);
+      details.addEventListener('toggle', () => {
+        if (config && details.open !== config.expanded) try { setConfig({ expanded: details.open }); } catch (error) { showError(error); }
+      });
+      ui = { details, enable, produce, limit, limitHint, status, cards }; mounted.replaceChildren(details); render();
+    }
+    function destroy() { destroyed = true; epoch += 1; mounted?.replaceChildren(); mounted = null; ui = null; }
+    refreshConfig();
+    return { observeReport, tick, canRunJob, setConfig, pause, resume, cancel, remove, mount, exportConfig, validateConfig,
+      importConfig, backupCheckpoint, restoreCheckpoint, refreshConfig, destroy,
+      isEnabled: () => !destroyed && refreshConfig() && config.enabled,
+      getEnabledAt: () => !destroyed && refreshConfig() ? config.enabledAt : 0,
+      isBusy: () => running,
+      getDiagnostics: () => ({ enabled: config?.enabled ?? false, enabledAt: config?.enabledAt ?? 0,
+        running, readError, storageError, notice, count: config?.campaigns.length ?? null,
+        campaigns: config ? copy(config.campaigns) : [] }) };
+  }
+  // END ATTACK RETRY CONTROLLER
+
   // BEGIN FLEET WAIT INTEGRATION
+  async function verifyAttackRetryOrigin(campaign, context) {
+    const point = campaign?.originCoordinate;
+    if (!point || !Number.isSafeInteger(point.q) || !Number.isSafeInteger(point.r)
+        || !context?.canAct || context.selectionCount !== 1 || missionAdapter.isBusy()
+        || document.querySelector('dialog[open]')) return null;
+    const key = `${context.scope}/${context.originId}/${point.q},${point.r}`;
+    const previous = retryOriginChecks.get(key);
+    if (previous && Date.now() < previous.until) return previous.value;
+    let resolved = null;
+    let value = null;
+    try {
+      resolved = await missionTargetResolver.resolveTarget({ scope: context.scope, originId: context.originId,
+        target: { coordinate: point, label: campaign.originName || 'Origen del ataque' } });
+      const inspector = resolved?.inspector;
+      const current = missionContext();
+      // The native resolver already checks the exact point. An active-system
+      // Inspector has no Set active / Jump to button. Names are never identities.
+      if (current.scope === context.scope && current.originId === context.originId && current.selectionCount === 1
+          && inspector?.matches('dialog.info-modal[data-content-type="inspect"]')
+          && !inspector.querySelector('.info-modal-trailing .info-modal-header-btn')) {
+        value = { originId: current.originId, coordinate: { q: point.q, r: point.r }, name: current.originName };
+      }
+    } catch { /* The controller keeps the attack waiting for its verified origin. */ }
+    finally { if (typeof resolved?.cleanup === 'function') await resolved.cleanup(); }
+    if (retryOriginChecks.size >= 128) retryOriginChecks.delete(retryOriginChecks.keys().next().value);
+    retryOriginChecks.set(key, { value, until: Date.now() + (value ? 60000 : 15000) });
+    return value;
+  }
+
   function missionContext() {
     const galaxy = location.pathname.match(/^\/game\/galaxy\/([A-Za-z0-9_-]{1,64})(?:\/|$)/)?.[1] || '';
     let player = '';
@@ -4186,7 +5098,14 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
 
   function missionQueueContext() {
     return { ...missionContext(), active: canOperateMission(),
-      canAct: canOperateMission() && !missionAdapter?.isBusy() && !document.querySelector('dialog[open]') };
+      canAct: canOperateMission() && !missionAdapter?.isBusy() && !attackRetry?.isBusy()
+        && isRetryMissionAllowed(currentMissionJob()) && !document.querySelector('dialog[open]') };
+  }
+
+  function isRetryMissionAllowed(job) {
+    if (!job?.id?.startsWith('retry:')) return true;
+    try { return Boolean(attackRetry?.canRunJob(job)); }
+    catch { return false; }
   }
 
   function currentMissionJob() {
@@ -4389,6 +5308,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         ['game.reports', 'Informe del juego', '📋'],
         ['game.messages', 'Mensajes sin leer', '💬'],
         ['game.level_target', 'Objetivo de nivel alcanzado', '🎯'],
+        ['attack.retry', 'Reintentos de ataque', '🔁'],
       ] },
       { label: 'Problemas', enabled: true, entries: [
         ['request.failed', 'Pedido fallido', '❌'],
@@ -5337,11 +6257,14 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const Controller = own('AbortController') ? deps.AbortController
       : (typeof AbortController === 'function' ? AbortController : null);
     const send = typeof deps.send === 'function' ? deps.send : null;
+    const onReport = typeof deps.onReport === 'function' ? deps.onReport : null;
     const now = deps.now || (() => Date.now());
     const later = deps.setTimeout || ((fn, ms) => setTimeout(fn, ms));
     const cancelTimer = deps.clearTimeout || ((id) => clearTimeout(id));
     const getPathname = deps.getPathname || (() => globalThis.location?.pathname || '');
     const getHidden = deps.getHidden || (() => typeof document !== 'undefined' && document.hidden);
+    const getAccount = deps.getAccount || (() => '');
+    const getBaselineSince = deps.getBaselineSince || (() => null);
     const PREFIX = 'old-light-reports:runtime:v1:';
     const API = 'https://api.oldlight.io/api/galaxy/';
     const POLL_MS = 25000;
@@ -5363,6 +6286,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     let enabled = true;
     let destroyed = false;
     let slug = '';
+    let account = '';
     let epoch = 0;
     let checkpoint = blankCheckpoint();
     let pollTimer = null;
@@ -5410,10 +6334,18 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       } catch { return ''; }
     }
     function canRead() {
-      return !!slug && typeof fetchRead === 'function' && typeof Controller === 'function' && !!send;
+      return !!slug && typeof fetchRead === 'function' && typeof Controller === 'function' && !!(send || onReport);
+    }
+    function accountId() {
+      try { const value = getAccount(); return typeof value === 'string' && UUID.test(value) ? value : ''; }
+      catch { return ''; }
+    }
+    function checkpointKey() {
+      return PREFIX + slug + (account ? `:${account}` : '');
     }
     function current(token) {
-      try { return !destroyed && active && enabled && token === epoch && pathSlug() === slug && !getHidden(); }
+      try { return !destroyed && active && enabled && token === epoch && pathSlug() === slug
+        && accountId() === account && !getHidden(); }
       catch { return false; }
     }
     function fault(kind, status = 0, waitMs = 0) {
@@ -5458,6 +6390,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         out.scan = { before: cursor(saved.scan.before), floor: stamp(saved.scan.floor),
           high: stamp(saved.scan.high), anchors: anchors.filter((id) => typeof id === 'string' && UUID.test(id))
             .slice(0, MAX_SEEN + MAX_PENDING).map((id) => id.toLowerCase()) };
+        if (saved.scan.baseline === true && out.scan.floor !== null) out.scan.baseline = true;
       }
       if (!out.initialized || out.suspended) { out.pending = []; out.scan = null; }
       return out;
@@ -5466,14 +6399,14 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     function loadCheckpoint() {
       if (!slug) { checkpoint = blankCheckpoint(); return; }
       if (typeof gmGet !== 'function') return;
-      try { checkpoint = normalize(gmGet(PREFIX + slug, null)); storageError = false; }
+      try { checkpoint = normalize(gmGet(checkpointKey(), null)); storageError = false; }
       catch { storageError = true; }
     }
 
     function saveCheckpoint() {
       if (!slug || typeof gmSet !== 'function') return;
       try {
-        gmSet(PREFIX + slug, { ...checkpoint,
+        gmSet(checkpointKey(), { ...checkpoint,
           seen: checkpoint.seen.map((pair) => [...pair]),
           pending: checkpoint.pending.map((item) => ({ ...item })),
           scan: checkpoint.scan ? { ...checkpoint.scan, anchors: [...checkpoint.scan.anchors] } : null });
@@ -5570,9 +6503,24 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         assertCurrent(token);
         checkpoint = blankCheckpoint();
         checkpoint.initialized = true;
+        let since = null;
+        try { since = stamp(getBaselineSince()); } catch { /* The normal silent baseline still applies. */ }
+        let boundary = false;
         for (const item of page.items) {
-          remember(item);
+          // A just-enabled retry rule must see reports that arrived after it was
+          // enabled, even if this is the first page ever read in this account.
+          if (onReport && since !== null && item.takenAt !== null && item.takenAt > since) checkpoint.pending.push(item);
+          else remember(item);
+          if (since !== null && item.takenAt !== null && item.takenAt <= since) boundary = true;
           checkpoint.watermark = maxStamp(checkpoint.watermark, item.takenAt);
+        }
+        // A first-page watermark alone would permanently hide fresh reports on
+        // later pages. Continue the bounded scan from its cursor, preserving the
+        // strict enable-time boundary across reloads until it reaches history.
+        if (onReport && since !== null && !boundary && page.nextCursor !== null) {
+          checkpoint.scan = { before: page.nextCursor, floor: since, high: checkpoint.watermark,
+            anchors: [...checkpoint.seen.map(([id]) => id), ...checkpoint.pending.map(item => item.id)],
+            baseline: true };
         }
         saveCheckpoint();
         return;
@@ -5597,11 +6545,13 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         for (const item of page.items) {
           // Native pagination is newest first. Existing IDs or an older timestamp
           // delimit the preceding scan, regardless of changing read/unread flags.
-          if (anchors.has(item.id) || (scan.floor !== null && item.takenAt !== null && item.takenAt < scan.floor)) {
+          if (anchors.has(item.id) || (scan.floor !== null && item.takenAt !== null
+              && (scan.baseline ? item.takenAt <= scan.floor : item.takenAt < scan.floor))) {
             boundary = true; break;
           }
           scan.high = maxStamp(scan.high, item.takenAt);
           if (known.has(item.id)) continue;
+          if (scan.baseline && item.takenAt === null) { remember(item); known.add(item.id); continue; }
           if (checkpoint.pending.length >= MAX_PENDING) { full = true; break; }
           checkpoint.pending.push(item);
           known.add(item.id);
@@ -5841,7 +6791,15 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     function dispatch(item, detail, token, unavailable = '') {
       assertCurrent(token);
       try {
-        const result = send(reportEvent(item, detail, unavailable));
+        if (onReport) {
+          const observed = onReport({ scope: `${slug}/${account}`, item: { ...item }, detail });
+          if (observed && typeof observed.then === 'function') {
+            observed.catch?.(() => {});
+            throw new Error('La decisión del informe debe guardarse antes de continuar.');
+          }
+        }
+        assertCurrent(token);
+        const result = send?.(reportEvent(item, detail, unavailable));
         // emit() is normally synchronous. Do not create unhandled rejections if
         // an integration supplies a promise, and never await its Telegram queue.
         if (result && typeof result.catch === 'function') result.catch(() => {});
@@ -5930,14 +6888,16 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     function tick(input = {}) {
       if (destroyed) return getDiagnostics();
       const nextSlug = pathSlug();
+      const nextAccount = accountId();
       const nextEnabled = input.enabled !== false;
       let nextActive = nextEnabled && input.active === true;
       try { if (getHidden()) nextActive = false; } catch { nextActive = false; }
-      const changedSlug = nextSlug !== slug;
+      const changedSlug = nextSlug !== slug || nextAccount !== account;
       if (changedSlug) {
         active = false;
         stop();
         slug = nextSlug;
+        account = nextAccount;
         checkpoint = blankCheckpoint();
         loadCheckpoint();
         lastUnread = null; lastListAt = null; lastCycleAt = -Infinity;
