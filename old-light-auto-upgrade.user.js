@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.6.0
-// @description  Mejoras por prioridad con ETA, mínimos de naves, presets y misiones pendientes, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
+// @version      1.6.1
+// @description  Flota prioritaria con reserva de recursos y ETA, mejoras por prioridad, presets y misiones pendientes, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
 // @supportURL   https://github.com/alexx-ftw/old-light-auto-upgrade/issues
@@ -50,6 +50,7 @@
   const RETRY_GAP_MS = 5000;
   const MAX_UNCONFIRMED = 3;
   const upgradeEta = createUpgradeEtaEstimator();
+  const fleetPriority = createFleetPriorityPlanner(upgradeEta.formatDuration);
 
   if (window.top !== window.self || document.getElementById(HOST_ID)) return;
 
@@ -527,22 +528,87 @@
     return counts.building > request.building || newBatch;
   }
 
+  function readShipUnitCost(row) {
+    const maximum = exactInteger(row.input.max) || 1;
+    const quantity = Math.max(1, Math.min(maximum, Math.floor(Number(row.input.value)) || 1));
+    const visible = controlVisible(row.row.querySelector('.ship-cost'), FLEET_PANEL);
+    return Object.fromEntries([['palladium', 'pa'], ['iridium', 'ir']].map(([id, suffix]) => {
+      const cost = visible ? displayedInteger(row.row.querySelector(`.ship-cost .b-cost-${suffix}`)) : null;
+      return [id, cost === null ? null : Math.ceil(cost / quantity)];
+    }));
+  }
+
+  function readFleetPrioritySnapshot(ships = shipRows(), resources = readResourceSnapshot()) {
+    const maintain = fleetEnabled();
+    const job = currentMissionJob();
+    const waiting = job?.status === 'waiting';
+    const fleet = new Map(settings.shipOrder.map(id => [id, fleetCounts(id)]));
+    // Reading the forecast must not finish or persist a mission job. Keep its
+    // demand even while a native dialog temporarily prevents acting on it.
+    const missionDemand = waiting && job.produce && !job.needsReview
+      ? fleetWait.productionPlan(job, fleet)?.production : null;
+    const missionCanAct = missionQueueContext().canAct;
+    const contextReady = Boolean(systemId()) && settings.shipOrder.every(id =>
+      !(settings.shipMinimums[id] > 0 || waiting) || Boolean(fleet.get(id)));
+    const byId = new Map(ships.map(row => [row.id, row]));
+    const targets = settings.shipOrder.map(id => {
+      const counts = fleet.get(id);
+      const row = byId.get(id);
+      const minimumDeficit = counts && maintain ? fleetDeficit(id, counts) : 0;
+      const missionDeficit = missionDemand?.[id] || 0;
+      const deficit = counts ? Math.max(minimumDeficit, missionDeficit) : 0;
+      const availableDemand = missionCanAct ? deficit : minimumDeficit;
+      const nativeReason = row?.button.getAttribute('title') || '';
+      let blocker = 'unknown';
+      if (!row) blocker = 'unavailable';
+      else if (row.row.classList.contains('ship-row-locked') || /^Requires\b/i.test(nativeReason)) blocker = 'locked';
+      else if (row.button.classList.contains('b-upgrade-error')) blocker = 'error';
+      else if (!controlVisible(row.input, FLEET_PANEL) || row.input.matches(':disabled')
+          || !controlVisible(row.button, FLEET_PANEL)) blocker = 'unavailable';
+      else if (document.activeElement === row.input) blocker = 'manual';
+      else if (isAvailable(row.button, FLEET_PANEL)) blocker = 'ready';
+      else if (/^Build queue full\.?$/i.test(nativeReason)) blocker = 'queue';
+      else if (/^(?:Not enough resources|No selected system can afford this batch)\.?$/i.test(nativeReason)) blocker = 'resources';
+      if (missionDeficit > 0 && !availableDemand && !['locked', 'error', 'unavailable'].includes(blocker)) blocker = 'mission';
+      return { id, name: SHIPS.find(([key]) => key === id)[1], deficit, blocker, nativeReason,
+        maxBatch: Math.min(row ? exactInteger(row.input.max) || 1 : 1, Math.max(1, availableDemand)),
+        unitCost: row ? readShipUnitCost(row) : { palladium: null, iridium: null } };
+    });
+    const activeTimes = [];
+    const identity = [];
+    let paused = false;
+    for (const node of document.querySelectorAll(`${FLEET_PANEL} [data-field="ship-queue-list"] .queue-row`)) {
+      const label = text(node.querySelector('.queue-row-text'));
+      const queued = node.classList.contains('queue-row-queued');
+      const stopped = node.classList.contains('queue-row-paused');
+      identity.push(`${stopped ? 'paused' : queued ? 'queued' : 'active'}:${label.replace(/ · [\d\sdhms]+$/, '')}`);
+      if (stopped) paused = true;
+      if (queued || stopped) continue;
+      activeTimes.push(upgradeEta.parseDuration(label.split(' · ').at(-1)));
+    }
+    const garrison = document.querySelector('[data-field="garrison"].active-garrison-chip--full');
+    const treasuryAlert = document.querySelector(`${FLEET_PANEL} .shipyard-deficit-alert`);
+    return { active: maintain || waiting, contextReady, resources, ships: targets,
+      cooldownMs: Math.max(0, nextClickAt - Date.now()), docksFull: Boolean(garrison && isVisible(garrison)),
+      treasuryBlocked: Boolean(treasuryAlert && controlVisible(treasuryAlert, FLEET_PANEL))
+        || targets.some(row => /^Treasury in deficit:/i.test(row.nativeReason)),
+      queue: { full: ships.some(row => /^Build queue full\.?$/i.test(row.button.getAttribute('title') || '')),
+        paused, identity,
+        waitMs: activeTimes.length && activeTimes.every(value => value !== null) ? Math.min(...activeTimes) : null } };
+  }
+
   function prepareShip(row, deficit) {
     if (row.row.classList.contains('ship-row-locked') ||
         row.button.classList.contains('b-upgrade-error') ||
         !controlVisible(row.input, FLEET_PANEL) || row.input.matches(':disabled') ||
         document.activeElement === row.input) return 0;
     const maximum = exactInteger(row.input.max) || 1;
-    const currentQuantity = Math.max(1, Math.min(maximum, Math.floor(Number(row.input.value)) || 1));
     let quantity = Math.min(deficit, maximum);
     const pa = displayedInteger(document.querySelector('[data-field="res-palladium"]'));
     const ir = displayedInteger(document.querySelector('[data-field="res-iridium"]'));
-    const costPa = displayedInteger(row.row.querySelector('.ship-cost .b-cost-pa'));
-    const costIr = displayedInteger(row.row.querySelector('.ship-cost .b-cost-ir'));
-    if ([pa, ir, costPa, costIr].every(value => value !== null)) {
+    const { palladium: perPa, iridium: perIr } = readShipUnitCost(row);
+    if ([pa, ir, perPa, perIr].every(value => value !== null)) {
       // Los costes mostrados son del lote entero, no de una sola nave.
-      const perPa = Math.ceil(costPa / currentQuantity);
-      const perIr = Math.ceil(costIr / currentQuantity);
       if (perPa > 0) quantity = Math.min(quantity, Math.floor(pa / perPa));
       if (perIr > 0) quantity = Math.min(quantity, Math.floor(ir / perIr));
     } else {
@@ -634,8 +700,8 @@
       ? reactorNeeded && !queuedBuilding('reactor') : !needsPower(row));
   }
 
-  function readUpgradeEtaSnapshot(current) {
-    const resources = Object.fromEntries(['palladium', 'iridium'].map(id => {
+  function readResourceSnapshot() {
+    return Object.fromEntries(['palladium', 'iridium'].map(id => {
       const cap = document.querySelector(`[data-field="res-${id}-cap"]`);
       return [id, {
         amount: displayedInteger(document.querySelector(`[data-field="res-${id}"]`)),
@@ -643,6 +709,9 @@
         rate: upgradeEta.parseRate(text(document.querySelector(`[data-field="res-${id}-rate"]`))),
       }];
     }));
+  }
+
+  function readUpgradeEtaSnapshot(current, resources = readResourceSnapshot()) {
     const buildings = current.map(row => {
       const nativeReason = row.button.getAttribute('title') || '';
       const visible = controlVisible(row.button, PANEL) && controlVisible(row.row.querySelector('.b-cost'), PANEL);
@@ -675,7 +744,6 @@
     return { resources, buildings, energy: signedInteger(document.querySelector('[data-field="res-energy"]')),
       order: settings.order, excluded: settings.excluded, depotFillPercent: settings.depotFillPercent,
       cooldownMs: Math.max(0, nextClickAt - Date.now()),
-      fleetPriority: fleetEnabled() || Boolean(currentMissionJob()?.produce),
       queue: { buildings: queued, full: buildings.some(row => row.blocker === 'queue'),
         identity: queueIdentity,
         waitMs: activeTimes.length && activeTimes.every(value => value !== null) ? Math.min(...activeTimes) : null } };
@@ -683,11 +751,12 @@
 
   function renderUpgradeEta() {
     const state = (status, detail, request = null) => ({ state: status, detail, waitMs: null,
-      name: request?.kind === 'ship' ? '' : request?.name || '',
+      kind: request?.kind === 'ship' ? 'ship' : request ? 'building' : '',
+      name: request?.name || '', shipId: request?.kind === 'ship' ? request.id : '', quantity: request?.quantity || 0,
       buildingId: request?.kind === 'ship' ? '' : request?.id || '', targetLevel: request?.targetLevel ?? null });
     let forecast;
     let clockKey = '';
-    if (!settings.enabled) forecast = state('paused', 'Reanuda el helper para continuar con las mejoras.');
+    if (!settings.enabled) forecast = state('paused', 'Reanuda el helper para continuar con la flota y las mejoras.');
     else if (pending) forecast = state('busy', pending.kind === 'ship' ? 'Esperando confirmación del pedido de naves.'
       : 'Esperando confirmación de la mejora solicitada.', pending);
     else if (document.hidden) forecast = state('blocked', 'Vuelve a esta pestaña para leer los datos actuales.');
@@ -699,22 +768,34 @@
     else if (importingBackup || missionAdapter?.isBusy()
         || document.querySelector(`${PANEL} .b-loading, ${FLEET_PANEL} .b-loading`)) {
       forecast = state('busy', 'Se recalculará al terminar la operación en curso.');
-    } else if (settings.excluded.length === BUILDINGS.length) forecast = state('idle', 'Marca los edificios que quieras mejorar.');
-    else if (!leader) forecast = state('blocked', 'Esperando control de esta pestaña.');
+    } else if (!leader) forecast = state('blocked', 'Esperando control de esta pestaña.');
     else {
-      const snapshot = readUpgradeEtaSnapshot(rows());
-      forecast = upgradeEta.estimate(snapshot);
+      const resources = readResourceSnapshot();
+      const snapshot = readUpgradeEtaSnapshot(rows(), resources);
+      const fleetSnapshot = readFleetPrioritySnapshot(shipRows(), resources);
+      const fleetPlan = fleetPriority.select(fleetSnapshot);
+      if (fleetPlan.reserve) forecast = fleetPriority.estimate(fleetSnapshot, fleetPlan);
+      else {
+        forecast = upgradeEta.estimate(snapshot);
+        if (fleetPlan.target) {
+          if (['ready', 'waiting'].includes(forecast.state)) {
+            forecast.detail = `${fleetPlan.notice} ${forecast.detail}`;
+          } else forecast = fleetPriority.estimate(fleetSnapshot, fleetPlan);
+        }
+      }
       clockKey = JSON.stringify({ ...snapshot, system: systemId(), nextClickAt, cooldownMs: 0,
-        queue: { ...snapshot.queue, waitMs: null } });
+        queue: { ...snapshot.queue, waitMs: null }, fleet: { ...fleetSnapshot, cooldownMs: 0,
+          queue: { ...fleetSnapshot.queue, waitMs: null } } });
     }
     // The HUD floors resource amounts. Keep a running clock between native
     // changes instead of freezing until the next whole unit is produced.
     // A new quote, target, queue, system or setting always replaces this clock.
     if (clockKey && forecast.waitMs > 0) {
       const now = Date.now();
-      if (!upgradeEtaClock || upgradeEtaClock.key !== clockKey || upgradeEtaClock.id !== forecast.buildingId
+      const actionId = forecast.shipId ? `ship:${forecast.shipId}` : `building:${forecast.buildingId}`;
+      if (!upgradeEtaClock || upgradeEtaClock.key !== clockKey || upgradeEtaClock.id !== actionId
           || forecast.waitMs > upgradeEtaClock.rawMs + 1) {
-        upgradeEtaClock = { key: clockKey, id: forecast.buildingId, readyAt: now + forecast.waitMs };
+        upgradeEtaClock = { key: clockKey, id: actionId, readyAt: now + forecast.waitMs };
       }
       upgradeEtaClock.rawMs = forecast.waitMs;
       upgradeEtaClock.readyAt = Math.min(upgradeEtaClock.readyAt, now + forecast.waitMs);
@@ -727,11 +808,14 @@
     const numeric = Number.isFinite(forecast.waitMs);
     const duration = numeric ? (forecast.waitMs > 0 ? `≈${upgradeEta.formatDuration(forecast.waitMs)}` : 'Disponible')
       : forecast.state === 'paused' ? 'En pausa' : forecast.state === 'busy' ? 'Confirmando…' : 'Sin ETA';
-    const target = forecast.name ? `${forecast.name}${forecast.targetLevel !== null ? ` · nivel ${forecast.targetLevel}` : ''}`
-      : 'Próxima mejora automática';
-    const explanation = 'Tiempo estimado hasta poder encolar la siguiente mejora, con la producción actual. '
+    const target = forecast.name ? forecast.kind === 'ship' ? `${forecast.name} ×${forecast.quantity}`
+      : `${forecast.name}${forecast.targetLevel !== null ? ` · nivel ${forecast.targetLevel}` : ''}`
+      : 'Próximo pedido automático';
+    const explanation = 'Tiempo estimado hasta poder encolar el siguiente pedido de flota o mejora, con la producción actual. '
       + 'Se recalcula al cambiar recursos, costes, cola o prioridades. Otros gastos y las construcciones que terminen pueden cambiar la previsión.';
     ui.eta.dataset.state = forecast.state;
+    ui.eta.dataset.kind = forecast.kind || (forecast.buildingId ? 'building' : '');
+    ui.eta.dataset.shipId = forecast.shipId || '';
     ui.eta.dataset.buildingId = forecast.buildingId || '';
     if (numeric) ui.etaTime.dataset.seconds = String(Math.ceil(forecast.waitMs / 1000));
     else delete ui.etaTime.dataset.seconds;
@@ -879,8 +963,8 @@
             <button type="button" class="helper-minimize" data-action="helper-minimize" aria-expanded="true" aria-label="Minimizar helper" title="Minimizar helper">−</button>
           </header>
           <p role="status"></p><small></small>
-          <div class="upgrade-eta" data-field="upgrade-eta" aria-label="Tiempo hasta la siguiente mejora automática">
-            <div class="upgrade-eta-heading"><span>Siguiente mejora</span><strong class="upgrade-eta-time" data-field="upgrade-eta-time"></strong></div>
+          <div class="upgrade-eta" data-field="upgrade-eta" aria-label="Tiempo hasta el siguiente pedido automático de flota o mejora">
+            <div class="upgrade-eta-heading"><span>Siguiente acción</span><strong class="upgrade-eta-time" data-field="upgrade-eta-time"></strong></div>
             <div class="upgrade-eta-target" data-field="upgrade-eta-target"></div>
             <small class="upgrade-eta-detail" data-field="upgrade-eta-detail"></small>
           </div>
@@ -908,7 +992,7 @@
             <div class="fleet-choices" role="list" aria-label="Mínimos y prioridad de naves"></div>
             <label class="count-away"><input type="checkbox">Contar también las naves en misión</label>
             <button type="button" class="reset-ships">Restablecer orden de naves</button>
-            <p class="hint">Se descuentan las naves ya en construcción. La reposición disponible tiene prioridad sobre las mejoras.</p>
+            <p class="hint">Se descuentan las naves ya en construcción. La flota tiene prioridad y reserva recursos antes de mejorar edificios.</p>
             <div data-field="fleet-wait"></div>
             <div class="fleet-shortcut">
               <label><input type="checkbox" data-setting="shift-preset-shortcut">Shift + clic: mostrar presets de flota</label>
@@ -1166,7 +1250,7 @@
     return {
       format: 'old-light-auto-upgrade-backup',
       schemaVersion: 1,
-      scriptVersion: '1.6.0',
+      scriptVersion: '1.6.1',
       exportedAt: new Date().toISOString(),
       settings: normalizeSettings(settings),
       notifications: notifier.exportConfig(),
@@ -1732,46 +1816,36 @@
       return;
     }
 
-    let fleetNotice = '';
     let fleetCandidate = null;
     const activeSystem = systemId();
-    if (maintainFleet || hasWaitingMission) {
-      const fleet = new Map(settings.shipOrder.map(id => [id, fleetCounts(id)]));
-      const missionDemand = fleetWait.productionDemand(missionQueueContext(), fleet);
-      const needed = (id, counts) => Math.max(maintainFleet ? fleetDeficit(id, counts) : 0, missionDemand?.[id] || 0);
-      const unknown = !activeSystem || settings.shipOrder.some(id =>
-        (settings.shipMinimums[id] > 0 || hasWaitingMission) && !fleet.get(id));
-      const full = document.querySelector('[data-field="garrison"].active-garrison-chip--full');
-      if (unknown) {
-        fleetNotice = 'Naves: selecciona un solo sistema con recuentos disponibles';
-      } else if (full && isVisible(full)) {
-        fleetNotice = 'Naves: esperando espacio en los muelles';
-      } else {
-        const byId = new Map(ships.map(row => [row.id, row]));
-        for (const id of settings.shipOrder) {
-          if (!settings.shipMinimums[id] && !missionDemand?.[id]) continue;
-          const counts = fleet.get(id);
-          const deficit = needed(id, counts);
-          if (deficit === 0) continue;
-          fleetNotice = 'Naves: esperando recursos, desbloqueo o hueco en la cola';
-          const row = byId.get(id);
-          const quantity = row ? prepareShip(row, deficit) : 0;
-          if (!quantity) continue;
-          const latest = fleetCounts(id);
-          const latestDemand = fleetWait.productionDemand(missionQueueContext(), currentMissionFleet());
-          const latestNeed = latest ? Math.max(maintainFleet ? fleetDeficit(id, latest) : 0, latestDemand?.[id] || 0) : 0;
-          if (activeSystem !== systemId() || !latest || latestNeed < quantity) break;
-          fleetCandidate = { ...row, kind: 'ship', quantity, system: activeSystem,
-            fleetTotal: fleetTotal(latest), building: latest.building, batches: shipBatches(id),
-            feedbackLine: shipFeedbackLine(), target: `×${quantity}` };
-          break;
-        }
-        if (!fleetNotice) fleetNotice = 'Mínimos de naves cubiertos o ya en construcción';
+    const fleetSnapshot = readFleetPrioritySnapshot(ships);
+    const fleetPlan = fleetPriority.select(fleetSnapshot);
+    if (fleetPlan.reserve && fleetPlan.target) {
+      const row = ships.find(item => item.id === fleetPlan.target.id);
+      const quantity = row && fleetPlan.target.blocker !== 'mission' ? prepareShip(row, fleetPlan.target.quantity) : 0;
+      if (!quantity) {
+        show(`Flota prioritaria: ${fleetPlan.target.name} ×${fleetPlan.target.quantity}.`);
+        return;
       }
+      // Changing the native quantity can synchronously update selection, counts,
+      // resources or mission demand. Revalidate the same priority before clicking.
+      const latestSnapshot = readFleetPrioritySnapshot(shipRows());
+      const latestPlan = fleetPriority.select(latestSnapshot);
+      const latest = fleetCounts(row.id);
+      if (activeSystem !== systemId() || !latest || !latestPlan.reserve
+          || latestPlan.target?.id !== row.id || latestPlan.target.deficit < quantity
+          || latestPlan.target.quantity < quantity
+          || !isAvailable(row.button, FLEET_PANEL)) {
+        show('La flota ha cambiado; recalculando su prioridad.');
+        return;
+      }
+      fleetCandidate = { ...row, kind: 'ship', quantity, system: activeSystem,
+        fleetTotal: fleetTotal(latest), building: latest.building, batches: shipBatches(row.id),
+        feedbackLine: shipFeedbackLine(), target: `×${quantity}` };
     }
 
     const candidate = fleetCandidate || selectBuilding(current);
-    if (!candidate) { show(fleetNotice || 'Esperando recursos o hueco en la cola…'); return; }
+    if (!candidate) { show(fleetPlan.notice || 'Esperando recursos o hueco en la cola…'); return; }
 
     // Registra la petición ANTES del clic: el juego puede actualizarse de forma síncrona.
     const request = { ...candidate, system: activeSystem, systemName: text(document.querySelector('[data-field="nameplate-name"]')),
@@ -1797,6 +1871,132 @@
       console.warn('[Old Light Auto Upgrade]', cause);
     }
   }
+
+  // BEGIN FLEET PRIORITY PLANNER
+  function createFleetPriorityPlanner(formatDuration) {
+    const RESOURCES = ['palladium', 'iridium'];
+    const NAMES = { palladium: 'Palladium', iridium: 'Iridium' };
+    const finiteAmount = value => Number.isFinite(value) && value >= 0;
+    const costKnown = ship => RESOURCES.every(id => finiteAmount(ship.unitCost?.[id]));
+
+    function select(snapshot) {
+      const none = (notice = '', blocker = '') => ({ target: null, reserve: false, notice, blocker });
+      if (!snapshot.active) return none();
+      if (!snapshot.contextReady) return none('Naves: selecciona un solo sistema con recuentos disponibles.', 'context');
+      const ships = (snapshot.ships || []).filter(ship => Number.isSafeInteger(ship.deficit) && ship.deficit > 0);
+      if (!ships.length) return none('Mínimos de naves cubiertos o ya en construcción.', 'satisfied');
+      const resources = snapshot.resources || {};
+      let firstBlocked = null;
+      for (const ship of ships) {
+        let blocker = '';
+        let notice = '';
+        if (snapshot.docksFull) {
+          blocker = 'docks'; notice = `${ship.name}: esperando espacio en los muelles.`;
+        } else if (snapshot.treasuryBlocked) {
+          blocker = 'treasury'; notice = `${ship.name}: la tesorería bloquea la producción de naves.`;
+        } else if (snapshot.queue?.paused) {
+          blocker = 'paused-queue'; notice = `${ship.name}: la cola de naves está detenida.`;
+        } else if (ship.blocker === 'locked') {
+          blocker = 'locked'; notice = `${ship.name}: requisito pendiente${ship.nativeReason ? ` (${ship.nativeReason})` : ''}.`;
+        } else if (['error', 'unavailable'].includes(ship.blocker)) {
+          blocker = ship.blocker; notice = `${ship.name}: el juego no permite producirla ahora${ship.nativeReason ? ` (${ship.nativeReason})` : ''}.`;
+        } else if (costKnown(ship) && RESOURCES.some(id => Number.isFinite(resources[id]?.cap)
+            && resources[id].cap > 0 && ship.unitCost[id] > resources[id].cap)) {
+          blocker = 'capacity'; notice = `${ship.name}: una nave supera la capacidad actual del Resource Depot.`;
+        } else if (costKnown(ship)) {
+          const missing = RESOURCES.find(id => finiteAmount(resources[id]?.amount)
+            && ship.unitCost[id] > resources[id].amount && Number.isFinite(resources[id]?.rate) && resources[id].rate <= 0);
+          if (missing) {
+            blocker = 'production'; notice = `${ship.name}: falta ${NAMES[missing]} y su producción no es positiva.`;
+          }
+        }
+
+        const maximum = Number.isSafeInteger(ship.maxBatch) && ship.maxBatch > 0 ? ship.maxBatch : 1;
+        let quantity = Math.min(ship.deficit, maximum);
+        if (costKnown(ship) && RESOURCES.every(id => finiteAmount(resources[id]?.amount))) {
+          for (const id of RESOURCES) if (ship.unitCost[id] > 0) {
+            quantity = Math.min(quantity, Math.floor(resources[id].amount / ship.unitCost[id]));
+          }
+        } else quantity = 1;
+        // The next order may be a partial batch. If even one ship is unaffordable,
+        // reserve for one instead of forecasting the cost of the entire minimum.
+        quantity = Math.max(1, quantity);
+        const target = { ...ship, quantity, cost: Object.fromEntries(RESOURCES.map(id =>
+          [id, finiteAmount(ship.unitCost?.[id]) ? ship.unitCost[id] * quantity : null])) };
+        if (blocker) {
+          if (!firstBlocked) firstBlocked = { target, reserve: false, blocker, notice };
+          continue;
+        }
+        return { target, reserve: true, blocker: '', notice: `Flota prioritaria: ${ship.name}. Reservando recursos antes de mejorar edificios.` };
+      }
+      return firstBlocked || none();
+    }
+
+    function estimate(snapshot, plan = select(snapshot)) {
+      const ship = plan.target;
+      const result = (state, detail, waitMs = null, reason = '') => ({ state, detail, waitMs, reason,
+        kind: ship ? 'ship' : '', shipId: ship?.id || '', buildingId: '', name: ship?.name || '',
+        quantity: ship?.quantity || 0, targetLevel: null });
+      if (!ship) return result(plan.blocker === 'context' ? 'blocked' : 'idle', plan.notice);
+      const reservation = 'Se reservan recursos para la flota; los edificios esperan.';
+      if (!plan.reserve) return result('blocked', plan.notice, null, plan.blocker);
+      const resources = snapshot.resources || {};
+      if (!costKnown(ship) || RESOURCES.some(id => !finiteAmount(resources[id]?.amount)
+          || !Number.isFinite(resources[id]?.cap) || resources[id].cap <= 0)) {
+        return result('blocked', `Esperando recursos, capacidad y costes exactos de ${ship.name}. ${reservation}`, null, 'data');
+      }
+      if (ship.blocker === 'manual') {
+        return result('blocked', `Termina de editar la cantidad de ${ship.name} en el astillero. ${reservation}`, null, 'manual');
+      }
+      if (ship.blocker === 'mission') {
+        return result('blocked', `La producción de la misión espera a que se cierren los diálogos y el juego permita actuar. ${reservation}`, null, 'mission');
+      }
+      if (!['ready', 'resources', 'queue'].includes(ship.blocker)) {
+        return result('blocked', `Esperando disponibilidad de ${ship.name} en el juego. ${reservation}`, null, 'native');
+      }
+      const queue = snapshot.queue || {};
+      const full = queue.full || ship.blocker === 'queue';
+      if (full && (!Number.isFinite(queue.waitMs) || queue.waitMs < 0)) {
+        return result('blocked', `Cola de naves llena: el juego no muestra cuándo se libera un hueco. ${reservation}`, null, 'queue');
+      }
+      if (full && queue.waitMs === 0) {
+        return result('blocked', `Esperando a que el juego confirme el hueco libre en la cola de naves. ${reservation}`, null, 'refresh');
+      }
+      let waitMs = Math.max(0, snapshot.cooldownMs || 0, full ? queue.waitMs : 0);
+      for (const id of RESOURCES) {
+        const resource = resources[id];
+        if (ship.cost[id] > resource.cap) return result('blocked', `El pedido de ${ship.name} supera la capacidad del Depot.`, null, 'capacity');
+        if (ship.cost[id] <= resource.amount) continue;
+        if (!Number.isFinite(resource.rate) || resource.rate <= 0) {
+          return result('blocked', `No se puede estimar la producción de ${NAMES[id]}. ${reservation}`, null, 'rate');
+        }
+        waitMs = Math.max(waitMs, (ship.cost[id] - resource.amount) / resource.rate * 60000);
+      }
+      if (!Number.isFinite(waitMs)) return result('blocked', `Esperando una estimación válida para ${ship.name}. ${reservation}`, null, 'data');
+      for (const id of RESOURCES) {
+        const resource = resources[id];
+        if (waitMs > 0 && !Number.isFinite(resource.rate)) {
+          return result('blocked', `Producción de ${NAMES[id]} no disponible. ${reservation}`, null, 'rate');
+        }
+        const projected = Math.min(resource.cap, Math.max(0, resource.amount + (resource.rate || 0) * waitMs / 60000));
+        if (projected + 1e-7 < ship.cost[id]) {
+          return result('blocked', `El ${NAMES[id]} disponible disminuye durante la espera. ${reservation}`, null, 'production');
+        }
+      }
+      // A funds title can describe an oversized native input batch. The main
+      // controller will normalize that input and revalidate before sending.
+      const notes = [`Flota primero. Pendientes de encargar: ${ship.deficit} ${ship.name}.`];
+      const missing = RESOURCES.filter(id => ship.cost[id] > resources[id].amount)
+        .map(id => `${Math.ceil(ship.cost[id] - resources[id].amount).toLocaleString()} ${NAMES[id]}`);
+      if (missing.length) notes.push(`Faltan ${missing.join(' y ')} para ${ship.quantity === 1 ? 'la siguiente nave' : 'el siguiente lote'}.`);
+      if (full) notes.push(`Hueco en la cola de naves en ≈${formatDuration(queue.waitMs)}.`);
+      notes.push(reservation);
+      return result(waitMs > 0 ? 'waiting' : 'ready', notes.join(' '), waitMs);
+    }
+
+    return { select, estimate };
+  }
+  // END FLEET PRIORITY PLANNER
 
   // BEGIN UPGRADE ETA ESTIMATOR
   function createUpgradeEtaEstimator() {

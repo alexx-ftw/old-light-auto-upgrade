@@ -1,6 +1,6 @@
 # Old Light Auto Upgrade
 
-Userscript para [Old Light](https://oldlight.io/play) que mejora edificios por prioridad, muestra una ETA para la siguiente mejora, ajusta Reactor y Resource Depot según necesidad, repone naves hasta los mínimos configurados, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.6.0**.
+Userscript para [Old Light](https://oldlight.io/play) que da prioridad a la flota, reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.6.1**.
 
 ## Instalación
 
@@ -27,19 +27,21 @@ Estos edificios también deben estar marcados y poder construirse normalmente:
 
 Si ya hay una mejora de Reactor o Depot en cola, espera antes de encargar otra del mismo tipo. Los valores desconocidos o la selección múltiple no justifican estas mejoras automáticas: necesitan datos del sistema seleccionado.
 
-### ETA de la siguiente mejora
+### ETA del siguiente pedido
 
-El indicador **Siguiente mejora**, encima de las pestañas, muestra el **edificio y nivel**, la **cuenta atrás aproximada** y el motivo de la espera. La cuenta atrás también se ve debajo de **Auto ↑** al minimizar el helper; al pasar el cursor aparece el detalle. No necesita activar ningún ajuste.
+El indicador **Siguiente acción**, encima de las pestañas, muestra la **nave y cantidad** o el **edificio y nivel**, la **cuenta atrás aproximada** y el motivo de la espera. La cuenta atrás también se ve debajo de **Auto ↑** al minimizar el helper; al pasar el cursor aparece el detalle. No necesita activar ningún ajuste.
 
-La ETA corresponde a cuándo se podrá **encolar el siguiente pedido automático de mejora**. Una construcción que ya esté en curso puede continuar mientras se añade otro pedido si queda un hueco. El tiempo de construcción del nuevo nivel es distinto y lo muestra el juego.
+La ETA corresponde a cuándo se podrá **encolar el siguiente pedido automático de flota o mejora**. Una construcción que ya esté en curso puede continuar mientras se añade otro pedido si queda un hueco. El tiempo de construcción de la nave o del nuevo nivel es distinto y lo muestra el juego.
 
 - Calcula cuánto falta de palladium e iridium y toma la mayor de las dos esperas según la producción actual. Usa las cantidades completas del juego aunque la interfaz muestre `K` o `M`.
-- Si la cola está llena, espera también al primer hueco que se libere. Los recursos se producen durante esa espera: ambos tiempos se combinan por su máximo, no se suman.
-- Pronostica la primera mejora que podrá hacerse con las prioridades y casillas marcadas actuales. Una mejora más barata puede estar disponible antes que la primera de la lista; si coinciden en tiempo, decide el orden de prioridad.
+- **La flota tiene prioridad sobre los edificios, también mientras reúne recursos.** Si hay un mínimo o una producción autorizada de misión pendientes, muestra el primer tipo de nave pendiente que pueda producirse según el orden de Flota. Una nave o un edificio más baratos no consumen los recursos que está reservando.
+- La ETA de una nave corresponde al **siguiente lote posible**. Si todavía no alcanza para una, calcula cuándo podrá encargar la primera; no espera a poder pagar todo el mínimo. El coste nativo mostrado para varias naves se divide por su cantidad para obtener el coste de una unidad.
+- Si la cola está llena, espera también al primer hueco que se libere en la **cola correspondiente**, de naves o de edificios. Los recursos se producen durante esa espera: ambos tiempos se combinan por su máximo, no se suman. Una cola de naves detenida o sin tiempo conocido no genera una cuenta atrás inventada.
+- Cuando la flota está cubierta o ya en construcción, pronostica la primera mejora que podrá hacerse con las prioridades y casillas marcadas actuales. Entre edificios, una mejora más barata puede estar disponible antes que la primera de la lista; si coinciden en tiempo, decide el orden de prioridad.
 - Reactor solo aparece si otra mejora marcada lo justifica y llega a poder pagarse. Depot espera al porcentaje configurado. Ninguno se repite si ya está en cola.
-- Si falta producción, el coste supera la capacidad, hay requisitos pendientes o faltan datos exactos, muestra **Sin ETA** y explica el bloqueo. La pausa y los pedidos pendientes también tienen su propio estado.
+- Si una nave no puede producirse por un requisito, capacidad, muelles, tesorería o falta de producción, explica ese bloqueo. Puede continuar con otros pedidos posibles según las reglas de prioridad. Si faltan datos exactos, conserva la reserva de flota y muestra **Sin ETA**. La pausa y los pedidos pendientes también tienen su propio estado; durante la confirmación conserva el nombre de la nave solicitada.
 
-Se actualiza con los datos del juego y la comprobación habitual de cada segundo. La cuenta atrás continúa entre actualizaciones de las cantidades enteras del HUD; si llega a cero antes de que el juego habilite el pedido, espera su confirmación. El símbolo **≈** indica una estimación con las tasas actuales, que el juego redondea. Los pedidos de naves, otros gastos, los recursos que lleguen y las construcciones que terminen pueden cambiarla; se recalcula al observar esos cambios. Si tienes reposición de flota configurada, el indicador recuerda que la producción de naves tiene prioridad sobre los edificios.
+Se actualiza con los datos del juego y la comprobación habitual de cada segundo. La cuenta atrás continúa entre actualizaciones de las cantidades enteras del HUD; si llega a cero antes de que el juego habilite el pedido, espera su confirmación. El símbolo **≈** indica una estimación con las tasas actuales, que el juego redondea. Los pedidos, otros gastos, las naves que regresen, los recursos que lleguen y las construcciones que terminen pueden cambiarla; se recalcula al observar esos cambios. Funciona también si todos los edificios están desmarcados y solo mantienes mínimos de flota.
 
 Requiere **un único sistema**, una pestaña visible y **Structures o Shipyard** abierto. La previsión usa los datos disponibles sin iniciar peticiones, modificar prioridades ni generar notificaciones. No se guarda una cuenta atrás antigua: al recargar se calcula de nuevo.
 
@@ -52,7 +54,11 @@ En la pestaña **Flota**, configura un mínimo para **Probe, Marauder, Sentinel 
 - Pide el déficit pendiente, limitado por la cantidad máxima que admite el juego y los recursos disponibles. Si el juego acepta solo una parte, lee la cola y los contadores actualizados antes de recalcular lo que falta.
 - Los mismos mínimos se aplican a cada sistema cuando lo seleccionas. La reposición requiere **un único sistema seleccionado**. Con selección múltiple continúan las mejoras masivas de edificios, pero se suspende la reposición porque los contadores de naves muestran `—`.
 
-La reposición disponible tiene prioridad sobre los edificios. Si no puede encargar naves por recursos, requisitos o bloqueos, puede continuar con una mejora de edificio disponible.
+**Flota tiene prioridad sobre Edificios.** Si la primera nave pendiente del orden puede producirse pero aún faltan recursos, el helper **reserva esos recursos** y espera. No los gasta en edificios ni en tipos de nave de menor prioridad. También mantiene la reserva mientras espera un hueco normal en la cola de naves. La ETA y los pedidos usan la misma selección de prioridad.
+
+Por ejemplo: Probe con mínimo **2** y **3** en base, Marauder con mínimo **8**, **7** en base y **1** en construcción, Sentinel con mínimo **1** y **1** en base, y Vanguard con mínimo **1** y **0** disponibles. El siguiente objetivo es **Vanguard ×1**. El Marauder en cola ya cubre su mínimo. El helper ahorra para Vanguard y retoma los edificios cuando los mínimos quedan cubiertos o ya en construcción.
+
+Una nave bloqueada por requisitos, muelles llenos, tesorería, errores del juego, coste de una unidad superior al Depot o un recurso que falta y no se produce no retiene indefinidamente todos los pedidos. En esos casos puede continuar con otra nave posible o una mejora que cumpla las reglas de Edificios, e indica el motivo si muestra la ETA de esa mejora. No inventa recursos, capacidad ni tiempos de desbloqueo. Si el coste o la producción son desconocidos, espera datos exactos conservando la prioridad de flota.
 
 Con el modo de naves estacionadas, enviar naves a una misión puede provocar su reposición; cuando regresen, el total puede superar el mínimo. Activa **Contar también las naves en misión** si quieres evitar esa reposición para las misiones contabilizadas por el juego. El script no cancela construcciones ni desguaza naves para reducir excedentes.
 
@@ -135,7 +141,7 @@ Deja **Structures o Shipyard abierto y la pestaña visible**. Los dos paneles de
 
 Cuando la pestaña está oculta, el cliente del juego aplaza el refresco de sus contadores y **el script no inicia nuevas acciones**. Los avisos dependen de los cambios que lleguen a la interfaz mientras se observa. No ofrece una cobertura completa de eventos del servidor ni actividad continua en segundo plano; al cerrar, suspender o descartar la pestaña, deja de actuar.
 
-La versión **1.6.0** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las construcciones ya encoladas mantienen su orden en el juego.
+La versión **1.6.1** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las construcciones ya encoladas mantienen su orden en el juego.
 
 ## Guardado local, exportación e importación
 
@@ -203,15 +209,15 @@ La cabecera define `@updateURL` para consultar el archivo ligero `old-light-auto
 
 Documentación de los gestores: [Tampermonkey](https://www.tampermonkey.net/documentation.php?locale=en&q=update_url) y [Violentmonkey](https://violentmonkey.github.io/api/metadata-block/).
 
-## Pruebas del estimador
+## Pruebas de prioridades y ETA
 
-Las pruebas usan el estimador incluido en el propio userscript y módulos nativos de Node.js. Desde la raíz del repositorio:
+Las pruebas usan los planificadores incluidos en el propio userscript y módulos nativos de Node.js. Desde la raíz del repositorio:
 
 ```sh
-node --test tests/upgrade-eta.test.cjs
+node --test tests/*.test.cjs
 ```
 
-Cubren recursos y capacidad, cola, prioridades, condiciones de Reactor y Depot, producción negativa y datos incompletos. No conectan al juego ni envían pedidos o notificaciones.
+Cubren la reserva para la flota, orden de naves, lotes parciales, recursos y capacidad, colas separadas, prioridades de edificios, condiciones de Reactor y Depot, producción negativa y datos incompletos. No conectan al juego ni envían pedidos o notificaciones.
 
 ## Incidencias
 
