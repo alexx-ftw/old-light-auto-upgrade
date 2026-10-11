@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.9.0
-// @description  Flota prioritaria con reserva de recursos y ETA, mejoras por prioridad, presets, misiones pendientes y reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
+// @version      1.10.0
+// @description  Flota prioritaria con reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
 // @supportURL   https://github.com/alexx-ftw/old-light-auto-upgrade/issues
@@ -25,7 +25,7 @@
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.9.0';
+  const SCRIPT_VERSION = '1.10.0';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -109,10 +109,13 @@
 
   missionTargetResolver = createMissionTargetResolver({ getContext: missionContext, canAct: canOperateMission });
   missionAdapter = createNativeMissionAdapter({ getContext: missionContext, getFleet: fleetCounts,
-    canAct: job => canOperateMission() && isRetryMissionAllowed(job), onBusyChange: schedule, onChange: schedule,
+    canAct: job => canOperateMission() && isCurrentMissionClaim(job) && isRetryMissionAllowed(job), onBusyChange: schedule, onChange: schedule,
     resolveTarget: (job, options) => missionTargetResolver.resolveTarget(job, options) });
   fleetWait = createFleetWaitQueue({
     getContext: missionQueueContext, getFleet: currentMissionFleet,
+    openFleetEditor: openMissionFleetEditor,
+    isFleetEditing: id => Boolean(id?.startsWith('retry:') && attackRetry?.exportConfig().campaigns
+      .find(value => value.queueJobId === id)?.fleetEdit),
     dispatch: async job => {
       const result = await missionAdapter.dispatch(job);
       if (result.status === 'sent' && !job.id.startsWith('retry:')) emitEvent('request.sent',
@@ -135,6 +138,12 @@
     pauseJob: id => fleetWait.pause(id),
     resumeJob: id => fleetWait.resume(id),
     cancelJob: id => fleetWait.cancel(id),
+    setJobFleetQuantities: (id, quantities, options) => {
+      const job = fleetWait.setFleetQuantities(id, quantities, options);
+      missionAdapter.detach(id);
+      return job;
+    },
+    openFleetEditor: id => openFleetCompositionEditor('campaign', id),
     raiseMinimums: raiseShipMinimums,
     send: event => notifier.emit(event),
     onSettingsChange: () => { settingsChanged(); schedule(); },
@@ -3305,24 +3314,31 @@
       const key = clean(value?.target?.presetKey);
       const routeSignature = value?.target?.routeKey;
       const amountsMode = value?.target?.mode === 'amounts';
+      const customMode = value?.target?.mode === 'custom';
+      const missionAction = value?.target?.missionAction;
       const originPoint = coordinate(value?.target?.originCoordinate);
       if (!value || !SCOPE.test(value.scope || '') || !UUID.test(value.originId || '')
           || !requested || !point || key.length > 2000
           || typeof routeSignature !== 'string' || routeSignature.length > 200000) return null;
       if (amountsMode) {
-        if (!originPoint || sameCoordinate(originPoint, point) || key || routeSignature !== '') return null;
-      } else if (value.target.mode !== undefined || value.target.originCoordinate !== undefined || !key) return null;
+        if (!originPoint || sameCoordinate(originPoint, point) || key || routeSignature !== '' || missionAction !== undefined) return null;
+      } else if ((!customMode && value.target.mode !== undefined) || value.target.originCoordinate !== undefined || !key
+          || (missionAction !== undefined && !['attack', 'send'].includes(missionAction))) return null;
       return { scope: value.scope, originId: value.originId.toLowerCase(),
         originName: clean(value.originName).slice(0, 400),
         target: { coordinate: point, routeKey: routeSignature, presetKey: key,
           label: clean(value.target.label).slice(0, 400),
-          ...(amountsMode ? { mode: 'amounts', originCoordinate: originPoint } : {}) }, quantities: requested };
+          ...(amountsMode ? { mode: 'amounts', originCoordinate: originPoint } : {}),
+          ...(customMode ? { mode: 'custom' } : {}),
+          ...(missionAction ? { missionAction } : {}) }, quantities: requested };
     }
 
     function signature(spec) {
       const parts = [spec.scope, spec.originId, spec.target.coordinate,
         spec.target.routeKey, spec.target.presetKey, spec.quantities];
       if (spec.target.mode === 'amounts') parts.push(spec.target.mode, spec.target.originCoordinate);
+      if (spec.target.mode === 'custom') parts.push(spec.target.mode);
+      if (spec.target.missionAction) parts.push(spec.target.missionAction);
       return JSON.stringify(parts);
     }
 
@@ -3372,6 +3388,7 @@
         const action = opened.querySelector('.inspect-actions > button.inspect-action-btn');
         return { coordinate: point, label: clean(opened.querySelector('.inspect-system-name-text')?.textContent),
           isActive: !opened.querySelector('.info-modal-trailing .info-modal-header-btn'),
+          missionAction: inspectorMissionAction(action),
           action: unavailable(action) ? null : action };
       } finally {
         for (const { modal, mask, content, body } of saved) {
@@ -3421,6 +3438,7 @@
         if (routeKey(dialog) !== originalRoute) return failure('La ruta ha cambiado durante la preparación.');
         return makeCapture(current, requested, presetKey, { routeKey: originalRoute,
           label: endpoint.label || clean(cols[1].querySelector('.route-header-tile-name')?.textContent),
+          ...(endpoint.missionAction ? { missionAction: endpoint.missionAction } : {}),
           coordinate: endpoint.coordinate }, { kind: 'inspect', button });
       } catch (error) { return failure(error.message || 'No se pudo preparar el destino de la misión.'); }
       finally { capturing = false; busyChanged(); }
@@ -3433,6 +3451,7 @@
       if (!inspector.querySelector('.info-modal-trailing .info-modal-header-btn')) return failure('El destino es tu sistema activo. Elige otro sistema para enviar la misión.');
       const action = inspector.querySelector('.inspect-actions > button.inspect-action-btn');
       return makeCapture(current, requested, presetKey, { routeKey: '', coordinate: point,
+        ...(inspectorMissionAction(action) ? { missionAction: inspectorMissionAction(action) } : {}),
         label: clean(inspector.querySelector('.inspect-system-name-text')?.textContent) },
       unavailable(action) ? null : { kind: 'dispatch', button: action });
     }
@@ -3454,6 +3473,7 @@
         // Keep only the coordinates, never retain this mutable button as a handle.
         // This identity-only capture can be paired with another cached preset.
         return makeCapture(current, requested, presetKey, { routeKey: '',
+          ...(endpoint.missionAction ? { missionAction: endpoint.missionAction } : {}),
           label: endpoint.label, coordinate: endpoint.coordinate }, null);
       } catch (error) { return failure(error.message || 'No se pudo identificar el destino del mapa.'); }
       finally { capturing = false; busyChanged(); }
@@ -3548,6 +3568,18 @@
       return button instanceof HTMLButtonElement && clean(button.textContent) === 'Attack';
     }
 
+    function inspectorMissionAction(button) {
+      if (!(button instanceof HTMLButtonElement)) return null;
+      const name = clean(button.textContent);
+      return name === 'Attack' ? 'attack' : name === 'Send fleet' ? 'send' : null;
+    }
+
+    function confirmationMissionAction(button) {
+      if (!(button instanceof HTMLButtonElement)) return null;
+      const name = clean(button.textContent);
+      return name === 'Attack' ? 'attack' : name === 'Send' ? 'send' : null;
+    }
+
     function restoreMask(operation) {
       if (!operation.dialog) return;
       if (operation.previousMask === null) operation.dialog.removeAttribute(MASK);
@@ -3590,19 +3622,32 @@
     if (!readyToAct(job)) return result('waiting', 'Esperando a que el helper pueda actuar.');
       if (!sameContext(spec)) return result('waiting', `Selecciona ${spec.originName || 'el sistema de origen'} para continuar esta misión.`);
       if (!enough(spec.quantities)) return result('waiting', 'Esperando a que todas las naves del preset estén en base.');
+      const customMode = spec.target.mode === 'custom';
       let binding = attached.get(jobId);
-      if (binding && signature(binding.spec) !== signature(spec)) return result('paused', 'La misión ha cambiado. Reconecta el preset y el destino antes de continuar.');
+      if (binding && signature(binding.spec) !== signature(spec)) {
+        if (customMode && typeof resolveTarget === 'function') { attached.delete(jobId); binding = null; }
+        else return result('paused', 'La misión ha cambiado. Reconecta el preset y el destino antes de continuar.');
+      }
       if (!binding && typeof resolveTarget !== 'function') return result('paused', 'Misión guardada. Reconecta su destino con Shift + clic y el mismo preset para reanudarla.');
       if (document.querySelector('dialog[open]')) return result('waiting', 'Cierra los diálogos del juego para continuar la misión.');
       const operation = { job, jobId, spec, controller: new AbortController(), dialog: null,
         previousMask: null, confirmed: false, permitConfirm: false, keepDialog: false,
-        closed: false, reason: '', guard: null };
+        closed: false, reason: '', guard: null, missionAction: spec.target.missionAction || null };
       active = operation; busyChanged();
       let outcome;
       try {
         const action = await actionFor(operation, binding);
         if (spec.target.mode === 'amounts' && action && !isAttackAction(action)) {
           throw new Error('El destino ya no ofrece la acción Attack. El reintento se ha pausado.');
+        }
+        if (customMode && action) {
+          const missionAction = inspectorMissionAction(action);
+          if (!missionAction || (operation.missionAction && missionAction !== operation.missionAction)) {
+            throw new Error('El tipo de misión del destino ha cambiado. Revisa el despacho antes de continuar.');
+          }
+          // Legacy preset jobs have no saved action. Resolve it from the verified
+          // native Inspector, then require the same action throughout this send.
+          operation.missionAction = missionAction;
         }
         // Let previously queued native close handlers finish before opening a new
         // dispatch session, otherwise they may clear the new native origin list.
@@ -3637,29 +3682,47 @@
         if (spec.target.mode === 'amounts' && (identity.isActive || !isAttackAction(identity.action))) {
           throw new Error('El destino ya no permite un ataque. El reintento se ha pausado.');
         }
+        if (customMode && (identity.isActive || !operation.missionAction || identity.missionAction !== operation.missionAction)) {
+          throw new Error('El destino o su tipo de misión ha cambiado. Se ha pausado la preparación.');
+        }
         assertOperation(operation);
         if (!enough(spec.quantities)) return outcome = result('waiting', 'Las naves disponibles han cambiado; se esperará al preset completo.');
         const amountsMode = spec.target.mode === 'amounts';
-        const preset = amountsMode ? null : [...dialog.querySelectorAll('[data-field="dispatch-presets"] .dispatch-preset-apply')]
+        const directAmounts = amountsMode || customMode;
+        const preset = directAmounts ? null : [...dialog.querySelectorAll('[data-field="dispatch-presets"] .dispatch-preset-apply')]
           .find(button => keyOf(button) === spec.target.presetKey && sameAmounts(presetAmounts(button), spec.quantities));
         const confirm = dialog.querySelector('[data-field="dispatch-confirm"]');
-        if ((!amountsMode && unavailable(preset)) || !(confirm instanceof HTMLButtonElement) || confirm.hidden) throw new Error('El preset guardado ya no está disponible. Vuelve a seleccionarlo.');
+        if ((!directAmounts && unavailable(preset)) || !(confirm instanceof HTMLButtonElement) || confirm.hidden) throw new Error('El despacho guardado ya no está disponible. Vuelve a seleccionarlo.');
         if (amountsMode && !isAttackAction(confirm)) throw new Error('El juego ya no ofrece la confirmación Attack para este destino.');
+        if (customMode && confirmationMissionAction(confirm) !== operation.missionAction) throw new Error('La confirmación del juego no coincide con el tipo de misión preparado.');
         operation.guard = event => {
           if (event.target !== confirm) return;
-          if (operation.permitConfirm && !operation.confirmed) {
+          // Other capture listeners can change saved intent or the native form
+          // during click(). Recheck the exact fleet before accepting that click.
+          let allowed = false;
+          try {
+            allowed = operation.permitConfirm && !operation.confirmed && validOperation(operation)
+              && dialog.open && confirm.isConnected && dialog.querySelector('[data-field="dispatch-confirm"]') === confirm
+              && routeKey(dialog) === openedRoute && singleNativeRoute(dialog)
+              && inputsMatch(dialog, spec.quantities) && enough(spec.quantities)
+              && (!amountsMode || isAttackAction(confirm))
+              && (!customMode || confirmationMissionAction(confirm) === operation.missionAction)
+              && !confirm.disabled && !readError(dialog);
+          } catch (_) { /* A failed check must also prevent the native send. */ }
+          if (allowed) {
             operation.confirmed = true; attempted.add(claim); return;
           }
           event.preventDefault(); event.stopImmediatePropagation();
         };
         window.addEventListener('click', operation.guard, true);
-        if (amountsMode) {
-          if (!applyAmounts(operation)) return outcome = result('waiting', 'El juego ha ajustado las cantidades. Se esperará a la flota completa sin enviar un ataque parcial.');
+        if (directAmounts) {
+          if (!applyAmounts(operation)) return outcome = result('waiting', 'El juego ha ajustado las cantidades. Se esperará a la flota completa sin enviar una misión parcial.');
         } else preset.click();
         assertOperation(operation);
         if (routeKey(dialog) !== openedRoute || !singleNativeRoute(dialog)) throw new Error('La ruta ha cambiado al aplicar el preset.');
         if (!enough(spec.quantities) || !inputsMatch(dialog, spec.quantities)) return outcome = result('waiting', 'El preset aún no está completo. Se esperará sin enviar una flota parcial.');
         if (amountsMode && !isAttackAction(confirm)) throw new Error('El destino ha cambiado y ya no permite Attack.');
+        if (customMode && confirmationMissionAction(confirm) !== operation.missionAction) throw new Error('El tipo de misión ha cambiado al ajustar la flota. Se ha pausado el envío.');
         const error = readError(dialog);
         if (confirm.disabled || error) { expose(operation); return outcome = result('paused', error || 'El juego no permite enviar esta misión. Revisa el despacho.'); }
         const onClose = () => { operation.closed = true; };
@@ -4144,16 +4207,19 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     }
 
     function target(value) {
-      if (!keys(value, ['routeKey', 'label', 'coordinate', 'presetKey', 'mode', 'originCoordinate']) || typeof value.routeKey !== 'string' ||
+      if (!keys(value, ['routeKey', 'label', 'coordinate', 'presetKey', 'mode', 'originCoordinate', 'missionAction']) || typeof value.routeKey !== 'string' ||
           (value.routeKey !== '' && !value.routeKey.trim()) || value.routeKey.length > 32768 || /[\u0000\u007f]/.test(value.routeKey)) {
         throw new TypeError('Destino de misión no válido.');
       }
-      const amountsMode = value.mode === 'amounts';
+      const amountsMode = value.mode === 'amounts', customMode = value.mode === 'custom';
       if (amountsMode) {
         if (value.routeKey !== '' || value.presetKey !== '' || !keys(value.originCoordinate, ['q', 'r']) ||
             !['q', 'r'].every(key => Number.isSafeInteger(value.originCoordinate[key]) &&
-              Math.abs(value.originCoordinate[key]) <= 10000000)) throw new TypeError('Origen de ataque no válido.');
-      } else if (value.mode !== undefined || value.originCoordinate !== undefined) throw new TypeError('Modo de misión no válido.');
+              Math.abs(value.originCoordinate[key]) <= 10000000) || value.missionAction !== undefined) throw new TypeError('Origen de ataque no válido.');
+      } else if ((!customMode && value.mode !== undefined) || value.originCoordinate !== undefined ||
+          (value.missionAction !== undefined && !['attack', 'send'].includes(value.missionAction))) {
+        throw new TypeError('Modo de misión no válido.');
+      }
       const result = { routeKey: value.routeKey, label: label(value.label, 500),
         presetKey: amountsMode ? '' : label(label(value.presetKey, 500).normalize('NFKC').replace(/\s+/g, ' ').trim(), 500) };
       if (value.coordinate !== undefined) {
@@ -4172,6 +4238,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         result.mode = 'amounts';
         result.originCoordinate = { q: value.originCoordinate.q, r: value.originCoordinate.r };
       }
+      if (customMode) result.mode = 'custom';
+      if (value.missionAction !== undefined) result.missionAction = value.missionAction;
       return result;
     }
 
@@ -4182,12 +4250,35 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         throw new TypeError('Configuración de misión no válida.');
       }
       const destination = target(value.target), requested = quantities(value.quantities);
-      if (destination.mode === 'amounts' && SHIPS.some(id => requested[id] > 50000)) {
-        throw new TypeError('El ataque supera el límite nativo de naves por tipo.');
+      if (['amounts', 'custom'].includes(destination.mode) && SHIPS.some(id => requested[id] > 50000)) {
+        throw new TypeError('La misión supera el límite nativo de naves por tipo.');
       }
       return { scope: value.scope, originId: value.originId.toLowerCase(),
         originName: label(value.originName, 400), target: destination,
         quantities: requested, produce: value.produce, autoSend: value.autoSend };
+    }
+
+    function fleetEdit(value) {
+      if (!keys(value, ['drafts', 'resumeStatus', 'message']) || !keys(value.drafts, SHIPS) ||
+          !['waiting', 'paused'].includes(value.resumeStatus) || !SHIPS.every(id =>
+            typeof value.drafts[id] === 'string' && value.drafts[id].length <= 32 &&
+            !/[\u0000-\u001f\u007f]/.test(value.drafts[id]))) {
+        throw new TypeError('El borrador de flota no es válido.');
+      }
+      return { drafts: Object.fromEntries(SHIPS.map(id => [id, value.drafts[id]])),
+        resumeStatus: value.resumeStatus, message: label(value.message, 500, true) };
+    }
+
+    function draftQuantities(value) {
+      const requested = zeros();
+      for (const id of SHIPS) {
+        const draft = value[id];
+        if (typeof draft !== 'string' || !/^\d{1,6}$/.test(draft) || Number(draft) > 50000) {
+          throw new TypeError('Escribe una cantidad entera de 0 a 50.000 para cada nave.');
+        }
+        requested[id] = Number(draft);
+      }
+      return quantities(requested);
     }
 
     function validateConfig(value = {}) {
@@ -4200,7 +4291,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       const ids = new Set();
       const jobs = (value.jobs || []).map(item => {
         if (!keys(item, ['id', 'scope', 'originId', 'originName', 'target', 'quantities', 'produce',
-          'autoSend', 'status', 'createdAt', 'updatedAt', 'claimedAt', 'sentAt', 'message', 'needsReview']) ||
+          'autoSend', 'status', 'createdAt', 'updatedAt', 'claimedAt', 'sentAt', 'message', 'needsReview', 'fleetEdit']) ||
             !ID.test(item.id || '') || ids.has(item.id) || !STATES.includes(item.status) ||
             (item.needsReview !== undefined && typeof item.needsReview !== 'boolean')) {
           throw new TypeError('Un pendiente de misión no es válido.');
@@ -4226,11 +4317,16 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         if (item.needsReview && !['paused', 'sending', 'uncertain'].includes(item.status)) {
           throw new TypeError('El envío sin confirmar necesita revisión antes de reanudar.');
         }
+        const editing = item.fleetEdit === undefined ? null : fleetEdit(item.fleetEdit);
+        if (editing && (item.status !== 'paused' || item.needsReview || item.id.startsWith('retry:'))) {
+          throw new TypeError('La edición de flota necesita una misión en pausa y sin envíos pendientes de revisión.');
+        }
         ids.add(item.id);
         identities.add(identity);
         return { id: item.id, ...clean, status: item.status, createdAt: item.createdAt,
           updatedAt: item.updatedAt, claimedAt: item.claimedAt, sentAt: item.sentAt,
-          message: label(item.message, 500, true), needsReview: item.needsReview === true || item.status === 'uncertain' };
+          message: label(item.message, 500, true), needsReview: item.needsReview === true || item.status === 'uncertain',
+          ...(editing ? { fleetEdit: editing } : {}) };
       });
       const normalized = { schemaVersion: 1, jobs };
       const serialized = JSON.stringify(normalized);
@@ -4382,6 +4478,103 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       return copy(job);
     }
 
+    function getSavedJob(id) {
+      ensureReady();
+      const job = config.jobs.find(item => item.id === id);
+      if (!job) throw new Error('La misión pendiente ya no existe.');
+      return copy(job);
+    }
+
+    function sameJob(left, right) { return JSON.stringify(left) === JSON.stringify(right); }
+
+    function expectSavedJob(job, options, allowed = ['expected']) {
+      if (!keys(options, allowed) || !object(options.expected)) {
+        throw new TypeError('Falta el estado guardado que se está editando.');
+      }
+      const expected = validateConfig({ schemaVersion: 1, jobs: [options.expected] }).jobs[0];
+      if (!sameJob(job, expected)) throw new Error('La misión ha cambiado. Revisa la flota actual antes de continuar la edición.');
+    }
+
+    function requireEditableJob(job, ordinary = false) {
+      if (ordinary && job.id.startsWith('retry:')) throw new Error('Edita esta flota desde su campaña de reintentos.');
+      if (!['waiting', 'paused'].includes(job.status) || job.needsReview) {
+        throw new Error('No se puede editar un envío iniciado o pendiente de confirmación. Comprueba primero las misiones del juego.');
+      }
+    }
+
+    function changedJob(id, transform) {
+      const result = changeJob(id, transform);
+      return copy(result.jobs.find(item => item.id === id));
+    }
+
+    function beginFleetEdit(id) {
+      const current = getSavedJob(id);
+      requireEditableJob(current, true);
+      if (current.fleetEdit) return current;
+      return changedJob(id, job => {
+        if (!sameJob(job, current)) throw new Error('La misión ha cambiado. Vuelve a abrir la edición de flota.');
+        requireEditableJob(job, true);
+        return { ...job, status: 'paused', message: 'Editando la flota. La misión esperará hasta terminar la edición.',
+          fleetEdit: { drafts: Object.fromEntries(SHIPS.map(ship => [ship, String(job.quantities[ship])])),
+            resumeStatus: job.status, message: job.message } };
+      });
+    }
+
+    function getFleetEdit(id) {
+      const job = getSavedJob(id);
+      if (job.id.startsWith('retry:')) throw new Error('Edita esta flota desde su campaña de reintentos.');
+      return job;
+    }
+
+    function setFleetDraft(id, ship, value, options = {}) {
+      if (!SHIPS.includes(ship) || typeof value !== 'string' || value.length > 32 || /[\u0000-\u001f\u007f]/.test(value)) {
+        throw new TypeError('El tipo de nave o su borrador de cantidad no es válido.');
+      }
+      return changedJob(id, job => {
+        expectSavedJob(job, options);
+        requireEditableJob(job, true);
+        if (!job.fleetEdit) throw new Error('Abre la edición de flota antes de cambiar cantidades.');
+        return { ...job, fleetEdit: { ...job.fleetEdit, drafts: { ...job.fleetEdit.drafts, [ship]: value } } };
+      });
+    }
+
+    function finishFleetEdit(id, options, apply) {
+      return changedJob(id, job => {
+        expectSavedJob(job, options);
+        requireEditableJob(job, true);
+        if (!job.fleetEdit) throw new Error('Esta misión ya no tiene una edición de flota pendiente.');
+        const edit = job.fleetEdit;
+        const requested = apply ? draftQuantities(edit.drafts) : job.quantities;
+        const destination = apply && job.target.mode !== 'amounts' ? { ...job.target, mode: 'custom' } : job.target;
+        const next = { ...job, quantities: requested, target: destination,
+          status: edit.resumeStatus === 'waiting' && (job.produce || job.autoSend) ? 'waiting' : 'paused',
+          message: edit.message };
+        delete next.fleetEdit;
+        return next;
+      });
+    }
+
+    function applyFleetEdit(id, options = {}) { return finishFleetEdit(id, options, true); }
+    function cancelFleetEdit(id, options = {}) { return finishFleetEdit(id, options, false); }
+
+    function setFleetQuantities(id, values, options = {}) {
+      const requested = quantities(values);
+      if (SHIPS.some(ship => requested[ship] > 50000)) throw new TypeError('Las cantidades de nave deben estar entre 0 y 50.000.');
+      return changedJob(id, job => {
+        expectSavedJob(job, options, ['expected', 'target']);
+        requireEditableJob(job);
+        if (job.fleetEdit) throw new Error('Termina la edición de flota antes de sustituir sus cantidades.');
+        const destination = options.target === undefined ? job.target : target(options.target);
+        const identity = value => [value.routeKey, value.label, value.presetKey, value.coordinate || null, value.originCoordinate || null];
+        const validMode = destination.mode === job.target.mode || (job.target.mode === undefined && destination.mode === 'custom');
+        if (!validMode || JSON.stringify(identity(destination)) !== JSON.stringify(identity(job.target)) ||
+            (job.target.missionAction !== undefined && destination.missionAction !== job.target.missionAction)) {
+          throw new Error('Editar la flota no permite cambiar el origen, el destino o el tipo de misión.');
+        }
+        return { ...job, quantities: requested, target: destination };
+      });
+    }
+
     function update(id, patch) {
       if (!keys(patch, ['produce', 'autoSend']) || Object.values(patch).some(value => typeof value !== 'boolean')) {
         throw new TypeError('Opciones de misión no válidas.');
@@ -4400,10 +4593,12 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         if (!['waiting', 'paused'].includes(job.status) || job.needsReview) {
           throw new Error('Comprueba primero si esta misión llegó a enviarse.');
         }
+        if (job.fleetEdit) throw new Error('Termina la edición de flota antes de reconectar la misión.');
         const previous = job.target.coordinate;
         const next = refreshedTarget.coordinate;
         if (!previous || !next || previous.q !== next.q || previous.r !== next.r ||
             job.target.presetKey !== refreshedTarget.presetKey || job.target.mode !== refreshedTarget.mode ||
+            (job.target.missionAction !== undefined && job.target.missionAction !== refreshedTarget.missionAction) ||
             (job.target.mode === 'amounts' && (job.target.originCoordinate.q !== refreshedTarget.originCoordinate.q ||
               job.target.originCoordinate.r !== refreshedTarget.originCoordinate.r))) {
           throw new Error('El destino o el preset no coincide con la misión guardada.');
@@ -4424,6 +4619,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     function resume(id) {
       return changeJob(id, job => {
         if (!['waiting', 'paused'].includes(job.status) || job.needsReview) throw new Error('Comprueba primero si esta misión llegó a enviarse.');
+        if (job.fleetEdit) throw new Error('Termina o cancela la edición de flota antes de reanudar.');
         if (!job.produce && !job.autoSend) throw new Error('Activa la producción o el envío antes de reanudar.');
         return { ...job, status: 'waiting', message: '' };
       });
@@ -4489,7 +4685,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       if (destroyed || !refreshConfig()) return null;
       const current = context(value);
       if (!current?.active || !current.canAct) return null;
-      const job = config.jobs.find(item => matches(item, current) && item.status === 'waiting' && item.produce && !item.needsReview);
+      const job = config.jobs.find(item => matches(item, current) && item.status === 'waiting' && item.produce && !item.needsReview && !item.fleetEdit);
       if (!job) return null;
       const plan = productionPlan(job, fleet);
       if (plan?.ready && !job.autoSend) {
@@ -4500,15 +4696,19 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     }
 
     function finishPreparation(id) {
-      return changeJob(id, job => ({ ...job, produce: false, status: 'paused',
-        message: 'Flota completa; preparada para envío manual.' }));
+      return changeJob(id, job => {
+        if (job.status !== 'waiting' || job.fleetEdit || job.needsReview || !job.produce || job.autoSend) {
+          throw new Error('La preparación de esta misión ha cambiado.');
+        }
+        return { ...job, produce: false, status: 'paused', message: 'Flota completa; preparada para envío manual.' };
+      });
     }
 
     async function tick() {
       if (destroyed || running || !refreshConfig()) return null;
       const current = currentContext();
       if (!current?.active || !current.canAct) { render(); return null; }
-      const job = config.jobs.find(item => matches(item, current) && item.status === 'waiting');
+      const job = config.jobs.find(item => matches(item, current) && item.status === 'waiting' && !item.fleetEdit);
       if (!job || !productionPlan(job, currentFleet(job))?.ready) { render(); return null; }
       if (!job.autoSend) {
         if (job.produce) try { finishPreparation(job.id); } catch (_) { /* Keep intent paused on save failure. */ }
@@ -4519,6 +4719,9 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       running = true;
       let claim;
       try {
+        // Reading fleet/context can notify other controllers. Never claim an old
+        // snapshot after an editor or another tab has durably changed its intent.
+        if (!refreshConfig() || !sameJob(config.jobs.find(item => item.id === job.id), job)) return null;
         const claimTime = Math.max(timestamp(job), (job.claimedAt ?? -1) + 1);
         claim = { ...job, status: 'sending', updatedAt: claimTime, claimedAt: claimTime, message: '' };
         commit({ ...config, jobs: config.jobs.map(item => item.id === job.id ? claim : item) });
@@ -4601,6 +4804,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         if (source === 'import') {
           job.needsReview = job.needsReview || ['sending', 'uncertain'].includes(job.status);
           job.status = 'paused';
+          if (job.fleetEdit) job.fleetEdit.resumeStatus = 'paused';
           job.message = job.needsReview ? 'Importada en pausa con un posible envío anterior. Comprueba las misiones del juego.'
             : 'Importada en pausa. Revisa origen, destino y flota antes de reanudar.';
         } else if (job.status === 'sending') {
@@ -4619,8 +4823,11 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       rendering = true;
       try {
         const current = currentContext();
-        const jobs = (config?.jobs || []).map(job => ({ job,
-          plan: matches(job, current) ? productionPlan(job, currentFleet(job)) : null }));
+        const jobs = (config?.jobs || []).map(job => {
+          let editing = Boolean(job.fleetEdit);
+          try { editing ||= deps.isFleetEditing?.(job.id) === true; } catch (_) { /* The owner displays its own storage errors. */ }
+          return { job, editing, plan: matches(job, current) ? productionPlan(job, currentFleet(job)) : null };
+        });
         const key = JSON.stringify({ jobs, context: current, notice, readError, storageError });
         if (key === renderKey) return;
         renderKey = key;
@@ -4674,10 +4881,12 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
           warning.setAttribute('role', 'status');
           section.append(warning);
         }
+        const actionError = error => { notice = error?.message || 'No se pudo abrir la edición de flota.'; renderKey = ''; render(); };
         const safeAction = action => {
-          try { action(); } catch (error) { notice = error.message; renderKey = ''; render(); }
+          try { const result = action(); if (result && typeof result.then === 'function') Promise.resolve(result).catch(actionError); }
+          catch (error) { actionError(error); }
         };
-        for (const { job, plan } of jobs) {
+        for (const { job, plan, editing } of jobs) {
           const article = el('article');
           article.dataset.fleetWaitJob = job.id;
           const statuses = { paused: 'Pausada', sending: 'Enviando…', sent: 'Enviada',
@@ -4687,10 +4896,11 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
             state = plan?.ready ? (job.autoSend ? 'Flota completa; lista para enviar.' : 'Flota completa. Envío automático desactivado.')
               : plan ? 'Esperando: ' + fleetText(plan.missing) : 'Selecciona este origen para comprobar su flota.';
           }
-          const tone = job.status === 'uncertain' || job.needsReview ? 'warning'
+          if (editing) state = 'Edición de flota pendiente. La producción y el envío esperan hasta terminarla.';
+          const tone = job.status === 'uncertain' || job.needsReview || editing ? 'warning'
             : job.status === 'sent' || job.status === 'waiting' && plan?.ready ? 'ready' : '';
           const cardHeading = el('div', undefined, 'fw-card-heading');
-          const badge = el('span', { waiting: plan?.ready ? 'Lista' : 'Esperando flota', paused: 'En pausa',
+          const badge = el('span', editing ? 'Editando flota' : { waiting: plan?.ready ? 'Lista' : 'Esperando flota', paused: 'En pausa',
             sending: 'Enviando', sent: 'Enviada', uncertain: 'Revisar envío' }[job.status], 'fw-badge');
           badge.dataset.tone = tone;
           cardHeading.append(el('strong', job.target.label), badge);
@@ -4703,7 +4913,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
           status.dataset.tone = tone;
           status.setAttribute('role', 'status');
           article.append(status);
-          if (job.message && job.message !== state) article.append(el('p', job.message, 'fw-muted'));
+          if (!editing && job.message && job.message !== state) article.append(el('p', job.message, 'fw-muted'));
           if (job.produce && job.status === 'waiting' && plan && fleetText(plan.production)) {
             article.append(el('p', 'Por producir: ' + fleetText(plan.production), 'fw-muted'));
           }
@@ -4731,8 +4941,12 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
             control.addEventListener('click', () => safeAction(action));
             actions.append(control);
           };
+          if (job.status !== 'sent' && typeof deps.openFleetEditor === 'function') {
+            button(editing ? 'Continuar edición' : 'Editar flota', () => deps.openFleetEditor(job.id), 'edit-fleet',
+              !['waiting', 'paused'].includes(job.status) || job.needsReview);
+          }
           if (job.status === 'waiting') button('Pausar', () => pause(job.id), 'pause');
-          if (job.status === 'paused' && !job.needsReview) button('Reanudar', () => resume(job.id), 'resume');
+          if (job.status === 'paused' && !job.needsReview && !editing) button('Reanudar', () => resume(job.id), 'resume');
           if (job.status === 'uncertain' || job.needsReview) button('He comprobado que no se envió: reanudar', () => acknowledge(job.id, { notSent: true }), 'acknowledge');
           button(job.status === 'sent' ? 'Quitar' : 'Cancelar pendiente', () => cancel(job.id), 'cancel', job.status === 'sending');
           article.append(actions);
@@ -4781,6 +4995,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     }
 
     return { queue, update, reconnect, cancel, pause, resume, acknowledge, productionPlan, productionDemand,
+      beginFleetEdit, getFleetEdit, setFleetDraft, applyFleetEdit, cancelFleetEdit, setFleetQuantities,
       getJobFor, tick, exportConfig, validateConfig, importConfig, backupCheckpoint, restoreCheckpoint,
       refreshConfig, mount, destroy,
       list: () => exportConfig().jobs,
@@ -4797,6 +5012,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const STATES = ['waiting_origin', 'waiting_slot', 'queued', 'awaiting_report', 'paused', 'uncertain', 'completed', 'cancelled', 'limit'];
     const ACTIVE = ['waiting_origin', 'waiting_slot', 'queued', 'awaiting_report'];
     const TERMINAL = ['completed', 'cancelled', 'limit'];
+    const FLEET_EDITABLE = ['waiting_origin', 'waiting_slot', 'queued'];
     const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const SCOPE = /^[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{1,96}$/;
     const MAX_TIME = 8640000000000000;
@@ -4868,6 +5084,32 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       return result;
     }
     function sameQuantities(a, b) { return Boolean(a && b && SHIPS.every(id => a[id] === b[id])); }
+    function fleetDrafts(value) {
+      if (!keys(value, SHIPS) || !SHIPS.every(id => typeof value[id] === 'string' && value[id].length <= 16 &&
+          !/[\u0000-\u001f\u007f]/.test(value[id]))) throw new TypeError('El borrador de flota no es válido.');
+      return Object.fromEntries(SHIPS.map(id => [id, value[id]]));
+    }
+    function parseFleetDrafts(value) {
+      const drafts = fleetDrafts(value), amounts = zeros();
+      for (const id of SHIPS) {
+        if (!/^\d{1,5}$/.test(drafts[id]) || Number(drafts[id]) > MAX_QUANTITY) {
+          throw new TypeError('Escribe una cantidad entera de 0 a 50.000 para cada tipo de nave.');
+        }
+        amounts[id] = Number(drafts[id]);
+      }
+      return quantities(amounts);
+    }
+    function validateFleetEdit(value, campaign) {
+      if (value === undefined || value === null) return null;
+      if (!keys(value, ['drafts', 'baseQuantities', 'pendingQuantities'])) throw new TypeError('La edición de flota no es válida.');
+      const clean = { drafts: fleetDrafts(value.drafts), baseQuantities: quantities(value.baseQuantities),
+        pendingQuantities: value.pendingQuantities === null ? null : quantities(value.pendingQuantities) };
+      if (!sameQuantities(clean.baseQuantities, campaign.quantities) ||
+          (clean.pendingQuantities && !sameQuantities(clean.pendingQuantities, parseFleetDrafts(clean.drafts)))) {
+        throw new TypeError('La edición de flota guardada no coincide con la campaña.');
+      }
+      return clean;
+    }
     function routeKey(value) {
       return JSON.stringify([value.scope, value.originCoordinate.q, value.originCoordinate.r,
         value.targetCoordinate.q, value.targetCoordinate.r]);
@@ -4912,7 +5154,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       next.campaigns = next.campaigns.map(item => {
         if (!keys(item, ['id', 'scope', 'originId', 'originName', 'originCoordinate', 'targetName', 'targetCoordinate',
           'status', 'resumeStatus', 'createdAt', 'updatedAt', 'lastOutcomeAt', 'triggerReportId', 'retries', 'quantities',
-          'lastSentQuantities', 'sentAt', 'queueJobId', 'queueConfirmed', 'produce', 'message']) ||
+          'lastSentQuantities', 'sentAt', 'queueJobId', 'queueConfirmed', 'produce', 'message', 'fleetEdit']) ||
             typeof item.id !== 'string' || !item.id.startsWith('attack:') || !UUID.test(item.id.slice(7)) || ids.has(item.id.toLowerCase()) ||
             !SCOPE.test(item.scope || '') || (item.originId !== null && !UUID.test(item.originId || '')) ||
             !STATES.includes(item.status) || (item.resumeStatus !== null && !ACTIVE.includes(item.resumeStatus)) ||
@@ -4927,6 +5169,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
           lastSentQuantities: item.lastSentQuantities === null ? null : quantities(item.lastSentQuantities),
           sentAt: item.sentAt === null ? null : time(item.sentAt), queueJobId: item.queueJobId,
           queueConfirmed: item.queueConfirmed, produce: item.produce, message: text(item.message, 600, true) };
+        clean.fleetEdit = validateFleetEdit(item.fleetEdit, clean);
         if (clean.updatedAt < clean.createdAt || clean.lastOutcomeAt > clean.updatedAt ||
             (clean.sentAt !== null && (clean.sentAt > clean.updatedAt || clean.lastSentQuantities === null)) ||
             (clean.queueJobId !== null && clean.queueJobId !== 'retry:' + clean.triggerReportId) ||
@@ -5106,7 +5349,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         const saved = configFromRaw(readRaw());
         if (!saved.enabled) return false;
         const campaign = saved.campaigns.find(item => item.queueJobId === job.id);
-        if (!campaign || campaign.status !== 'queued' ||
+        if (!campaign || campaign.status !== 'queued' || campaign.fleetEdit ||
             (saved.maxRetries !== 0 && campaign.retries >= saved.maxRetries) ||
             !['waiting', 'sending'].includes(job.status) || job.needsReview || !jobMatches(campaign, job)) return false;
         const live = jobs().find(item => item.id === job.id);
@@ -5126,6 +5369,20 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       if (!job) {
         if (campaign.sentAt !== null && campaign.lastSentQuantities) return campaign;
         return uncertain(campaign, 'La misión pendiente ya no está en la cola. Comprueba si se envió o se canceló; no se recreará automáticamente.');
+      }
+      if (campaign.fleetEdit) {
+        // A draft holds both production and dispatch. The two durable stores may
+        // temporarily contain the old and explicitly staged new fleet; neither
+        // version is authorized until an explicit Apply or Cancel completes.
+        if (job.needsReview || !['waiting', 'paused'].includes(job.status)) return uncertain(campaign,
+          'La misión cambió de estado durante la edición. Comprueba si se envió antes de continuar.');
+        const pendingFleet = campaign.fleetEdit.pendingQuantities;
+        if (!jobMatches(campaign, job) && !(pendingFleet && jobMatches({ ...campaign, quantities: pendingFleet }, job))) {
+          return uncertain(campaign, 'La misión pendiente cambió durante la edición. Revisa su destino y su flota antes de continuar.');
+        }
+        if (job.status === 'paused' && campaign.status !== 'paused') return { ...campaign, status: 'paused',
+          resumeStatus: 'queued', queueConfirmed: true, message: 'La misión pendiente está en pausa.' };
+        return campaign;
       }
       if (!jobMatches(campaign, job)) return uncertain(campaign, 'La misión guardada cambió. Comprueba su destino y su flota antes de continuar.');
       if (job.status === 'uncertain' || job.needsReview) return uncertain(campaign, 'El envío no está confirmado. Comprueba las misiones del juego antes de volver a atacar.');
@@ -5512,7 +5769,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       }
       const current = currentContext();
       if (!mayAct(current)) return null;
-      const candidate = config.campaigns.find(item => ['waiting_origin', 'waiting_slot'].includes(item.status) &&
+      const candidate = config.campaigns.find(item => !item.fleetEdit && ['waiting_origin', 'waiting_slot'].includes(item.status) &&
         item.scope === current.scope && (!item.originId || item.originId === current.originId) &&
         (retryAfter.get(item.id) || 0) <= now());
       if (!candidate || typeof deps.verifyOrigin !== 'function' || typeof deps.queueOnce !== 'function') return null;
@@ -5607,6 +5864,102 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       }
       return saved;
     }
+    function fleetEditable(campaign) {
+      return Boolean(campaign && campaign.sentAt === null && (FLEET_EDITABLE.includes(campaign.status) ||
+        (campaign.status === 'paused' && FLEET_EDITABLE.includes(campaign.resumeStatus))));
+    }
+    function requireFleetEditable(campaign) {
+      if (!fleetEditable(campaign)) throw new Error('La flota de esta campaña ya se envió o necesita revisión. Solo se puede editar un ataque pendiente.');
+    }
+    function editableFleetJob(campaign) {
+      requireFleetEditable(campaign);
+      if (!campaign.queueJobId) return null;
+      const job = jobs().find(item => item.id === campaign.queueJobId);
+      if (!job || !['waiting', 'paused'].includes(job.status) || job.needsReview) {
+        throw new Error('La misión ya se está enviando, no está confirmada o ya no existe. Revisa su estado antes de editarla.');
+      }
+      const pendingFleet = campaign.fleetEdit?.pendingQuantities;
+      if (!jobMatches(campaign, job) && !(pendingFleet && jobMatches({ ...campaign, quantities: pendingFleet }, job))) {
+        throw new Error('La misión pendiente cambió. Actualiza la campaña antes de editar su flota.');
+      }
+      return job;
+    }
+    function expectedFleetCampaign(id, expected, requireEdit = true) {
+      ensureReady();
+      const campaign = config.campaigns.find(item => item.id === id);
+      if (!campaign) throw new Error('La campaña ya no existe.');
+      if (!object(expected) || !same(campaign, expected)) throw new Error('La campaña cambió en otra ventana. Revisa sus datos actualizados antes de continuar.');
+      requireFleetEditable(campaign);
+      if (requireEdit && !campaign.fleetEdit) throw new Error('Abre el editor de flota antes de cambiar las naves.');
+      return copy(campaign);
+    }
+    function commitFleetCampaign(expected, transform) {
+      return updateCampaign(expected.id, item => {
+        if (!same(item, expected)) throw new Error('La campaña cambió. El borrador más reciente sigue guardado.');
+        requireFleetEditable(item);
+        return transform(item);
+      });
+    }
+    function getFleetEdit(id) {
+      ensureReady();
+      const campaign = config.campaigns.find(item => item.id === id);
+      return campaign ? copy(campaign) : null;
+    }
+    function beginFleetEdit(id) {
+      const campaign = getFleetEdit(id);
+      if (!campaign) throw new Error('La campaña ya no existe.');
+      editableFleetJob(campaign);
+      if (campaign.fleetEdit) return campaign;
+      return commitFleetCampaign(campaign, item => ({ ...item, fleetEdit: {
+        drafts: Object.fromEntries(SHIPS.map(ship => [ship, String(item.quantities[ship])])),
+        baseQuantities: copy(item.quantities), pendingQuantities: null,
+      } }));
+    }
+    function setFleetDraft(id, ship, value, options = {}) {
+      const campaign = expectedFleetCampaign(id, options.expected);
+      if (!SHIPS.includes(ship) || typeof value !== 'string' || value.length > 16 || /[\u0000-\u001f\u007f]/.test(value)) {
+        throw new TypeError('El borrador de naves no es válido.');
+      }
+      if (campaign.fleetEdit.pendingQuantities) throw new Error('Confirma o descarta el cambio pendiente antes de editar de nuevo.');
+      editableFleetJob(campaign);
+      return commitFleetCampaign(campaign, item => ({ ...item,
+        fleetEdit: { ...item.fleetEdit, drafts: { ...item.fleetEdit.drafts, [ship]: value } } }));
+    }
+    function changeFleetJob(campaign, nextQuantities) {
+      const job = editableFleetJob(campaign);
+      if (!job) return null;
+      if (!sameQuantities(job.quantities, nextQuantities)) {
+        if (typeof deps.setJobFleetQuantities !== 'function') throw new Error('No está disponible la edición de la misión pendiente.');
+        syncResult(deps.setJobFleetQuantities(job.id, copy(nextQuantities), { expected: copy(job) }));
+      }
+      const confirmed = editableFleetJob(campaign);
+      if (!confirmed || !jobMatches({ ...campaign, quantities: nextQuantities }, confirmed)) {
+        throw new Error('No se pudo confirmar la nueva flota en la cola. La campaña sigue detenida con su borrador guardado.');
+      }
+      return confirmed;
+    }
+    function applyFleetEdit(id, options = {}) {
+      let campaign = expectedFleetCampaign(id, options.expected);
+      const amounts = parseFleetDrafts(campaign.fleetEdit.drafts);
+      editableFleetJob(campaign);
+      if (campaign.queueJobId && !campaign.fleetEdit.pendingQuantities) {
+        // Persist the only alternate fleet that a partial transaction may leave
+        // in the queue. A reload can finish it without accepting arbitrary edits.
+        campaign = commitFleetCampaign(campaign, item => ({ ...item,
+          fleetEdit: { ...item.fleetEdit, pendingQuantities: copy(amounts) } }));
+      }
+      changeFleetJob(campaign, amounts);
+      return commitFleetCampaign(campaign, item => ({ ...item, quantities: copy(amounts), fleetEdit: null }));
+    }
+    function cancelFleetEdit(id, options = {}) {
+      const campaign = expectedFleetCampaign(id, options.expected);
+      editableFleetJob(campaign);
+      // Cancel also recovers a queue write whose final campaign save failed.
+      // Restore only the known original fleet with a fresh queue CAS; unrelated
+      // external edits and in-flight claims are never overwritten.
+      changeFleetJob(campaign, campaign.fleetEdit.baseQuantities);
+      return commitFleetCampaign(campaign, item => ({ ...item, fleetEdit: null }));
+    }
     function pause(id) {
       const saved = updateCampaign(id, item => {
         if (!ACTIVE.includes(item.status)) throw new Error('Esta campaña no está activa.');
@@ -5620,6 +5973,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       if (!config.enabled) throw new Error('Activa los reintentos antes de reanudar una campaña.');
       const campaign = config.campaigns.find(item => item.id === id);
       if (!campaign || campaign.status !== 'paused' || !campaign.resumeStatus) throw new Error('Esta campaña necesita revisión y no puede reanudarse automáticamente.');
+      if (campaign.fleetEdit) throw new Error('Aplica o descarta la edición de flota antes de reanudar la campaña.');
       const queue = jobs();
       if (campaign.queueJobId && campaign.sentAt === null) {
         const job = queue.find(item => item.id === campaign.queueJobId);
@@ -5641,7 +5995,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       return saved;
     }
     function cancel(id) {
-      const saved = updateCampaign(id, item => ({ ...item, status: 'cancelled', resumeStatus: null, message: 'Campaña cancelada. No se prepararán más ataques.' }));
+      const saved = updateCampaign(id, item => ({ ...item, status: 'cancelled', resumeStatus: null, fleetEdit: null, message: 'Campaña cancelada. No se prepararán más ataques.' }));
       try { controlOwnJob(saved, 'cancel'); } catch (_) { notice = 'La campaña está cancelada; comprueba la misión que ya estaba pendiente.'; render(); }
       return saved;
     }
@@ -5728,7 +6082,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       const cards = value.campaigns.map(campaign => {
         const card = el('article'); card.dataset.attackRetryCampaign = campaign.id;
         const heading = el('div', undefined, 'ar-card-heading');
-        const badge = el('span', labels[campaign.status], 'ar-badge');
+        const editing = Boolean(campaign.fleetEdit && fleetEditable(campaign));
+        const badge = el('span', editing ? 'Edición pendiente' : labels[campaign.status], 'ar-badge');
         badge.dataset.tone = campaign.status === 'completed' ? 'ready' : ['uncertain', 'limit'].includes(campaign.status) ? 'warning' : '';
         heading.append(el('strong', campaign.targetName), badge);
         card.append(heading, el('p', 'Desde ' + campaign.originName + ' · (' + campaign.originCoordinate.q + ', ' + campaign.originCoordinate.r + ')', 'ar-muted'),
@@ -5737,13 +6092,20 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         ships.setAttribute('aria-label', 'Flota del reintento');
         for (const id of SHIPS) if (campaign.quantities[id] > 0) ships.append(el('span', campaign.quantities[id] + ' ' + NAMES[id], 'ar-ship'));
         card.append(ships, el('p', 'Reintentos enviados: ' + campaign.retries, 'ar-attempts'));
+        if (editing) card.append(el('p', 'Borrador guardado. La preparación y el envío esperan a que apliques o descartes la edición.', 'ar-muted'));
+        else if (campaign.status === 'awaiting_report' || campaign.sentAt !== null) card.append(el('p',
+          'La flota enviada ya no se puede editar. Podrás cambiar la del siguiente ataque cuando esté preparado.', 'ar-muted'));
         if (campaign.message) card.append(el('p', campaign.message, 'ar-muted'));
         const actions = el('div', undefined, 'ar-actions');
         const button = (label, action, actionId, disabled = false) => { const control = el('button', label); control.type = 'button'; control.disabled = disabled || readError;
           control.dataset.attackRetryAction = actionId;
           control.addEventListener('click', () => { try { action(); } catch (error) { showError(error); } }); actions.append(control); };
+        if (fleetEditable(campaign)) button(editing ? 'Continuar edición' : 'Editar flota', () => {
+          if (typeof deps.openFleetEditor !== 'function') throw new Error('No está disponible el editor de flota.');
+          deps.openFleetEditor(campaign.id);
+        }, 'edit-fleet');
         if (ACTIVE.includes(campaign.status)) button('Pausar', () => pause(campaign.id), 'pause');
-        if (campaign.status === 'paused' && campaign.resumeStatus) button('Reanudar', () => resume(campaign.id), 'resume', !value.enabled);
+        if (campaign.status === 'paused' && campaign.resumeStatus) button('Reanudar', () => resume(campaign.id), 'resume', !value.enabled || editing);
         if (!TERMINAL.includes(campaign.status)) button('Cancelar campaña', () => cancel(campaign.id), 'cancel');
         else button('Quitar', () => remove(campaign.id), 'remove');
         card.append(actions); return card;
@@ -5840,6 +6202,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     function destroy() { destroyed = true; epoch += 1; mounted?.replaceChildren(); mounted = null; ui = null; }
     refreshConfig();
     return { observeReport, recoverReports, flushMinimums, tick, canRunJob, setConfig, pause, resume, cancel, remove, mount, exportConfig, validateConfig,
+      beginFleetEdit, getFleetEdit, setFleetDraft, applyFleetEdit, cancelFleetEdit,
       importConfig, backupCheckpoint, restoreCheckpoint, refreshConfig, destroy,
       isEnabled: () => !destroyed && refreshConfig() && config.enabled,
       getEnabledAt: () => !destroyed && refreshConfig() ? config.enabledAt : 0,
@@ -5919,6 +6282,22 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     catch { return false; }
   }
 
+  // BEGIN MISSION CLAIM GUARD
+  function isCurrentMissionClaim(job) {
+    const eligible = value => value && value.status === 'sending' && value.autoSend === true
+      && Number.isSafeInteger(value.claimedAt) && value.claimedAt >= 0
+      && value.sentAt === null && !value.needsReview && !value.fleetEdit;
+    if (!eligible(job)) return false;
+    try {
+      const current = fleetWait.list().find(value => value.id === job.id);
+      if (!eligible(current)) return false;
+      const claim = value => [value.id, value.scope, value.originId, value.originName,
+        value.target, value.quantities, value.produce, value.autoSend, value.createdAt, value.claimedAt];
+      return JSON.stringify(claim(current)) === JSON.stringify(claim(job));
+    } catch { return false; }
+  }
+  // END MISSION CLAIM GUARD
+
   function currentMissionJob() {
     try { return fleetWait?.getJobFor(missionContext()) || null; } catch { return null; }
   }
@@ -5926,10 +6305,208 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   function sameMissionPreset(job, capture) {
     const spec = capture.spec;
     return Boolean(spec && job.scope === spec.scope && job.originId === spec.originId
+      && job.target.mode === spec.target.mode
+      && (job.target.missionAction === undefined || job.target.missionAction === spec.target.missionAction)
       && job.target.presetKey === spec.target.presetKey
       && job.target.coordinate?.q === spec.target.coordinate?.q
       && job.target.coordinate?.r === spec.target.coordinate?.r
       && SHIPS.every(([id]) => job.quantities[id] === spec.quantities[id]));
+  }
+
+  function openMissionFleetEditor(id) {
+    if (id?.startsWith('retry:')) {
+      const campaign = attackRetry.exportConfig().campaigns.find(value => value.queueJobId === id);
+      if (!campaign) throw new Error('No se encuentra la campaña de esta misión. Revisa su estado en Flota.');
+      return openFleetCompositionEditor('campaign', campaign.id);
+    }
+    return openFleetCompositionEditor('mission', id);
+  }
+
+  function openFleetCompositionEditor(kind, id) {
+    const previous = document.getElementById('oldlight-fleet-editor-dialog');
+    if (previous?.dataset.kind === kind && previous.dataset.entityId === id) {
+      previous.querySelector('[data-fleet-editor-root]')?.shadowRoot?.querySelector('input')?.focus();
+      return true;
+    }
+    if (previous) previous.close();
+    const service = kind === 'campaign' ? attackRetry : fleetWait;
+    let expected = service.beginFleetEdit(id);
+    if (!expected?.fleetEdit) throw new Error('Esta flota no se puede editar en su estado actual.');
+    if (kind === 'mission') missionAdapter.detach(id);
+    else if (expected.queueJobId) missionAdapter.detach(expected.queueJobId);
+    const focused = ui?.section.getRootNode().activeElement || document.activeElement;
+    const dialog = document.createElement('dialog');
+    dialog.id = 'oldlight-fleet-editor-dialog';
+    dialog.dataset.kind = kind;
+    dialog.dataset.entityId = id;
+    dialog.setAttribute('aria-label', kind === 'campaign' ? 'Editar flota de la campaña' : 'Editar flota de la misión');
+    dialog.style.cssText = 'width:400px;max-width:calc(100vw - 24px);max-height:calc(100dvh - 24px);overflow:auto;'
+      + 'box-sizing:border-box;padding:0;border:1px solid #456177;border-radius:12px;background:#0c141d;color:#e5eef6;color-scheme:dark;box-shadow:0 16px 48px #0009';
+    const backdrop = document.createElement('style');
+    backdrop.textContent = '#oldlight-fleet-editor-dialog::backdrop{background:#03080dcc}';
+    const card = document.createElement('div');
+    card.dataset.fleetEditorRoot = '';
+    const root = card.attachShadow({ mode: 'open' });
+    root.innerHTML = `<style>
+      :host{all:initial;display:block;font:13px/1.45 system-ui,sans-serif;color:#e5eef6;color-scheme:dark}
+      *{box-sizing:border-box}form{margin:0;padding:16px}header{display:flex;align-items:center;justify-content:space-between;gap:10px}
+      h2{font-size:16px;line-height:1.3;margin:0}p{margin:8px 0;overflow-wrap:anywhere}.muted{color:#a2b5c6;font-size:12px}
+      .route{margin-top:5px;color:#a2b5c6;font-size:12px}.hold{padding:10px;border:1px solid #456177;border-radius:8px;background:#131f2b;font-size:12px;margin:12px 0}
+      .ships{display:grid;gap:8px;margin:12px 0}.ship{padding:10px;border:1px solid #2b4053;border-radius:8px;background:#131f2b}
+      label{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;font-weight:600}
+      input{font:inherit;min-height:36px;width:96px;max-width:42%;padding:6px 8px;border:1px solid #456177;border-radius:7px;background:#0c141d;color:#e5eef6;text-align:right;font-variant-numeric:tabular-nums}
+      input[aria-invalid=true]{border-color:#f3cb80}.stock{margin-top:5px;font-size:11.5px;color:#a2b5c6;font-variant-numeric:tabular-nums}
+      .ship-error{margin:5px 0 0;font-size:11.5px;color:#f3cb80}.plan{font-size:12px;padding:10px;border:1px solid #2b4053;border-radius:8px;background:#131f2b}
+      .status{font-size:12px;color:#7de2c2;min-height:18px}.status[data-error=true]{color:#f3cb80}
+      .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.actions button{flex:1}
+      button{font:inherit;font-size:12px;min-height:36px;padding:7px 11px;border-radius:7px;border:1px solid #456177;background:#192939;color:#e5eef6;cursor:pointer;white-space:normal}
+      button:hover:not(:disabled){border-color:#7de2c2}button:disabled,input:disabled{opacity:.5;cursor:default}
+      .close{width:32px;min-height:32px;padding:0;background:transparent;color:#a2b5c6;font-size:18px}
+      .primary{border-color:#356959;background:#183c36;color:#7de2c2;font-weight:600}.secondary{background:transparent;color:#a2b5c6}
+      button:focus-visible,input:focus-visible{outline:2px solid #8bc7ff;outline-offset:2px}[hidden]{display:none!important}
+      @media(max-width:350px){form{padding:12px}input{width:82px}.actions{gap:6px}.actions button{padding:7px}}
+    </style><form novalidate>
+      <header><h2>Editar flota</h2><button type="button" class="close" data-action="close" aria-label="Cerrar editor y conservar el borrador" title="Cerrar y conservar el borrador">×</button></header>
+      <p class="route" data-field="route"></p>
+      <p class="hold" data-field="hold"></p>
+      <p class="muted" id="fleet-editor-help">0 excluye ese tipo. Hasta 50.000 naves por tipo.</p>
+      <div class="ships">${SHIPS.map(([ship, name]) => `<div class="ship"><label for="fleet-edit-${ship}">${name}<input id="fleet-edit-${ship}" type="text" inputmode="numeric" autocomplete="off" maxlength="16" data-fleet-edit-ship="${ship}" aria-label="${name} a enviar" aria-describedby="fleet-editor-help fleet-edit-${ship}-error"></label><div class="stock" data-fleet-edit-stock="${ship}"></div><p class="ship-error" id="fleet-edit-${ship}-error" hidden></p></div>`).join('')}</div>
+      <p class="plan" data-field="plan"></p>
+      <p class="status" data-field="status" role="status" aria-live="polite"></p>
+      <button type="button" data-action="reload" hidden>Recargar valores guardados</button>
+      <div class="actions"><button type="button" class="secondary" data-action="discard">Descartar edición</button><button type="submit" class="primary" data-action="done">Listo</button></div>
+      <p class="muted">Cerrar conserva el borrador y la espera. Listo aplica la flota completa y mantiene la pausa que ya tuviera.</p>
+    </form>`;
+    const fields = new Map(SHIPS.map(([ship]) => [ship, root.querySelector(`[data-fleet-edit-ship="${ship}"]`)]));
+    const status = root.querySelector('[data-field="status"]');
+    const plan = root.querySelector('[data-field="plan"]');
+    const done = root.querySelector('[data-action="done"]');
+    const discard = root.querySelector('[data-action="discard"]');
+    const reload = root.querySelector('[data-action="reload"]');
+    let failed = false;
+    let lastError = '';
+    let finished = false;
+    const canonical = value => JSON.stringify(value);
+    const say = (message, isError = false) => { status.textContent = message; status.dataset.error = String(isError); };
+    const refreshInputs = () => {
+      for (const [ship, input] of fields) input.value = expected.fleetEdit.drafts[ship];
+    };
+    const isCombat = kind === 'campaign' || expected.target?.mode === 'amounts';
+    const readDraft = () => {
+      const quantities = {};
+      let valid = true;
+      for (const [ship, input] of fields) {
+        const value = input.value;
+        const good = /^\d{1,5}$/.test(value) && Number(value) <= 50000;
+        const hint = root.querySelector(`#fleet-edit-${ship}-error`);
+        input.setAttribute('aria-invalid', String(!good));
+        hint.hidden = good;
+        hint.textContent = good ? '' : 'Introduce un entero entre 0 y 50.000.';
+        if (!good) valid = false;
+        quantities[ship] = good ? Number(value) : 0;
+      }
+      const total = Object.values(quantities).reduce((sum, amount) => sum + amount, 0);
+      const error = !valid ? 'Completa las cantidades para terminar la edición.' : !total ? 'Incluye al menos una nave.'
+        : isCombat && quantities.marauder + quantities.sentinel === 0 ? 'Un reintento necesita al menos un Marauder o Sentinel.' : '';
+      return { quantities, error };
+    };
+    const render = () => {
+      if (finished || !dialog.isConnected) return;
+      const draft = readDraft();
+      done.disabled = failed || Boolean(draft.error);
+      discard.disabled = failed;
+      reload.hidden = !failed;
+      for (const input of fields.values()) input.disabled = failed || Boolean(expected.fleetEdit.pendingQuantities);
+      const targetName = expected.targetName || expected.target?.label || 'Destino';
+      const point = expected.targetCoordinate || expected.target?.coordinate;
+      root.querySelector('[data-field="route"]').textContent = `${expected.originName} → ${targetName}`
+        + (point ? ` · (${point.q}, ${point.r})` : '');
+      root.querySelector('[data-field="hold"]').textContent = kind === 'campaign'
+        ? 'La campaña y su misión esperan mientras editas. Los cambios se guardan al escribir.'
+        : 'Esta misión espera mientras editas. Los cambios se guardan al escribir.';
+      const current = missionContext();
+      const sameOrigin = current.scope === expected.scope && current.originId === expected.originId && current.selectionCount === 1;
+      const fleet = sameOrigin ? currentMissionFleet() : null;
+      for (const [ship] of fields) {
+        const counts = fleet?.get(ship);
+        root.querySelector(`[data-fleet-edit-stock="${ship}"]`).textContent = counts
+          ? `${counts.parked} en base · ${counts.away} en misión · ${counts.building} en cola`
+          : 'Selecciona el origen para ver las naves disponibles.';
+      }
+      const production = !draft.error && fleet ? fleetWait.productionPlan({ quantities: draft.quantities }, fleet) : null;
+      plan.textContent = draft.error || (!production ? 'La disponibilidad se comprobará al seleccionar el sistema de origen.'
+        : 'Por producir con esta flota: ' + (SHIPS.filter(([ship]) => production.production[ship] > 0)
+          .map(([ship, name]) => `${production.production[ship]} ${name}`).join(' · ') || 'ninguna nave.')
+          + (production.ready ? ' Todas están en base.' : ' El envío esperará a reunirlas todas en base.'));
+      if (failed) say(lastError, true);
+      else say(draft.error ? 'Borrador guardado. ' + draft.error : 'Borrador guardado automáticamente.', Boolean(draft.error));
+    };
+    const fail = cause => {
+      failed = true;
+      lastError = cause?.message || 'No se pudo guardar el cambio. La flota sigue en espera.';
+      render();
+    };
+    for (const [ship, input] of fields) input.addEventListener('input', () => {
+      if (failed) { render(); return; }
+      try { expected = service.setFleetDraft(id, ship, input.value, { expected }); }
+      catch (cause) { fail(cause); }
+      render();
+    });
+    reload.addEventListener('click', () => {
+      try {
+        const fresh = service.getFleetEdit(id);
+        if (!fresh?.fleetEdit) throw new Error('Esta edición ya no está activa. Cierra el editor y revisa la misión.');
+        const unchanged = canonical(fresh) === canonical(expected);
+        expected = fresh;
+        failed = false;
+        lastError = '';
+        if (unchanged) {
+          for (const [ship, input] of fields) if (input.value !== expected.fleetEdit.drafts[ship]) {
+            expected = service.setFleetDraft(id, ship, input.value, { expected });
+          }
+        }
+        refreshInputs();
+        render();
+      } catch (cause) { fail(cause); }
+    });
+    const finish = action => {
+      if (failed || (action === 'applyFleetEdit' && readDraft().error)) return;
+      try {
+        const result = service[action](id, { expected });
+        if (kind === 'mission') missionAdapter.detach(id);
+        else if (expected.queueJobId) missionAdapter.detach(expected.queueJobId);
+        expected = result;
+        finished = true;
+        dialog.close();
+        schedule();
+      } catch (cause) { fail(cause); }
+    };
+    root.querySelector('form').addEventListener('submit', event => { event.preventDefault(); finish('applyFleetEdit'); });
+    discard.addEventListener('click', () => finish('cancelFleetEdit'));
+    root.querySelector('[data-action="close"]').addEventListener('click', () => dialog.close());
+    dialog.append(backdrop, card);
+    document.body.append(dialog);
+    refreshInputs();
+    render();
+    const poll = setInterval(() => {
+      if (finished || failed) { render(); return; }
+      try {
+        const fresh = service.getFleetEdit(id);
+        if (!fresh?.fleetEdit || canonical(fresh) !== canonical(expected)) {
+          fail(new Error('La flota ha cambiado desde otra vista. Recarga los valores guardados antes de continuar.'));
+        } else render();
+      } catch (cause) { fail(cause); }
+    }, 1000);
+    dialog.addEventListener('close', () => {
+      clearInterval(poll);
+      dialog.remove();
+      if (focused?.isConnected && !focused.disabled) focused.focus({ preventScroll: true });
+      else ui?.tabs.find(tab => tab.dataset.settingsTab === 'fleet')?.focus({ preventScroll: true });
+      schedule();
+    }, { once: true });
+    try { dialog.showModal(); fields.values().next().value?.focus(); }
+    catch (cause) { clearInterval(poll); dialog.remove(); throw cause; }
+    return true;
   }
 
   function offerEmptyPresetMission(options) {
@@ -6038,14 +6615,16 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       button.textContent = 'Reconectar y reanudar esta misión';
     }
     const available = Boolean(capture && plan && (!existing || existing.status === 'sent' || matching)
-      && existing?.status !== 'sending' && !existing?.needsReview && existing?.status !== 'uncertain');
+      && existing?.status !== 'sending' && !existing?.needsReview && !existing?.fleetEdit && existing?.status !== 'uncertain');
     const syncButton = () => { button.disabled = !available || (!produce.checked && !autoSend.checked); };
     produce.addEventListener('change', syncButton);
     autoSend.addEventListener('change', syncButton);
     syncButton();
     if (!available) {
       status.className = 'error';
-      status.textContent = captureError || (existing?.needsReview || existing?.status === 'uncertain'
+      status.textContent = captureError || (existing?.fleetEdit
+        ? 'Esta misión tiene una edición pendiente. Usa Continuar edición en Flota para terminarla.'
+        : existing?.needsReview || existing?.status === 'uncertain'
         ? 'Esta misión tiene un envío sin confirmar. Compruébalo primero desde Flota.'
         : existing && !matching && existing.status !== 'sent'
           ? 'Este origen ya tiene otra misión pendiente. Puedes cancelarla desde Flota antes de programar otra.'

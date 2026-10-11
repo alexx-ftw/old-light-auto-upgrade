@@ -1,6 +1,6 @@
 # Old Light Auto Upgrade
 
-Userscript para [Old Light](https://oldlight.io/play) que da prioridad a la flota, reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.9.0**, con una interfaz renovada, ancho ajustable y prioridades de edificios y flota que puedes arrastrar. La versión cargada aparece en la cabecera del helper, también al minimizarlo.
+Userscript para [Old Light](https://oldlight.io/play) que da prioridad a la flota, reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.10.0**, con edición de tipos y cantidades de nave en misiones pendientes y campañas, borradores guardados automáticamente y sincronización entre ambas tarjetas. La versión cargada aparece en la cabecera del helper, también al minimizarlo.
 
 ## Instalación
 
@@ -19,7 +19,7 @@ El helper mantiene la cabecera y las cuatro pestañas accesibles mientras despla
 | Pestaña | Contenido |
 | --- | --- |
 | **Edificios** | Prioridades, nivel construido y estado de cada estructura, condiciones de Reactor y Depot, objetivos de nivel. |
-| **Flota** | Mínimos y orden de naves, cantidades en base, misión y cola, reintentos, misiones pendientes y atajo de presets. |
+| **Flota** | Mínimos y orden de naves, cantidades en base, misión y cola, campañas y misiones pendientes con flota editable, y atajo de presets. |
 | **Avisos** | Pausa global, tarjetas independientes de navegador y Telegram, filtros por evento y diagnóstico. |
 | **Datos** | Exportar e importar, conexión y copias de Google Drive, ancho y posición de la ventana. |
 
@@ -109,6 +109,20 @@ Las misiones pendientes se guardan localmente. Tras recargar, el helper puede re
 
 Si un envío queda **sin confirmar**, se detiene y no se repite automáticamente. Comprueba los movimientos del juego antes de usar la opción explícita de reanudación. Las copias locales y de Drive incluyen estas misiones y los presets recordados; **importar una copia deja las misiones pendientes en pausa** para revisarlas antes de reanudar.
 
+### Cambiar la flota de una misión o campaña
+
+En **Flota**, pulsa **Editar flota** en una misión pendiente o en la tarjeta de una campaña. El editor muestra **Probe, Marauder, Sentinel y Vanguard**, con un campo independiente para cada tipo y sus cantidades en base, en misión y en cola. **0 excluye ese tipo del envío**; el máximo es **50.000 por tipo**.
+
+Por ejemplo, una campaña que prepara **9 Marauder + 1 Vanguard** puede cambiarse a **9 Marauder** poniendo Vanguard a **0**. Al pulsar **Listo**, la campaña y su misión vinculada muestran la nueva composición y dejan de esperar ese Vanguard. También puedes añadir tipos o aumentar sus cantidades: el helper recalcula las naves que faltan, descontando las existentes y las que están en construcción.
+
+- **Cada cambio se guarda al escribir.** Abrir el editor deja esa misión o campaña en espera, incluida su producción pendiente, hasta terminar la edición. Los campos vacíos o inválidos se conservan como borrador y nunca se usan para enviar una flota parcial.
+- **Listo** valida y aplica la composición completa. Después retoma la producción o el envío que estuvieran autorizados y espera a reunir todas las naves en base. Si la misión, campaña o automatización ya estaban pausadas, conserva esa pausa.
+- **Cerrar o Escape** conserva el borrador y la espera, también tras recargar la página. Usa **Continuar edición** para retomarlo. **Descartar edición** recupera la composición anterior.
+- La campaña y la misión vinculada comparten la misma edición: puedes abrirla desde cualquiera de las dos tarjetas. Los mínimos permanentes y los presets guardados del juego conservan sus valores. Las construcciones que el juego ya haya aceptado continúan en su cola.
+- Una misión debe contener al menos una nave. Las campañas de reintento necesitan al menos un **Marauder o Sentinel**. Solo se editan órdenes pendientes; un envío iniciado, sin confirmar o a la espera de su informe conserva la flota que se envió.
+
+Las misiones editadas mantienen su destino y la acción nativa **Attack** o **Send**. Antes del envío se comprueban otra vez el origen, las coordenadas, el tipo de misión y las cantidades exactas. Los cambios desde otra pestaña o un fallo de guardado mantienen el envío detenido y ofrecen recargar los valores guardados. Los borradores se incluyen en las copias; al importar, las misiones y campañas siguen en pausa. Editar la composición no genera notificaciones de ajustes.
+
 ## Reintentar ataques fallidos
 
 En **Flota → Tras una derrota**, activa **Reintentar ataques**. Viene **desactivado**. Al activarlo empieza a observar informes posteriores a ese momento; instalarlo no vuelve a atacar objetivos de informes antiguos.
@@ -126,7 +140,7 @@ El incremento se aplica a la flota completa que se enviará. Si se perdieron los
 - **Producir las naves que falten**, dentro de **Preparación y límites**, está marcado inicialmente. Reutiliza la cola de misiones pendientes y descuenta naves en base, en misión y en construcción. Si desmarcas la opción, espera a reunir las cantidades sin encargar producción para ese reintento. La opción se aplica a los nuevos reintentos; para detener uno ya preparado, pausa o cancela su campaña.
 - **Espera a la flota completa en base** antes de enviar. Por ejemplo, para 8 Marauder, con 2 en base, 3 en misión y 1 en construcción, necesita producir 2 y esperar a reunir los 8. Esta producción mantiene la prioridad de Flota sobre Edificios y respeta el orden de tipos de nave configurado.
 - **Máximo de reintentos:** por defecto, **3 por campaña**, además del ataque original. **0** permite continuar sin ese límite. Se cuentan los envíos confirmados. Reducir el máximo detiene un reintento pendiente que exceda el nuevo límite.
-- Cada campaña muestra el objetivo, origen, cantidades, estado y número de reintentos enviados. Puedes **Pausar**, **Reanudar** o **Cancelar campaña**. Desactivar la función pausa sus ataques pendientes; las construcciones o misiones ya aceptadas por el juego continúan.
+- Cada campaña muestra el objetivo, origen, cantidades, estado y número de reintentos enviados. Puedes **Editar flota** mientras el ataque esté pendiente, **Pausar**, **Reanudar** o **Cancelar campaña**. Si el ataque editado vuelve a perder, el siguiente incremento de **+1 Marauder** parte de la composición que realmente se envió. Desactivar la función pausa sus ataques pendientes; las construcciones o misiones ya aceptadas por el juego continúan.
 
 La función verifica la cuenta, galaxia, origen y coordenadas exactas. Requiere tener seleccionado el sistema de origen, el helper activo, la pestaña visible y **Structures o Shipyard** abierto. La comprobación puede mover la vista del mapa. Si hay otra misión pendiente de ese origen, espera su turno sin reemplazarla. Los reintentos utilizan las cantidades del ataque y no crean ni cambian presets guardados del juego.
 
@@ -228,7 +242,7 @@ Deja **Structures o Shipyard abierto y la pestaña visible**. Los dos paneles de
 
 Cuando la pestaña está oculta, el cliente del juego aplaza el refresco de sus contadores y **el script no inicia nuevas acciones**. Los avisos dependen de los cambios que lleguen a la interfaz mientras se observa. No ofrece una cobertura completa de eventos del servidor ni actividad continua en segundo plano; al cerrar, suspender o descartar la pestaña, deja de actuar.
 
-La versión **1.9.0** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las copias antiguas siguen siendo compatibles: si no incluyen ancho ni los nuevos desplegables, usa los valores iniciales de la interfaz. Las construcciones ya encoladas mantienen su orden en el juego.
+La versión **1.10.0** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las copias antiguas siguen siendo compatibles: las misiones y campañas sin borrador conservan su flota, y los campos de interfaz ausentes usan sus valores iniciales. Las construcciones ya encoladas mantienen su orden en el juego.
 
 ## Guardado local, exportación e importación
 
@@ -304,7 +318,7 @@ Las pruebas usan los planificadores incluidos en el propio userscript y módulos
 node --test tests/*.test.cjs
 ```
 
-Cubren la reserva para la flota, orden de naves, lotes parciales, recursos y capacidad, colas separadas, prioridades de edificios, condiciones de Reactor y Depot, producción negativa y datos incompletos. También cubren detección de derrotas, escalado de Marauder, límites, pausa, persistencia, deduplicación, autorización de la misión antes de enviar, identidad del origen y paginación de informes con separación por cuenta. Incluyen formatos nativos con fechas independientes y cantidades sin `kind`, recuperación de informes ya notificados, elección del último resultado por ruta, bloqueo de historial anterior y conservación de campañas en revisión. Las pruebas de preferencias comprueban el ancho, los desplegables, la compatibilidad con copias antiguas y el rechazo de valores de importación inválidos. No conectan al juego ni envían pedidos o notificaciones.
+Cubren la reserva para la flota, orden de naves, lotes parciales, recursos y capacidad, colas separadas, prioridades de edificios, condiciones de Reactor y Depot, producción negativa y datos incompletos. También cubren detección de derrotas, escalado de Marauder, límites, pausa, persistencia, deduplicación, autorización de la misión antes de enviar, identidad del origen y paginación de informes con separación por cuenta. Incluyen formatos nativos con fechas independientes y cantidades sin `kind`, recuperación de informes ya notificados, elección del último resultado por ruta, bloqueo de historial anterior y conservación de campañas en revisión. Las pruebas de preferencias comprueban el ancho, los desplegables, la compatibilidad con copias antiguas y el rechazo de valores de importación inválidos. Las de edición de flota comprueban borradores, cantidades inválidas, pausa durante la edición, sincronización entre campaña y misión, recuperación de guardados parciales, importación y el siguiente reintento desde la flota realmente enviada. También verifican el tipo de misión y el rechazo de autorizaciones de envío obsoletas. No conectan al juego ni envían pedidos o notificaciones.
 
 ## Incidencias
 
