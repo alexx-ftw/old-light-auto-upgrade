@@ -44,7 +44,12 @@ for (const failure of ['unreadable', 'corrupt']) {
     });
     const element = () => ({ dataset: {}, setAttribute() {}, append() {},
       replaceChildren() {}, addEventListener() {} });
-    const container = { ownerDocument: { createElement: element },
+    // No control has focus in these empty-queue storage cases. Model the
+    // document root used by the UI's focus-preservation check nevertheless.
+    const document = { createElement: element, activeElement: null };
+    const container = { ownerDocument: document,
+      getRootNode() { return document; },
+      contains(node) { return node === this; },
       replaceChildren() { replacements++; } };
     queue.mount(container);
     const mountedRenders = replacements;

@@ -1,6 +1,6 @@
 # Old Light Auto Upgrade
 
-Userscript para [Old Light](https://oldlight.io/play) que da prioridad a la flota, reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.8.1**. La versión cargada aparece en la cabecera del helper, también al minimizarlo.
+Userscript para [Old Light](https://oldlight.io/play) que da prioridad a la flota, reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.9.0**, con una interfaz renovada, ancho ajustable y prioridades de edificios y flota que puedes arrastrar. La versión cargada aparece en la cabecera del helper, también al minimizarlo.
 
 ## Instalación
 
@@ -12,9 +12,26 @@ Si el enlace muestra texto, utiliza la opción de instalar desde URL de tu gesto
 
 **Si ya tienes la versión 1.0.0:** abre el enlace anterior una vez y acepta la actualización o sustitución del script existente. También puedes reemplazar su contenido en el editor del gestor. Esa primera instalación añade las direcciones necesarias para las futuras actualizaciones automáticas.
 
+## Interfaz y navegación
+
+El helper mantiene la cabecera y las cuatro pestañas accesibles mientras desplazas su contenido. La ventana conserva su altura al cambiar de pestaña. **Siguiente acción** destaca la ETA, el próximo pedido y el motivo de espera; la fila de ese edificio o nave también queda resaltada.
+
+| Pestaña | Contenido |
+| --- | --- |
+| **Edificios** | Prioridades, nivel construido y estado de cada estructura, condiciones de Reactor y Depot, objetivos de nivel. |
+| **Flota** | Mínimos y orden de naves, cantidades en base, misión y cola, reintentos, misiones pendientes y atajo de presets. |
+| **Avisos** | Pausa global, tarjetas independientes de navegador y Telegram, filtros por evento y diagnóstico. |
+| **Datos** | Exportar e importar, conexión y copias de Google Drive, ancho y posición de la ventana. |
+
+Los controles de uso habitual aparecen primero. La conexión de Telegram, los límites de reintentos, la configuración avanzada de Drive y el diagnóstico se agrupan en secciones desplegables. Se recuerda cuáles dejas abiertas; las credenciales de Telegram comienzan accesibles si todavía falta configurar el canal. **Actividad del helper** muestra el estado detallado y la última solicitud. Los errores que requieren atención permanecen visibles fuera de los desplegables.
+
+Puedes **mover** el helper arrastrando la cabecera y **minimizarlo** con **−**. La barra compacta conserva la versión, la pausa de automatización y la ETA. Para **cambiar el ancho**, arrastra el borde izquierdo o usa **Datos → Ventana del helper → Ancho**; admite de **300 a 560 px** y se adapta al espacio disponible. **Restablecer tamaño y posición** recupera el ancho de 360 px y la esquina inferior derecha. La posición, el ancho, la última pestaña, el estado minimizado y los desplegables se guardan localmente y viajan en las copias.
+
+También se puede navegar con el teclado: **← / →**, **Inicio** y **Fin** cambian de pestaña cuando su botón tiene el foco. **↑ / ↓** sobre el asa de una prioridad la mueve, y los botones de flecha ofrecen la misma acción. En el borde de ancho, **← / →** ajustan 20 px e **Inicio / Fin** llevan a los límites; un doble clic restablece 360 px. **Escape** cancela un arrastre de ventana, ancho o prioridad. El foco se conserva mientras llegan actualizaciones del juego.
+
 ## Edificios y prioridades
 
-El panel **Auto ↑** se activa por defecto. Abre la pestaña **Edificios** para elegir qué edificios mejorar y ajustar sus condiciones. **Arrastra el asa de cada fila**, con ratón o pantalla táctil, para ordenar las prioridades; también puedes usar **↑ / ↓**. El número **1** tiene la prioridad más alta. El orden se guarda y se aplica al siguiente pedido.
+El helper se activa por defecto. Abre la pestaña **Edificios** para elegir qué edificios mejorar y ajustar sus condiciones. **Arrastra el asa de cada fila**, con ratón o pantalla táctil, para ordenar las prioridades; también puedes usar **↑ / ↓**. El número **1** tiene la prioridad más alta. El orden se guarda y se aplica al siguiente pedido.
 
 El script elige el primer edificio marcado y disponible según ese orden. Si uno todavía no puede mejorarse, pasa al siguiente disponible. Las mejoras afectan a los sistemas seleccionados, igual que al pulsar manualmente los botones del juego.
 
@@ -29,7 +46,7 @@ Si ya hay una mejora de Reactor o Depot en cola, espera antes de encargar otra d
 
 ### ETA del siguiente pedido
 
-El indicador **Siguiente acción**, encima de las pestañas, muestra la **nave y cantidad** o el **edificio y nivel**, la **cuenta atrás aproximada** y el motivo de la espera. La cuenta atrás también se ve debajo de **Auto ↑** al minimizar el helper; al pasar el cursor aparece el detalle. No necesita activar ningún ajuste.
+El indicador **Siguiente acción**, al principio del contenido de cada pestaña, muestra la **nave y cantidad** o el **edificio y nivel**, la **cuenta atrás aproximada** y el motivo de la espera. La cuenta atrás también se ve debajo de **Old Light** al minimizar el helper; al pasar el cursor aparece el detalle. No necesita activar ningún ajuste.
 
 La ETA corresponde a cuándo se podrá **encolar el siguiente pedido automático de flota o mejora**. Una construcción que ya esté en curso puede continuar mientras se añade otro pedido si queda un hueco. El tiempo de construcción de la nave o del nuevo nivel es distinto y lo muestra el juego.
 
@@ -40,6 +57,7 @@ La ETA corresponde a cuándo se podrá **encolar el siguiente pedido automático
 - Cuando la flota está cubierta o ya en construcción, pronostica la primera mejora que podrá hacerse con las prioridades y casillas marcadas actuales. Entre edificios, una mejora más barata puede estar disponible antes que la primera de la lista; si coinciden en tiempo, decide el orden de prioridad.
 - Reactor solo aparece si otra mejora marcada lo justifica y llega a poder pagarse. Depot espera al porcentaje configurado. Ninguno se repite si ya está en cola.
 - Si una nave no puede producirse por un requisito, capacidad, muelles, tesorería o falta de producción, explica ese bloqueo. Puede continuar con otros pedidos posibles según las reglas de prioridad. Si faltan datos exactos, conserva la reserva de flota y muestra **Sin ETA**. La pausa y los pedidos pendientes también tienen su propio estado; durante la confirmación conserva el nombre de la nave solicitada.
+- Mientras recupera los combates recientes necesarios para continuar, muestra **Comprobando…**. Si falla esa lectura, indica **En espera** y deja visible la causa; una mejora asequible no aparece como disponible mientras la recuperación bloquea los pedidos.
 
 Se actualiza con los datos del juego y la comprobación habitual de cada segundo. La cuenta atrás continúa entre actualizaciones de las cantidades enteras del HUD; si llega a cero antes de que el juego habilite el pedido, espera su confirmación. El símbolo **≈** indica una estimación con las tasas actuales, que el juego redondea. Los pedidos, otros gastos, las naves que regresen, los recursos que lleguen y las construcciones que terminen pueden cambiarla; se recalcula al observar esos cambios. Funciona también si todos los edificios están desmarcados y solo mantienes mínimos de flota.
 
@@ -47,7 +65,7 @@ Requiere **un único sistema**, una pestaña visible y **Structures o Shipyard**
 
 ## Mínimos de naves
 
-En la pestaña **Flota**, configura un mínimo para **Probe, Marauder, Sentinel y Vanguard**. Un mínimo de **0** desactiva la reposición de ese tipo. También puedes ordenar los tipos con **↑ / ↓**.
+En la pestaña **Flota**, configura un mínimo para **Probe, Marauder, Sentinel y Vanguard**. Un mínimo de **0** desactiva la reposición de ese tipo. Ordena los tipos **arrastrando su asa** o con **↑ / ↓**. Cada fila muestra por separado las naves en **base**, **misión** y **cola**.
 
 - Por defecto cuenta las naves **estacionadas en el sistema seleccionado**. Activa **Contar también las naves en misión** para incluir además las misiones que el juego atribuye a ese sistema.
 - Siempre descuenta las naves **ya en construcción**. Por ejemplo, con un mínimo de **10**, **4** en la base y **3** en cola, encarga **3** más.
@@ -93,7 +111,7 @@ Si un envío queda **sin confirmar**, se detiene y no se repite automáticamente
 
 ## Reintentar ataques fallidos
 
-En **Flota → Reintentar ataques fallidos**, activa **Reintentar automáticamente con +1 Marauder tras una derrota**. Viene **desactivado**. Al activarlo empieza a observar informes posteriores a ese momento; instalarlo no vuelve a atacar objetivos de informes antiguos.
+En **Flota → Tras una derrota**, activa **Reintentar ataques**. Viene **desactivado**. Al activarlo empieza a observar informes posteriores a ese momento; instalarlo no vuelve a atacar objetivos de informes antiguos.
 
 Después de una **derrota ofensiva explícita**, prepara otro ataque desde el mismo sistema y hacia las mismas coordenadas, con **un Marauder más que la flota enviada**. Conserva las cantidades de los demás tipos de nave. Por ejemplo:
 
@@ -105,7 +123,7 @@ Después de una **derrota ofensiva explícita**, prepara otro ataque desde el mi
 
 El incremento se aplica a la flota completa que se enviará. Si se perdieron los 7 Marauder del ejemplo, necesita reunir **8**, contando los que ya tengas disponibles, en misión o en construcción. No basta con construir uno para reemplazar toda la flota perdida.
 
-- **Producir las naves necesarias para nuevos reintentos** está marcado inicialmente. Reutiliza la cola de misiones pendientes y descuenta naves en base, en misión y en construcción. Si desmarcas la opción, espera a reunir las cantidades sin encargar producción para ese reintento. La opción se aplica a los nuevos reintentos; para detener uno ya preparado, pausa o cancela su campaña.
+- **Producir las naves que falten**, dentro de **Preparación y límites**, está marcado inicialmente. Reutiliza la cola de misiones pendientes y descuenta naves en base, en misión y en construcción. Si desmarcas la opción, espera a reunir las cantidades sin encargar producción para ese reintento. La opción se aplica a los nuevos reintentos; para detener uno ya preparado, pausa o cancela su campaña.
 - **Espera a la flota completa en base** antes de enviar. Por ejemplo, para 8 Marauder, con 2 en base, 3 en misión y 1 en construcción, necesita producir 2 y esperar a reunir los 8. Esta producción mantiene la prioridad de Flota sobre Edificios y respeta el orden de tipos de nave configurado.
 - **Máximo de reintentos:** por defecto, **3 por campaña**, además del ataque original. **0** permite continuar sin ese límite. Se cuentan los envíos confirmados. Reducir el máximo detiene un reintento pendiente que exceda el nuevo límite.
 - Cada campaña muestra el objetivo, origen, cantidades, estado y número de reintentos enviados. Puedes **Pausar**, **Reanudar** o **Cancelar campaña**. Desactivar la función pausa sus ataques pendientes; las construcciones o misiones ya aceptadas por el juego continúan.
@@ -120,7 +138,7 @@ Funciona también con Telegram y las notificaciones del navegador desactivados. 
 
 ### Aumentar automáticamente los mínimos de naves
 
-En **Flota → Reintentar ataques fallidos**, la opción **Aumentar automáticamente los mínimos tras una derrota** ajusta los mínimos a la flota del ataque perdido con **+1 Marauder**. Conserva las cantidades de los otros tipos de nave y nunca reduce un mínimo que ya sea mayor.
+En **Flota → Tras una derrota**, la opción **Aumentar mínimos de flota** ajusta los mínimos a la flota del ataque perdido con **+1 Marauder**. Conserva las cantidades de los otros tipos de nave y nunca reduce un mínimo que ya sea mayor.
 
 | Último ataque fallido | Mínimos actuales | Mínimos resultantes |
 | --- | --- | --- |
@@ -144,7 +162,7 @@ Si la función **ya estaba activada antes del combate**, la actualización vuelv
 
 Para recuperar solo considera el resultado más reciente de cada ruta. Una victoria, captura, empate o resultado que requiera revisión impide revivir una derrota anterior. El historial que quede fuera de esa ventana no inicia ataques durante la recuperación. Las campañas canceladas, terminadas o detenidas por su límite permanecen detenidas. Una campaña que necesita revisión conserva ese estado tras recargar.
 
-Mientras comprueba un lote de resultados, espera antes de gastar recursos o enviar una misión pendiente. Un fallo de lectura o guardado deja la recuperación pendiente, muestra la causa y reintenta después. Si falta información para decidir un ataque, **Flota → Reintentar ataques fallidos** muestra una explicación.
+Mientras comprueba un lote de resultados, espera antes de gastar recursos o enviar una misión pendiente. Un fallo de lectura o guardado deja la recuperación pendiente, muestra la causa y reintenta después. Si falta información para decidir un ataque, **Flota → Tras una derrota** muestra una explicación.
 
 Ejemplo: tras perder **8 Marauder**, el nuevo objetivo es **9**. Con **8 en base**, encarga **1**; con **0 en base, 0 en misión y 0 en construcción**, necesita producir **9**. El mínimo permanente de 8 no limita la cantidad del reintento, y el envío espera a tener los 9 en base. Se conserva el orden de prioridades de naves configurado.
 
@@ -155,7 +173,7 @@ Si los reintentos estaban desactivados cuando llegó el informe, activarlos ahor
 La pestaña **Avisos** reúne los canales y los filtros de notificaciones. Los dos canales son independientes y están **desactivados por defecto**:
 
 - **Navegador:** pulsa **Permitir avisos del navegador**. Solo ese botón solicita permiso; al concederlo se activa el canal. Después puedes controlarlo con el interruptor **Navegador**.
-- **Telegram:** introduce el **token de tu bot** y el **Chat ID** y activa el interruptor **Telegram**. Los cambios se guardan automáticamente; no hay botón Guardar. **Enviar prueba a Telegram** envía una prueba al chat guardado, independientemente de los filtros y sin necesidad de activar el canal. La prueba respeta la pausa global y la de Telegram; también se bloquea mientras quedan credenciales incompletas en edición.
+- **Telegram:** abre **Configurar Telegram**, introduce el **token de tu bot** y el **Chat ID** y activa el interruptor **Telegram**. Los cambios se guardan automáticamente; no hay botón Guardar. **Enviar prueba a Telegram** envía una prueba al chat guardado, independientemente de los filtros y sin necesidad de activar el canal. La prueba respeta la pausa global y la de Telegram; también se bloquea mientras quedan credenciales incompletas en edición.
 
 El token y el Chat ID se guardan en el almacenamiento del gestor de userscripts, mediante GM, fuera del archivo publicado. Cada pulsación guarda un borrador privado; cuando el par de credenciales es válido, se aplica tras **400 ms** sin cambios o al salir del campo. Mientras está incompleto, se conserva la conexión anterior. Los campos vacíos conservan lo guardado. Al recargar, se recuperan los borradores pendientes, sin rellenar los campos con las credenciales activas. **Borrar credenciales de Telegram** elimina tanto las credenciales como los borradores y desactiva el canal.
 
@@ -194,15 +212,15 @@ Cada informe tiene un encabezado específico, como **🔎 Old Light · Sondeo**,
 
 La primera comprobación crea una referencia silenciosa. Después revisa la lista cada **25 segundos**; un aumento del contador puede adelantar esa comprobación. Detecta informes aunque los leas enseguida y evita reenviar los mismos identificadores. Si desactivas este tipo y no hay reintentos activos, la siguiente activación empieza sin enviar el historial del período desactivado. Cuando están activos los reintentos, continúa leyendo los informes necesarios aunque sus avisos estén desactivados, y la referencia inicial admite únicamente informes posteriores a la activación de esa función. Cada cuenta y galaxia tienen una referencia independiente.
 
-Solo hace lecturas **GET** a las rutas de informes que usa el cliente nativo. **No abre los informes ni los marca como leídos.** Si un detalle desaparece o falla repetidamente, envía el resumen disponible indicando que falta el detalle. Los informes largos se resumen hasta el límite de Telegram. El estado de la consulta aparece al final de **Avisos**.
+Solo hace lecturas **GET** a las rutas de informes que usa el cliente nativo. **No abre los informes ni los marca como leídos.** Si un detalle desaparece o falla repetidamente, envía el resumen disponible indicando que falta el detalle. Los informes largos se resumen hasta el límite de Telegram. El estado de la consulta aparece en **Avisos → Estado y diagnóstico**; los errores activos también se muestran junto a la ETA.
 
 Necesita una ruta válida de galaxia, sesión del juego y una pestaña visible con **Structures o Shipyard** abierto. Si la ruta no admite esta lectura, conserva el aviso básico del contador. Los errores de sesión o de red se muestran y se reintentan con espera.
 
 ## Pausa y funcionamiento
 
-Usa el botón de la cabecera para **minimizar el panel a una barra compacta o restaurarlo**. Puedes moverlo arrastrando la cabecera, fuera de sus botones. Se guardan la posición, el estado minimizado y la última pestaña elegida; al cambiar el tamaño de la ventana, el panel se ajusta para mantener accesible la cabecera. Estos cambios de vista no envían avisos.
+Usa **−** en la cabecera para **minimizar el panel a una barra compacta** y **+** para restaurarlo. Al cambiar el tamaño de la ventana, el panel se ajusta para mantener accesible la cabecera. Estos cambios de vista no envían avisos.
 
-Pulsa **Activo** para pausar las mejoras, la reposición y las misiones pendientes. La pausa puede mantener los avisos del juego si dejas un canal de notificaciones activo y la lectura de resultados si tienes habilitados los reintentos; no prepara ni envía ataques mientras el helper está pausado. Las preferencias se guardan y se sincronizan entre las pestañas del juego. **Restablecer orden** recupera el orden inicial correspondiente sin cambiar mínimos, edificios marcados ni pausa.
+Pulsa **Pausar** en la cabecera para detener las mejoras, la reposición y las misiones pendientes, y **Reanudar** para continuar. La pausa puede mantener los avisos del juego si dejas un canal de notificaciones activo y la lectura de resultados si tienes habilitados los reintentos; no prepara ni envía ataques mientras el helper está pausado. Las preferencias se guardan y se sincronizan entre las pestañas del juego. **Restablecer orden** recupera el orden inicial correspondiente sin cambiar mínimos, edificios marcados ni pausa.
 
 El script respeta los costes, requisitos y colas del juego. Comparte una única petición pendiente entre edificios y naves, y espera su confirmación antes de enviar otra. Si una orden de naves queda sin confirmar y vence su plazo, **se pausa y pide comprobar la cola** antes de reanudar. Con Web Locks disponible, una sola pestaña controla los clics.
 
@@ -210,13 +228,13 @@ Deja **Structures o Shipyard abierto y la pestaña visible**. Los dos paneles de
 
 Cuando la pestaña está oculta, el cliente del juego aplaza el refresco de sus contadores y **el script no inicia nuevas acciones**. Los avisos dependen de los cambios que lleguen a la interfaz mientras se observa. No ofrece una cobertura completa de eventos del servidor ni actividad continua en segundo plano; al cerrar, suspender o descartar la pestaña, deja de actuar.
 
-La versión **1.8.1** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las construcciones ya encoladas mantienen su orden en el juego.
+La versión **1.9.0** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las copias antiguas siguen siendo compatibles: si no incluyen ancho ni los nuevos desplegables, usa los valores iniciales de la interfaz. Las construcciones ya encoladas mantienen su orden en el juego.
 
 ## Guardado local, exportación e importación
 
-Todo lo configurable se guarda automáticamente en este navegador, sin botones de Guardar ajustes: edificios, prioridades, mínimos y modo de flota, atajo y catálogo de presets recordados, misiones pendientes, ajustes y campañas de reintentos, objetivos de nivel, umbral del depósito, pausa, posición de la ventana, estado minimizado, pestaña seleccionada, secciones desplegadas, canales, filtros y pausas global y por canal de avisos, credenciales de Telegram y configuración de Drive.
+Todo lo configurable se guarda automáticamente en este navegador, sin botones de Guardar ajustes: edificios, prioridades, mínimos y modo de flota, atajo y catálogo de presets recordados, misiones pendientes, ajustes y campañas de reintentos, objetivos de nivel, umbral del depósito, pausa, posición y ancho de la ventana, estado minimizado, pestaña seleccionada, secciones desplegadas, canales, filtros y pausas global y por canal de avisos, credenciales de Telegram y configuración de Drive.
 
-Los campos de texto y números guardan el **borrador en cada cambio**. Los números y las credenciales se aplican cuando son válidos, tras 400 ms sin escribir o al salir del campo; el máximo de reintentos se aplica en cuanto el valor es válido. Puedes recargar y continuar una edición incompleta; los valores válidos anteriores siguen activos mientras tanto. Los toggles se aplican inmediatamente; las prioridades y la posición se guardan al terminar el movimiento.
+Los campos de texto y números guardan el **borrador en cada cambio**. Los números y las credenciales se aplican cuando son válidos, tras 400 ms sin escribir o al salir del campo; el máximo de reintentos se aplica en cuanto el valor es válido. Puedes recargar y continuar una edición incompleta; los valores válidos anteriores siguen activos mientras tanto. Los toggles se aplican inmediatamente; las prioridades, la posición y el ancho arrastrado se guardan al terminar el movimiento. El selector de ancho de **Datos** y los desplegables se guardan con cada cambio.
 
 La pestaña **Datos** permite:
 
@@ -243,7 +261,7 @@ No necesitas crear un proyecto, copiar identificadores ni importar un JSON de Go
 
 **Configuración avanzada** mantiene la opción de introducir un **Client ID OAuth de tipo Aplicación web** o importarlo desde el JSON de Google. Incluye enlaces para activar Google Drive API, configurar el consentimiento y autorizar el origen `https://alexx-ftw.github.io`. Del JSON solo se conserva el identificador público; no se guarda ni utiliza el client secret.
 
-También puedes editarlo en **Datos → Configuración avanzada** dentro del helper. Un borrador incompleto o vacío se guarda sin cortar la conexión vigente. **Borrar Client ID** elimina la configuración activa; al volver a abrir Drive se adopta la conexión integrada. Las copias de proyectos distintos permanecen separadas: conserva tu identificador anterior si quieres volver a ellas.
+También puedes editarlo en **Datos → Google Drive → Conexión avanzada** dentro del helper. Un borrador incompleto o vacío se guarda sin cortar la conexión vigente. **Borrar Client ID** elimina la configuración activa; al volver a abrir Drive se adopta la conexión integrada. Las copias de proyectos distintos permanecen separadas: conserva tu identificador anterior si quieres volver a ellas.
 
 ### Cuenta y autorización
 
@@ -278,7 +296,7 @@ La cabecera define `@updateURL` para consultar el archivo ligero `old-light-auto
 
 Documentación de los gestores: [Tampermonkey](https://www.tampermonkey.net/documentation.php?locale=en&q=update_url) y [Violentmonkey](https://violentmonkey.github.io/api/metadata-block/).
 
-## Pruebas de prioridades, ETA y reintentos
+## Pruebas de automatización y preferencias
 
 Las pruebas usan los planificadores incluidos en el propio userscript y módulos nativos de Node.js. Desde la raíz del repositorio:
 
@@ -286,7 +304,7 @@ Las pruebas usan los planificadores incluidos en el propio userscript y módulos
 node --test tests/*.test.cjs
 ```
 
-Cubren la reserva para la flota, orden de naves, lotes parciales, recursos y capacidad, colas separadas, prioridades de edificios, condiciones de Reactor y Depot, producción negativa y datos incompletos. También cubren detección de derrotas, escalado de Marauder, límites, pausa, persistencia, deduplicación, autorización de la misión antes de enviar, identidad del origen y paginación de informes con separación por cuenta. Incluyen formatos nativos con fechas independientes y cantidades sin `kind`, recuperación de informes ya notificados, elección del último resultado por ruta, bloqueo de historial anterior y conservación de campañas en revisión. No conectan al juego ni envían pedidos o notificaciones.
+Cubren la reserva para la flota, orden de naves, lotes parciales, recursos y capacidad, colas separadas, prioridades de edificios, condiciones de Reactor y Depot, producción negativa y datos incompletos. También cubren detección de derrotas, escalado de Marauder, límites, pausa, persistencia, deduplicación, autorización de la misión antes de enviar, identidad del origen y paginación de informes con separación por cuenta. Incluyen formatos nativos con fechas independientes y cantidades sin `kind`, recuperación de informes ya notificados, elección del último resultado por ruta, bloqueo de historial anterior y conservación de campañas en revisión. Las pruebas de preferencias comprueban el ancho, los desplegables, la compatibilidad con copias antiguas y el rechazo de valores de importación inválidos. No conectan al juego ni envían pedidos o notificaciones.
 
 ## Incidencias
 

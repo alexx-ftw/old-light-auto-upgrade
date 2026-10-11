@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.8.1
+// @version      1.9.0
 // @description  Flota prioritaria con reserva de recursos y ETA, mejoras por prioridad, presets, misiones pendientes y reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -25,7 +25,7 @@
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.8.1';
+  const SCRIPT_VERSION = '1.9.0';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -47,6 +47,8 @@
   const MAX_AUTOMATIC_MINIMUM_RECEIPTS = 128;
   const MAX_NUMERIC_DRAFT_LENGTH = 32;
   const NUMERIC_DEBOUNCE_MS = 400;
+  const UI_SECTION_KEYS = ['telegramConnection', 'notificationDiagnostics', 'driveAdvanced', 'automationDetails', 'buildingHelp', 'fleetHelp', 'backupHelp', 'retryOptions'];
+  const PANEL_WIDTH = { min: 300, max: 560, default: 360 };
   const MIN_GAP_MS = 500;
   const RESPONSE_TIMEOUT_MS = 12000;
   const RETRY_GAP_MS = 5000;
@@ -159,6 +161,21 @@
       ? { x: Math.round(value.x), y: Math.round(value.y) } : null;
   }
 
+  function normalizePanelWidth(value) {
+    return typeof value === 'number' && Number.isFinite(value)
+      ? Math.max(PANEL_WIDTH.min, Math.min(PANEL_WIDTH.max, Math.round(value))) : PANEL_WIDTH.default;
+  }
+
+  function normalizeUISections(value) {
+    return Object.fromEntries(UI_SECTION_KEYS.filter(key => typeof value?.[key] === 'boolean')
+      .map(key => [key, value[key]]));
+  }
+
+  function validUISections(value) {
+    return value && typeof value === 'object' && !Array.isArray(value)
+      && Object.keys(value).every(key => UI_SECTION_KEYS.includes(key) && typeof value[key] === 'boolean');
+  }
+
   function numericDraftText(value) {
     return typeof value === 'string' && value.length <= MAX_NUMERIC_DRAFT_LENGTH ? value : null;
   }
@@ -265,6 +282,8 @@
         expanded: value?.expanded === true,
         minimized: value?.minimized === true,
         panelPosition: normalizePanelPosition(value?.panelPosition),
+        panelWidth: normalizePanelWidth(value?.panelWidth),
+        uiSections: normalizeUISections(value?.uiSections),
         activeTab: ['buildings', 'fleet', 'notifications', 'data'].includes(value?.activeTab) ? value.activeTab : 'buildings',
         conditionsExpanded: value?.conditionsExpanded !== false,
         shipMinimums: Object.fromEntries(SHIPS.map(([id]) => [id, normalizeMinimum(value?.shipMinimums?.[id])])),
@@ -401,6 +420,8 @@
       }
       const invalid = draft !== null && parseNumericDraft(draft, id) === null;
       input.setAttribute('aria-invalid', String(invalid));
+      if (status.dataset) status.dataset.state = numericErrors.has(id) || invalid ? 'error'
+        : draft !== null ? 'draft' : numericSaved.has(id) ? 'saved' : '';
       const range = id === 'depot' ? '1 a 100' : '0 a 1.000.000';
       setText(status, numericErrors.get(id) || (draft !== null
         ? invalid ? `Borrador guardado. Introduce un entero de ${range}; sigue activo ${active}.`
@@ -883,6 +904,13 @@
         || document.querySelector(`${PANEL} .b-loading, ${FLEET_PANEL} .b-loading`)) {
       forecast = state('busy', 'Se recalculará al terminar la operación en curso.');
     } else if (!leader) forecast = state('blocked', 'Esperando control de esta pestaña.');
+    else if (reports.isRecovering()) {
+      const reportState = reports.getDiagnostics();
+      forecast = { ...state(reportState.lastError ? 'blocked' : 'busy', reportState.lastError
+        ? 'Esperando la lectura de los últimos combates para continuar.'
+        : 'Comprobando los combates recientes antes de continuar.'),
+        label: reportState.lastError ? 'En espera' : 'Comprobando…' };
+    }
     else {
       const resources = readResourceSnapshot();
       const snapshot = readUpgradeEtaSnapshot(rows(), resources);
@@ -921,7 +949,7 @@
     } else upgradeEtaClock = null;
     const numeric = Number.isFinite(forecast.waitMs);
     const duration = numeric ? (forecast.waitMs > 0 ? `≈${upgradeEta.formatDuration(forecast.waitMs)}` : 'Disponible')
-      : forecast.state === 'paused' ? 'En pausa' : forecast.state === 'busy' ? 'Confirmando…' : 'Sin ETA';
+      : forecast.label || (forecast.state === 'paused' ? 'En pausa' : forecast.state === 'busy' ? 'Confirmando…' : 'Sin ETA');
     const target = forecast.name ? forecast.kind === 'ship' ? `${forecast.name} ×${forecast.quantity}`
       : `${forecast.name}${forecast.targetLevel !== null ? ` · nivel ${forecast.targetLevel}` : ''}`
       : 'Próximo pedido automático';
@@ -936,7 +964,7 @@
     setText(ui.etaTime, duration);
     setText(ui.etaTarget, target);
     setText(ui.etaDetail, forecast.detail);
-    setText(ui.etaCompact, duration);
+    setText(ui.etaCompact, forecast.name ? `${duration} · ${forecast.name}` : duration);
     const readyAt = numeric ? new Date(Date.now() + forecast.waitMs) : null;
     ui.eta.title = explanation + (readyAt && Number.isFinite(readyAt.getTime())
       ? ` Hora aproximada: ${readyAt.toLocaleString(undefined, { hour12: false })}.` : '');
@@ -970,176 +998,256 @@
       const shadow = host.attachShadow({ mode: 'open' });
       shadow.innerHTML = `
         <style>
-          :host { all:initial; position:fixed; right:12px; bottom:12px;
-            z-index:2147483000; color-scheme:dark; font:12px/1.45 system-ui,sans-serif; }
-          :host([hidden]) { display:none !important; }
+          :host { all:initial; position:fixed; right:12px; bottom:12px; z-index:2147483000; color-scheme:dark;
+            font:13px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+            --ol-bg:#0c141d; --ol-surface:#131f2b; --ol-surface-raised:#192939; --ol-border:#2b4053;
+            --ol-border-strong:#456177; --ol-text:#e5eef6; --ol-muted:#a2b5c6; --ol-dim:#8097aa;
+            --ol-accent:#7de2c2; --ol-accent-bg:#183c36; --ol-warning:#f3cb80; --ol-danger:#f4a8a8;
+            --ol-focus:#8bc7ff; --ol-radius:10px; }
+          :host([hidden]), [hidden] { display:none !important; }
           * { box-sizing:border-box; }
-          .helper-shell { width:300px; max-width:calc(100vw - 24px); max-height:calc(100dvh - 24px);
-            overflow-y:auto; padding:11px 12px;
-            color:#d8e5ef; background:#101923; border:1px solid #40566b;
-            border-radius:10px; box-shadow:0 5px 24px #0005; }
-          header { display:flex; align-items:center; justify-content:space-between; gap:7px;
-            position:sticky; top:0; z-index:2; background:#101923; cursor:grab; touch-action:none; user-select:none; }
-          header::before { content:''; position:absolute; inset:-12px -12px -3px;
-            background:#101923; z-index:-1; pointer-events:none; }
-          header.is-dragging { cursor:grabbing; }
-          .helper-title { display:flex; align-items:center; gap:5px; flex:1; min-width:0; }
-          .helper-title > span:last-child { flex:1; min-width:0; }
-          .helper-title-line { display:flex; align-items:baseline; flex-wrap:wrap; gap:1px 4px; }
-          .helper-version { font-size:9px; line-height:1.3; font-weight:400; color:#93a9bb;
-            white-space:nowrap; font-variant-numeric:tabular-nums; }
+          .helper-shell { position:relative; display:flex; flex-direction:column; container-type:inline-size; container-name:helper;
+            width:var(--helper-width,360px); max-width:calc(100vw - 24px); height:min(720px,calc(100dvh - 24px));
+            color:var(--ol-text); background:var(--ol-bg); border:1px solid var(--ol-border-strong);
+            border-radius:14px; box-shadow:0 12px 48px #0007,0 1px 4px #0005; overflow:hidden; }
+          .helper-header { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-shrink:0;
+            padding:12px; background:var(--ol-bg); cursor:grab; touch-action:none; user-select:none; }
+          .helper-header.is-dragging { cursor:grabbing; }
+          .helper-title { display:flex; align-items:center; gap:8px; flex:1; min-width:0; }
+          .helper-title-copy { flex:1; min-width:0; }
+          .helper-title-line { display:flex; align-items:baseline; flex-wrap:wrap; gap:2px 6px; }
+          .helper-title-line strong { font-size:14px; font-weight:650; letter-spacing:.01em; }
+          .helper-version { font-size:10.5px; line-height:1.3; color:var(--ol-muted); white-space:nowrap;
+            font-variant-numeric:tabular-nums; }
+          .helper-grip { width:22px; height:26px; flex-shrink:0; color:var(--ol-accent); display:grid; place-items:center; }
+          .helper-grip svg { width:22px; height:22px; }
           .helper-eta-compact { display:none; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-            font-size:10px; line-height:1.3; font-weight:400; color:#afd9c3; font-variant-numeric:tabular-nums; }
-          .helper-shell.minimized .helper-eta-compact { display:block; }
-          .helper-grip { flex-shrink:0; color:#8298aa; font-size:16px; }
-          .helper-minimize { width:27px; height:27px; padding:0; color:#b8cddd;
-            background:#1c2a36; border-color:#40576b; flex-shrink:0; }
-          .helper-shell.minimized { width:210px; padding:7px 9px; overflow:hidden; }
+            font-size:11px; line-height:1.4; color:var(--ol-muted); font-variant-numeric:tabular-nums; }
+          .helper-shell.minimized { width:280px; height:auto; min-height:54px; }
           .helper-shell.minimized > :not(header) { display:none !important; }
-          strong { color:#f2f7fa; font-size:13px; }
-          button { font:inherit; cursor:pointer; color:#9ce9b9; background:#21382c;
-            border:1px solid #426a51; border-radius:6px; padding:3px 9px; }
-          button[aria-pressed="false"] { color:#cbd5df; background:#263340; border-color:#566575; }
-          button:disabled { opacity:.35; cursor:default; }
-          button:focus-visible, summary:focus-visible, input:focus-visible { outline:2px solid #8cc8ff; outline-offset:3px; }
+          .helper-shell.minimized .helper-header { padding:8px 10px; gap:6px; }
+          .helper-shell.minimized .helper-grip { display:none; }
+          .helper-shell.minimized .helper-title-line strong { font-size:12px; }
+          .helper-shell.minimized .helper-version { font-size:10px; }
+          .helper-shell.minimized .helper-eta-compact { display:block; }
+          button, input { font:inherit; }
+          button { min-height:32px; cursor:pointer; color:var(--ol-text); background:var(--ol-surface-raised);
+            border:1px solid var(--ol-border-strong); border-radius:7px; padding:6px 10px; line-height:1.3;
+            transition:background-color .12s,border-color .12s; }
+          button:hover:not(:disabled) { background:#23394b; border-color:#65869f; }
+          button:disabled { opacity:.42; cursor:default; }
+          button:focus-visible, summary:focus-visible, input:focus-visible, a:focus-visible {
+            outline:2px solid var(--ol-focus); outline-offset:2px; }
+          [data-action="automation-toggle"] { min-width:68px; font-size:12px; color:var(--ol-accent);
+            background:var(--ol-accent-bg); border-color:#356959; }
+          [data-action="automation-toggle"][aria-pressed="false"] { color:var(--ol-warning); background:#352d20; border-color:#806b40; }
+          .helper-minimize { width:32px; height:32px; flex-shrink:0; padding:0; font-size:19px; color:var(--ol-muted); }
+          .settings-tabs { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:4px; flex-shrink:0;
+            margin:0 12px 10px; padding:4px; border:1px solid var(--ol-border); border-radius:10px; background:#080f17; }
+          .settings-tabs button { min-height:35px; min-width:0; padding:5px 3px; border-color:transparent;
+            color:var(--ol-muted); background:transparent; font-size:12px; font-weight:550; }
+          .settings-tabs button[aria-selected="true"] { color:#d7fff0; background:var(--ol-accent-bg); border-color:#356959; }
+          .helper-scroll { flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain;
+            padding:0 12px 12px; scrollbar-width:thin; scrollbar-color:var(--ol-border-strong) transparent; scroll-padding:12px; }
           p { margin:8px 0 0; overflow-wrap:anywhere; }
-          small { display:block; color:#93a9bb; margin-top:5px; overflow-wrap:anywhere; }
-          small:empty { display:none; }
-          .upgrade-eta { margin-top:9px; padding:8px; border:1px solid #304252; border-radius:6px; background:#15222d; }
-          .upgrade-eta-heading { display:flex; align-items:baseline; justify-content:space-between; gap:7px;
-            color:#aebfd0; font-size:11px; }
-          .upgrade-eta-time { flex-shrink:0; color:#a9e5c4; font-size:12px; font-variant-numeric:tabular-nums; }
-          .upgrade-eta-target { margin-top:3px; color:#e2edf4; overflow-wrap:anywhere; }
-          .upgrade-eta-detail { margin-top:3px; font-size:10px; }
-          .upgrade-eta[data-state="blocked"] .upgrade-eta-time,
-          .upgrade-eta[data-state="paused"] .upgrade-eta-time,
-          .upgrade-eta[data-state="idle"] .upgrade-eta-time { color:#93a9bb; }
-          details { margin-top:8px; border-top:1px solid #304252; padding-top:7px; }
-          summary { cursor:pointer; color:#aebfd0; }
-          .choices { display:grid; gap:5px; padding-top:8px; }
-          .priority-row { display:grid; grid-template-columns:27px 12px minmax(0,1fr) auto;
-            align-items:center; gap:6px; }
-          .priority-drag { width:27px; height:27px; padding:0; color:#92a9bc; background:transparent;
-            border-color:transparent; font-size:17px; cursor:grab; touch-action:none; user-select:none; }
-          .priority-drag:hover { border-color:#40576b; background:#1c2a36; }
-          .priority-row.is-dragging { opacity:.5; background:#253b4b; border-radius:4px; }
-          .priority-row.drop-before { box-shadow:0 -2px 0 #80ccab; }
-          .priority-row.drop-after { box-shadow:0 2px 0 #80ccab; }
-          .choices.is-sorting, .choices.is-sorting .priority-drag { cursor:grabbing; }
-          .settings-tabs { display:flex; gap:4px; margin-top:10px; padding:3px; border-radius:7px; background:#09121b; }
-          .settings-tabs button { flex:1; min-width:0; padding:5px 3px; border-color:transparent;
-            color:#92a9bc; background:transparent; font-size:11px; }
-          .settings-tabs button[aria-selected="true"] { color:#def6e8; background:#254235; border-color:#446c56; }
-          .settings-page { margin-top:10px; padding-top:0; border-top:0; }
-          .settings-page[hidden] { display:none !important; }
+          small { display:block; color:var(--ol-muted); margin-top:5px; overflow-wrap:anywhere; }
+          small:empty, p:empty { display:none; }
+          strong { color:var(--ol-text); }
+          h3 { margin:0; font-size:13px; font-weight:650; }
+          .upgrade-eta { margin:0 0 14px; padding:12px; border:1px solid var(--ol-border); border-radius:var(--ol-radius);
+            background:var(--ol-surface); border-left:3px solid var(--ol-border-strong); }
+          .upgrade-eta[data-state="ready"], .upgrade-eta[data-state="waiting"] { border-left-color:var(--ol-accent); }
+          .upgrade-eta[data-state="blocked"] { border-left-color:var(--ol-warning); }
+          .upgrade-eta-heading { display:flex; align-items:baseline; justify-content:space-between; gap:8px;
+            color:var(--ol-muted); font-size:11.5px; }
+          .upgrade-eta-time { flex-shrink:0; color:var(--ol-accent); font-size:17px; line-height:1.2;
+            font-weight:650; font-variant-numeric:tabular-nums; }
+          .upgrade-eta-target { margin-top:6px; color:var(--ol-text); font-size:14px; font-weight:600; overflow-wrap:anywhere; }
+          .upgrade-eta-detail { margin-top:6px; font-size:11.5px; line-height:1.45; }
+          .upgrade-eta[data-state="paused"] .upgrade-eta-target { display:none; }
+          .upgrade-eta[data-state="blocked"] .upgrade-eta-time { color:var(--ol-warning); font-size:14px; }
+          .upgrade-eta[data-state="paused"] .upgrade-eta-time, .upgrade-eta[data-state="idle"] .upgrade-eta-time { color:var(--ol-muted); font-size:14px; }
+          .helper-alert { margin:0 0 12px; padding:10px; border:1px solid #87555a; border-radius:8px;
+            color:var(--ol-danger); background:#2e1d25; font-size:12px; }
+          details { margin-top:10px; border:1px solid var(--ol-border); border-radius:var(--ol-radius); padding:10px 12px;
+            background:var(--ol-surface); }
+          summary { cursor:pointer; color:var(--ol-text); font-size:12px; font-weight:600; min-height:22px; }
+          summary::marker { color:var(--ol-muted); font-size:10px; }
+          .settings-page { margin:0; padding:0; border:0; background:transparent; }
           .settings-page > summary, .settings-page > .notifications-details > summary { display:none; }
-          .settings-page > .notifications-details { margin-top:0; padding-top:0; border-top:0; }
-          .page-intro { margin:0 0 6px; color:#aebfd0; font-size:11px; }
-          .conditions-details { padding:8px; border:1px solid #304252; border-radius:6px; background:#15222d; }
-          .backup-actions { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin:10px 0; }
-          .backup-actions button { padding:8px 5px; color:#d8e5ef; background:#23344d; border-color:#52657f; }
-          .backup-status { white-space:pre-line; font-size:11px; color:#aebfd0; }
-          .backup-card { border:1px solid #304252; border-radius:6px; padding:9px; }
-          .oldlight-drive-config { margin-top:10px; padding:9px; border:1px solid #304252; border-radius:6px; }
-          .oldlight-drive-config h4 { margin:0 0 8px; font-size:13px; color:#f2f7fa; }
-          .oldlight-drive-config label { margin-top:8px; font-size:11px; }
-          .oldlight-drive-config .drive-advanced label { display:grid; gap:5px; }
-          .oldlight-drive-config input[type="text"] { width:100%; min-width:0; padding:7px;
-            font:inherit; color:#e1edf4; background:#172632; border:1px solid #40576b; border-radius:5px; }
-          .oldlight-drive-config p { font-size:11px; color:#aebfd0; }
-          .oldlight-drive-controls { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
-          .oldlight-drive-controls button { padding:6px; flex:1; }
-          .oldlight-drive-controls button:first-child { flex-basis:100%; }
-          .backup-help { display:inline-block; margin-top:8px; font-size:11px; color:#8cc8ff; }
-          .priority-position { color:#8298aa; text-align:right; font-variant-numeric:tabular-nums; }
-          .priority-actions { display:flex; gap:3px; }
-          .priority-actions button { width:27px; height:27px; padding:0; color:#b8cddd;
-            background:#1c2a36; border-color:#40576b; }
-          label { display:flex; align-items:center; gap:7px; cursor:pointer; min-width:0; }
-          input { accent-color:#80ccab; margin:0; flex-shrink:0; }
-          .reset-order, .reset-ships { margin-top:8px; color:#aebfd0; background:transparent;
-            border-color:#40576b; font-size:11px; }
-          .fleet-choices { display:grid; gap:8px; margin-top:9px; }
-          .fleet-row { display:grid; grid-template-columns:12px minmax(0,1fr) 66px auto;
-            gap:4px 6px; align-items:center; }
-          .fleet-row input { width:66px; min-width:0; padding:4px; font:inherit;
-            border:1px solid #40576b; border-radius:5px; background:#172632; color:#e1edf4; }
-          .fleet-counts { grid-column:2 / -1; color:#93a9bb; font-size:11px; }
-          .count-away { margin-top:10px; font-size:11px; }
-          .fleet-shortcut { margin-top:12px; padding-top:10px; border-top:1px solid #304252; font-size:11px; }
-          .depot-threshold { display:flex; flex-wrap:wrap; gap:5px; margin-top:9px; font-size:11px; }
-          .depot-threshold input { width:51px; padding:3px; border:1px solid #40576b;
-            border-radius:5px; color:#e1edf4; background:#172632; font:inherit; }
-          .numeric-autosave { grid-column:2 / -1; margin-top:3px; font-size:10px; line-height:1.35; }
-          .hint { color:#8298aa; font-size:11px; margin-top:8px; }
+          .settings-page > .notifications-details { margin:0; padding:0; border:0; background:transparent; }
+          .page-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:4px; }
+          .count-badge { display:inline-flex; align-items:center; padding:2px 7px; border:1px solid var(--ol-border);
+            border-radius:999px; color:var(--ol-muted); background:var(--ol-surface); font-size:11px; font-variant-numeric:tabular-nums; }
+          .page-intro, .hint { margin:5px 0 9px; color:var(--ol-muted); font-size:11.5px; line-height:1.5; }
+          .choices { display:grid; gap:5px; margin-top:10px; }
+          .priority-row { display:grid; grid-template-columns:24px 16px minmax(0,1fr) 64px; align-items:center;
+            gap:5px; min-height:55px; padding:7px 6px; border:1px solid var(--ol-border); border-radius:8px; background:var(--ol-surface); }
+          .priority-row[data-state="off"] { background:transparent; }
+          .priority-row[data-state="off"] .building-copy { color:var(--ol-muted); }
+          .priority-row[data-state="next"], .fleet-row[data-state="next"] { border-color:#3c826c; background:#112c29; }
+          .priority-drag { width:24px; height:34px; min-height:34px; padding:0; color:var(--ol-muted); background:transparent;
+            border-color:transparent; font-size:18px; cursor:grab; touch-action:none; user-select:none; }
+          .priority-drag:hover:not(:disabled) { border-color:var(--ol-border); background:var(--ol-surface-raised); }
+          .priority-row.is-dragging, .fleet-row.is-dragging { opacity:.55; }
+          .priority-row.drop-before, .fleet-row.drop-before { box-shadow:0 -2px 0 var(--ol-accent); }
+          .priority-row.drop-after, .fleet-row.drop-after { box-shadow:0 2px 0 var(--ol-accent); }
+          .is-sorting, .is-sorting .priority-drag { cursor:grabbing; }
+          .priority-position { color:var(--ol-dim); text-align:center; font-size:11px; font-variant-numeric:tabular-nums; }
+          .priority-actions { display:flex; gap:4px; }
+          .priority-actions button { width:30px; height:32px; padding:0; color:var(--ol-muted); background:transparent; border-color:var(--ol-border); }
+          label { display:flex; align-items:center; gap:8px; cursor:pointer; min-width:0; }
+          input { accent-color:var(--ol-accent); margin:0; flex-shrink:0; }
+          input[type="checkbox"] { width:16px; height:16px; }
+          .building-copy { min-width:0; font-size:12px; font-weight:550; }
+          .building-name { display:block; overflow-wrap:anywhere; }
+          .building-meta { display:block; color:var(--ol-muted); font-size:11px; line-height:1.35; font-weight:400; margin-top:2px; }
+          .priority-tools { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:8px; }
+          .priority-tools .hint { margin:0; font-size:11px; }
+          .reset-order, .reset-ships { color:var(--ol-muted); background:transparent; border-color:transparent; font-size:11.5px; padding:5px; }
+          .conditions-details .hint { margin:9px 0; }
+          .depot-threshold { display:flex; flex-wrap:wrap; gap:7px; margin-top:9px; font-size:12px; }
+          .depot-threshold input { width:59px; min-height:34px; padding:5px 7px; border:1px solid var(--ol-border-strong);
+            border-radius:6px; color:var(--ol-text); background:var(--ol-bg); }
+          .fleet-choices { display:grid; gap:7px; margin-top:10px; }
+          .fleet-row { display:grid; grid-template-columns:24px 16px minmax(0,1fr) 70px; gap:6px; align-items:center;
+            padding:9px 7px; border:1px solid var(--ol-border); border-radius:9px; background:var(--ol-surface); }
+          .fleet-row > .priority-drag { grid-column:1; grid-row:1 / 3; align-self:center; }
+          .fleet-row > .priority-position { grid-column:2; grid-row:1; }
+          .fleet-row > label { grid-column:3; grid-row:1; font-size:13px; font-weight:600; }
+          .fleet-row > input { grid-column:4; grid-row:1; width:70px; min-width:0; min-height:34px; padding:5px 7px;
+            border:1px solid var(--ol-border-strong); border-radius:6px; background:var(--ol-bg); color:var(--ol-text); font-variant-numeric:tabular-nums; }
+          .fleet-row > .priority-actions { grid-column:4; grid-row:2; justify-content:flex-end; }
+          .fleet-counts { grid-column:2 / 4; grid-row:2; display:flex; gap:6px; flex-wrap:wrap; font-size:11px; color:var(--ol-muted); }
+          .fleet-stat { display:inline-flex; align-items:baseline; gap:3px; }
+          .fleet-stat b { color:var(--ol-text); font-weight:600; font-variant-numeric:tabular-nums; }
+          .fleet-stat[data-count-kind="building"] b { color:var(--ol-accent); }
+          .count-away { margin-top:12px; font-size:12px; }
+          .fleet-shortcut { margin-top:12px; padding:12px; border:1px solid var(--ol-border); border-radius:var(--ol-radius); background:var(--ol-surface); font-size:12px; }
+          .fleet-shortcut .hint { margin:7px 0 0; }
+          kbd { font:inherit; font-size:11px; color:var(--ol-text); background:var(--ol-bg); padding:1px 4px; border:1px solid var(--ol-border-strong); border-radius:4px; }
+          .numeric-autosave { grid-column:2 / -1; margin:0; font-size:11px; line-height:1.45; }
+          .numeric-autosave[data-state="error"] { color:var(--ol-danger); }
+          .numeric-autosave[data-state="draft"] { color:var(--ol-warning); }
+          .numeric-autosave[data-state="saved"] { color:var(--ol-accent); }
+          .backup-card { border:1px solid var(--ol-border); border-radius:var(--ol-radius); padding:12px; background:var(--ol-surface); margin-top:10px; }
+          .backup-card:first-child { margin-top:0; }
+          .settings-page > [data-field="drive-backup"] { margin-top:12px; }
+          .backup-actions { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:12px 0 0; }
+          .backup-actions button { min-height:36px; padding:7px; }
+          .backup-status { white-space:pre-line; font-size:12px; color:var(--ol-muted); }
+          .backup-warning { margin-top:8px; font-size:11.5px; color:var(--ol-muted); }
+          .backup-help { display:inline-block; margin-top:10px; font-size:11.5px; color:var(--ol-focus); }
+          .panel-width-label { justify-content:space-between; font-size:12px; margin-top:10px; }
+          .panel-width-label output { color:var(--ol-muted); font-variant-numeric:tabular-nums; }
+          .panel-width-input { width:100%; min-height:30px; margin:6px 0; cursor:ew-resize; }
+          .panel-reset { width:100%; color:var(--ol-muted); background:transparent; }
+          .helper-activity { margin-top:14px; padding:9px 11px; background:transparent; }
+          .helper-activity summary { color:var(--ol-muted); font-size:11.5px; }
+          .helper-status, .helper-last { font-size:11.5px; color:var(--ol-muted); }
+          .helper-footer { display:flex; justify-content:space-between; gap:8px; flex-shrink:0; padding:7px 12px;
+            border-top:1px solid var(--ol-border); color:var(--ol-dim); font-size:10.5px; }
+          .helper-save-state::before { content:''; display:inline-block; width:5px; height:5px; border-radius:50%; background:var(--ol-accent); margin-right:5px; vertical-align:middle; }
+          .helper-resize { position:absolute; inset:54px auto 28px 0; width:9px; min-height:0; padding:0; border:0; border-radius:0;
+            background:transparent; cursor:ew-resize; touch-action:none; }
+          .helper-resize::after { content:''; display:block; width:2px; height:32px; border-radius:2px; background:var(--ol-border-strong); margin:auto; }
+          .helper-resize:hover:not(:disabled), .helper-resize:focus-visible { background:#7de2c21a; outline-offset:-2px; }
+          .helper-resize:hover::after, .helper-resize:focus-visible::after { background:var(--ol-accent); }
+          .sr-only { position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip-path:inset(50%); white-space:nowrap; border:0; }
+          @container helper (min-width:350px) {
+            .fleet-row { grid-template-columns:24px 16px minmax(0,1fr) 70px 64px; }
+            .fleet-row > .priority-actions { grid-column:5; grid-row:1; }
+            .fleet-counts { grid-column:3 / -1; }
+          }
+          @media (max-width:350px) { .helper-header { padding:10px; gap:5px; } .helper-grip { display:none; }
+            .settings-tabs { margin-left:10px; margin-right:10px; } .helper-scroll { padding-left:10px; padding-right:10px; }
+            .priority-row { grid-template-columns:20px 13px minmax(0,1fr) 64px; gap:4px; padding-left:4px; padding-right:4px; }
+            .fleet-row { grid-template-columns:20px 13px minmax(0,1fr) 68px; padding-left:4px; padding-right:4px; gap:4px; }
+            .fleet-row > input { width:68px; } .helper-footer { font-size:10px; } }
+          @media (prefers-reduced-motion:reduce) { button { transition:none; } }
         </style>
-        <section class="helper-shell" aria-label="Mejoras automáticas de Old Light">
-          <header title="Arrastra la cabecera para mover el helper">
-            <strong class="helper-title"><span class="helper-grip" aria-hidden="true">⠿</span><span><span class="helper-title-line"><span>Auto ↑</span><span class="helper-version" data-field="script-version" title="Versión del helper">v${SCRIPT_VERSION}</span></span><span class="helper-eta-compact" data-field="upgrade-eta-compact"></span></span></strong>
+        <section class="helper-shell" aria-label="Old Light Helper">
+          <header class="helper-header" title="Arrastra la cabecera para mover el helper">
+            <div class="helper-title"><span class="helper-grip" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="5" stroke="currentColor" stroke-width="1.3"/><ellipse cx="12" cy="12" rx="11" ry="4" transform="rotate(-40 12 12)" stroke="currentColor" stroke-width="1.2"/><circle cx="19.3" cy="6" r="1.5" fill="currentColor"/></svg></span><div class="helper-title-copy"><div class="helper-title-line"><strong>Old Light</strong><span class="helper-version" data-field="script-version" title="Versión del helper">v${SCRIPT_VERSION}</span></div><span class="helper-eta-compact" data-field="upgrade-eta-compact"></span></div></div>
             <button type="button" data-action="automation-toggle" aria-pressed="true"></button>
             <button type="button" class="helper-minimize" data-action="helper-minimize" aria-expanded="true" aria-label="Minimizar helper" title="Minimizar helper">−</button>
           </header>
-          <p role="status"></p><small></small>
-          <div class="upgrade-eta" data-field="upgrade-eta" aria-label="Tiempo hasta el siguiente pedido automático de flota o mejora">
-            <div class="upgrade-eta-heading"><span>Siguiente acción</span><strong class="upgrade-eta-time" data-field="upgrade-eta-time"></strong></div>
-            <div class="upgrade-eta-target" data-field="upgrade-eta-target"></div>
-            <small class="upgrade-eta-detail" data-field="upgrade-eta-detail"></small>
-          </div>
           <nav class="settings-tabs" role="tablist" aria-label="Ajustes del helper">
             <button type="button" role="tab" id="oldlight-tab-buildings" data-settings-tab="buildings" aria-controls="oldlight-settings-buildings" aria-selected="true">Edificios</button>
             <button type="button" role="tab" id="oldlight-tab-fleet" data-settings-tab="fleet" aria-controls="oldlight-settings-fleet" aria-selected="false" tabindex="-1">Flota</button>
             <button type="button" role="tab" id="oldlight-tab-notifications" data-settings-tab="notifications" aria-controls="oldlight-settings-notifications" aria-selected="false" tabindex="-1">Avisos</button>
             <button type="button" role="tab" id="oldlight-tab-data" data-settings-tab="data" aria-controls="oldlight-settings-data" aria-selected="false" tabindex="-1">Datos</button>
           </nav>
-          <details class="settings-page building-page" data-page="buildings" id="oldlight-settings-buildings" role="tabpanel" aria-labelledby="oldlight-tab-buildings" open><summary>Edificios</summary>
-            <p class="page-intro">Marca qué mejorar y ordena sus prioridades.</p>
-            <div class="choices" role="list" aria-label="Prioridad de edificios"></div>
-            <button type="button" class="reset-order">Restablecer orden</button>
-            <p class="hint">Arrastra el asa ⠿ o usa ↑ / ↓. Se mejora el primero disponible entre los marcados.</p>
-            <details class="conditions-details" open><summary>Condiciones de construcción</summary>
-              <p class="hint">Reactor solo si otra mejora marcada necesita más energía. Cada Reactor o Depot espera al anterior en cola.</p>
-              <label class="depot-threshold">Depot al alcanzar <input type="text" inputmode="numeric" maxlength="32"
-                data-setting="depot-fill-percent" aria-label="Porcentaje de capacidad para mejorar Resource Depot" aria-describedby="depot-numeric-status">% de capacidad</label>
-              <small class="numeric-autosave" id="depot-numeric-status" data-numeric-status="depot" aria-live="polite"></small>
+          <div class="helper-scroll">
+            <div class="upgrade-eta" data-field="upgrade-eta" aria-label="Tiempo hasta el siguiente pedido automático de flota o mejora">
+              <div class="upgrade-eta-heading"><span>Siguiente acción</span><strong class="upgrade-eta-time" data-field="upgrade-eta-time"></strong></div>
+              <div class="upgrade-eta-target" data-field="upgrade-eta-target"></div>
+              <small class="upgrade-eta-detail" data-field="upgrade-eta-detail"></small>
+            </div>
+            <p class="helper-alert" role="alert" hidden></p>
+            <details class="settings-page building-page" data-page="buildings" id="oldlight-settings-buildings" role="tabpanel" aria-labelledby="oldlight-tab-buildings" open><summary>Edificios</summary>
+              <div class="page-heading"><h3>Prioridades de mejora</h3><span class="count-badge" data-field="building-count"></span></div>
+              <p class="page-intro">Se mejora el primer edificio disponible que tengas marcado.</p>
+              <div class="choices" role="list" aria-label="Prioridad de edificios"></div>
+              <div class="priority-tools"><span class="hint">Arrastra ⠿ o usa las flechas</span><button type="button" class="reset-order">Restablecer orden</button></div>
+              <details class="conditions-details" open><summary>Reactor y almacenamiento</summary>
+                <p class="hint">Reactor solo cuando otra mejora marcada necesita energía. Cada Reactor o Depot espera al anterior en cola.</p>
+                <label class="depot-threshold">Mejorar Depot desde <input type="text" inputmode="numeric" maxlength="32" data-setting="depot-fill-percent" aria-label="Porcentaje de capacidad para mejorar Resource Depot" aria-describedby="depot-numeric-status">% de capacidad</label>
+                <small class="numeric-autosave" id="depot-numeric-status" data-numeric-status="depot" aria-live="polite"></small>
+              </details>
+              <div data-field="level-targets"></div>
             </details>
-            <div data-field="level-targets"></div>
-          </details>
-          <details class="settings-page fleet-details" data-page="fleet" id="oldlight-settings-fleet" role="tabpanel" aria-labelledby="oldlight-tab-fleet" open hidden><summary>Mínimos de naves</summary>
-            <p class="page-intro">Mínimo por tipo en el sistema seleccionado. 0 desactiva su reposición.</p>
-            <div class="fleet-choices" role="list" aria-label="Mínimos y prioridad de naves"></div>
-            <label class="count-away"><input type="checkbox">Contar también las naves en misión</label>
-            <button type="button" class="reset-ships">Restablecer orden de naves</button>
-            <p class="hint">Se descuentan las naves ya en construcción. La flota tiene prioridad y reserva recursos antes de mejorar edificios.</p>
-            <div data-field="attack-retry"></div>
-            <div data-field="fleet-wait"></div>
-            <div class="fleet-shortcut">
-              <label><input type="checkbox" data-setting="shift-preset-shortcut">Shift + clic: mostrar presets de flota</label>
-              <p class="hint">Los presets aparecen junto al menú circular del hexágono. Un clic envía el preset completo; si faltan naves, puedes esperar o encargar su producción. Desactiva este atajo para usar la multiselección con Shift.</p>
-            </div>
-          </details>
-          <div class="settings-page" data-page="notifications" id="oldlight-settings-notifications" role="tabpanel" aria-labelledby="oldlight-tab-notifications" hidden></div>
-          <div class="settings-page" data-page="data" id="oldlight-settings-data" role="tabpanel" aria-labelledby="oldlight-tab-data" hidden>
-            <div class="backup-card">
-              <strong>Copia local</strong>
-              <p class="page-intro">La configuración y la posición del helper se guardan automáticamente en este navegador.</p>
-              <div class="backup-actions">
-                <button type="button" data-action="export-settings">Exportar todo</button>
-                <button type="button" data-action="choose-import-settings">Importar copia</button>
+            <details class="settings-page fleet-details" data-page="fleet" id="oldlight-settings-fleet" role="tabpanel" aria-labelledby="oldlight-tab-fleet" open hidden><summary>Flota</summary>
+              <div class="page-heading"><h3>Flota mínima</h3><span class="count-badge">Prioridad sobre edificios</span></div>
+              <p class="page-intro">Ordena las naves e indica cuántas mantener. 0 desactiva su reposición.</p>
+              <div class="fleet-choices" role="list" aria-label="Mínimos y prioridad de naves"></div>
+              <label class="count-away"><input type="checkbox">Contar también las naves en misión</label>
+              <div class="priority-tools"><span class="hint">Se descuenta la producción en cola</span><button type="button" class="reset-ships">Restablecer orden</button></div>
+              <div data-field="attack-retry"></div>
+              <div data-field="fleet-wait"></div>
+              <div class="fleet-shortcut"><label><input type="checkbox" data-setting="shift-preset-shortcut"><span><kbd>Shift</kbd> + clic para mostrar presets</span></label>
+                <p class="hint">Selecciona un preset junto al sector para enviarlo. Si faltan naves, puedes esperar o producirlas.</p>
               </div>
-              <input type="file" data-action="import-settings" accept=".json,application/json" hidden>
-              <p class="hint">El archivo incluye prioridades, mínimos, panel, filtros y las credenciales guardadas de Telegram. Importar sustituye esos ajustes.</p>
-              <p class="backup-status" data-field="backup-status" role="status" aria-live="polite"></p>
+            </details>
+            <div class="settings-page" data-page="notifications" id="oldlight-settings-notifications" role="tabpanel" aria-labelledby="oldlight-tab-notifications" hidden></div>
+            <div class="settings-page" data-page="data" id="oldlight-settings-data" role="tabpanel" aria-labelledby="oldlight-tab-data" hidden>
+              <div class="backup-card"><h3>Copias de seguridad</h3>
+                <p class="page-intro">Los cambios se guardan automáticamente en este navegador.</p>
+                <div class="backup-actions"><button type="button" data-action="export-settings">Exportar todo</button><button type="button" data-action="choose-import-settings">Importar copia</button></div>
+                <input type="file" data-action="import-settings" accept=".json,application/json" hidden>
+                <p class="backup-warning">La copia incluye tus credenciales de Telegram. Importar sustituye la configuración actual.</p>
+                <p class="backup-status" data-field="backup-status" role="status" aria-live="polite"></p>
+              </div>
+              <div data-field="drive-backup"></div>
+              <div class="backup-card"><h3>Ventana del helper</h3>
+                <label class="panel-width-label" for="helper-panel-width">Ancho <output data-field="panel-width-value">360 px</output></label>
+                <input id="helper-panel-width" class="panel-width-input" data-setting="panel-width" type="range" min="300" max="560" step="1" value="360" aria-label="Ancho del helper en píxeles">
+                <button type="button" class="panel-reset" data-action="helper-reset-window">Restablecer tamaño y posición</button>
+                <p class="hint">Arrastra la cabecera para moverlo y el borde izquierdo para ajustar el ancho.</p>
+              </div>
             </div>
-            <div data-field="drive-backup"></div>
+            <details class="helper-activity" data-ui-section="automationDetails"><summary>Actividad del helper</summary><p class="helper-status" role="status"></p><small class="helper-last"></small></details>
           </div>
+          <footer class="helper-footer"><span class="helper-save-state">Autoguardado local</span><span>Arrastra para mover</span></footer>
+          <button type="button" class="helper-resize" data-action="helper-resize" role="separator" aria-orientation="vertical" aria-label="Ajustar ancho del helper" aria-valuemin="300" aria-valuemax="560" aria-valuenow="360" title="Arrastra hacia la izquierda para ampliar. Usa las flechas para ajustar; doble clic para restablecer."></button>
+          <span class="sr-only" data-field="reorder-status" role="status" aria-live="polite"></span>
         </section>`;
       ui = {
         section: shadow.querySelector('section'),
         header: shadow.querySelector('header'),
         minimize: shadow.querySelector('[data-action="helper-minimize"]'),
         toggle: shadow.querySelector('[data-action="automation-toggle"]'),
-        status: shadow.querySelector('[role="status"]'),
-        last: shadow.querySelector('small'),
+        status: shadow.querySelector('.helper-status'),
+        last: shadow.querySelector('.helper-last'),
+        alert: shadow.querySelector('.helper-alert'),
+        scroll: shadow.querySelector('.helper-scroll'),
+        resize: shadow.querySelector('[data-action="helper-resize"]'),
+        panelWidth: shadow.querySelector('[data-setting="panel-width"]'),
+        panelWidthValue: shadow.querySelector('[data-field="panel-width-value"]'),
+        resetWindow: shadow.querySelector('[data-action="helper-reset-window"]'),
+        buildingCount: shadow.querySelector('[data-field="building-count"]'),
+        reorderStatus: shadow.querySelector('[data-field="reorder-status"]'),
+        pageScroll: new Map(),
         eta: shadow.querySelector('[data-field="upgrade-eta"]'),
         etaTime: shadow.querySelector('[data-field="upgrade-eta-time"]'),
         etaTarget: shadow.querySelector('[data-field="upgrade-eta-target"]'),
@@ -1189,7 +1297,19 @@
         const input = document.createElement('input');
         input.type = 'checkbox';
         input.value = id;
-        label.append(input, document.createTextNode(name));
+        const copy = document.createElement('span');
+        copy.className = 'building-copy';
+        const buildingName = document.createElement('span');
+        buildingName.className = 'building-name';
+        buildingName.textContent = name;
+        const meta = document.createElement('span');
+        meta.className = 'building-meta';
+        meta.id = `building-meta-${id}`;
+        input.setAttribute('aria-label', name);
+        input.setAttribute('aria-describedby', meta.id);
+        copy.append(buildingName, meta);
+        label.append(input, copy);
+        installPriorityKeys(drag, id);
         const actions = document.createElement('div');
         actions.className = 'priority-actions';
         const up = document.createElement('button');
@@ -1207,7 +1327,7 @@
         }
         item.append(drag, position, label, actions);
         ui.choices.append(item);
-        ui.items.set(id, { item, position, input, up, down, drag, name });
+        ui.items.set(id, { item, position, input, up, down, drag, name, meta });
         input.addEventListener('change', () => {
           settings.excluded = BUILDINGS.map(([key]) => key).filter(key =>
             ![...ui.choices.querySelectorAll('input')].some(item => item.value === key && item.checked));
@@ -1221,6 +1341,14 @@
         item.className = 'fleet-row';
         item.dataset.shipId = id;
         item.setAttribute('role', 'listitem');
+        const drag = document.createElement('button');
+        drag.type = 'button';
+        drag.className = 'priority-drag';
+        drag.dataset.action = 'ship-drag';
+        drag.textContent = '⠿';
+        drag.title = `Arrastrar prioridad de ${name}`;
+        drag.setAttribute('aria-label', drag.title);
+        installPriorityKeys(drag, id, true);
         const position = document.createElement('span');
         position.className = 'priority-position';
         position.setAttribute('aria-hidden', 'true');
@@ -1252,15 +1380,26 @@
         }
         const counts = document.createElement('span');
         counts.className = 'fleet-counts';
+        const countValues = new Map();
+        for (const [kind, caption] of [['parked', 'base'], ['away', 'misión'], ['building', 'cola']]) {
+          const stat = document.createElement('span');
+          stat.className = 'fleet-stat';
+          stat.dataset.countKind = kind;
+          const value = document.createElement('b');
+          value.textContent = '—';
+          stat.append(value, document.createTextNode(caption));
+          counts.append(stat);
+          countValues.set(kind, value);
+        }
         const status = document.createElement('small');
         status.className = 'numeric-autosave';
         status.dataset.numericStatus = id;
         status.id = `minimum-${id}-status`;
         status.setAttribute('aria-live', 'polite');
         input.setAttribute('aria-describedby', status.id);
-        item.append(position, label, input, actions, counts, status);
+        item.append(drag, position, label, input, actions, counts, status);
         ui.fleetChoices.append(item);
-        ui.shipItems.set(id, { item, position, input, up, down, counts });
+        ui.shipItems.set(id, { item, position, input, up, down, counts, countValues, drag });
         installNumericInput(id, input, status);
       }
       ui.countAway.addEventListener('change', () => {
@@ -1302,12 +1441,14 @@
       ui.minimize.addEventListener('click', () => {
         ui.cancelPriorityDrag?.();
         ui.cancelPanelDrag?.();
+        ui.cancelResize?.();
         settings.minimized = !settings.minimized;
         layoutHelper();
         saveSettings();
         schedule();
       });
       installHelperDragging();
+      installHelperResizing();
       installPriorityDragging();
       installLocalBackups();
       ui.conditionsDetails.addEventListener('toggle', () => {
@@ -1319,8 +1460,11 @@
       for (const [index, tab] of ui.tabs.entries()) {
         const select = () => {
           ui.cancelPriorityDrag?.();
+          ui.cancelResize?.();
+          ui.pageScroll.set(settings.activeTab, ui.scroll.scrollTop);
           settings.activeTab = tab.dataset.settingsTab;
           syncSettingsTabs();
+          ui.scroll.scrollTop = ui.pageScroll.get(settings.activeTab) || 0;
           layoutHelper();
           saveSettings();
         };
@@ -1357,9 +1501,10 @@
       ui.reportsStatus.className = 'hint';
       ui.reportsStatus.dataset.field = 'reports-status';
       ui.reportsStatus.setAttribute('role', 'status');
-      ui.notificationContainer.append(ui.reportsStatus);
+      (ui.notificationContainer.querySelector('[data-notification-diagnostics]') || ui.notificationContainer).append(ui.reportsStatus);
       const notificationDetails = ui.notificationContainer.querySelector('.notifications-details');
       if (notificationDetails) notificationDetails.open = true;
+      installPresentationPreferences(shadow);
       syncSettingsTabs();
     }
     document.body.append(host);
@@ -1407,6 +1552,9 @@
         || (next.automaticMinimumReceipts !== undefined && !validAutomaticMinimumReceipts(next.automaticMinimumReceipts))
         || (next.presetCatalog !== undefined && !validPresetCatalog(next.presetCatalog))
         || (next.panelPosition != null && !normalizePanelPosition(next.panelPosition))
+        || (next.panelWidth !== undefined && (!Number.isInteger(next.panelWidth)
+          || next.panelWidth < PANEL_WIDTH.min || next.panelWidth > PANEL_WIDTH.max))
+        || (next.uiSections !== undefined && !validUISections(next.uiSections))
         || (next.activeTab !== undefined && !['buildings', 'fleet', 'notifications', 'data'].includes(next.activeTab))) {
       throw backupError('La copia contiene ajustes del helper inválidos.');
     }
@@ -1440,6 +1588,7 @@
     cancelNumericDraftTimers();
     ui?.cancelPriorityDrag?.();
     ui?.cancelPanelDrag?.();
+    ui?.cancelResize?.();
     const previous = { settings, raw: localStorage.getItem(KEY), notifications: notifier.exportConfig(),
       drive: driveBackup?.exportConfig?.(), levelTargets: levelTargets.exportConfig(), fleetMissionsCheckpoint: fleetWait.backupCheckpoint(),
       attackRetriesCheckpoint: attackRetry.backupCheckpoint() };
@@ -1531,10 +1680,95 @@
       if (page.tagName === 'DETAILS') page.open = true;
     }
     if (ui.conditionsDetails.open !== settings.conditionsExpanded) ui.conditionsDetails.open = settings.conditionsExpanded;
+    syncPresentationSections();
+  }
+
+  function presentationFailure(message) {
+    ui.presentationError = message;
+    ui.alert.hidden = false;
+    setText(ui.alert, error || message);
+  }
+
+  function persistPresentation(patch) {
+    let latest;
+    try { latest = normalizeSettings(JSON.parse(localStorage.getItem(KEY) || '{}')); }
+    catch {
+      presentationFailure('No se pudo leer la configuración. El ajuste de la ventana se conserva.');
+      return false;
+    }
+    const previous = settings;
+    settings = normalizeSettings({ ...latest, ...patch,
+      uiSections: patch.uiSections ? { ...latest.uiSections, ...patch.uiSections } : latest.uiSections });
+    if (!saveSettings()) {
+      settings = previous;
+      presentationFailure('No se pudo guardar este ajuste de la ventana. Inténtalo de nuevo.');
+      return false;
+    }
+    ui.presentationError = '';
+    syncPresentationSections();
+    layoutHelper();
+    return true;
+  }
+
+  function syncPresentationSections() {
+    if (!ui?.presentationDefaults) return;
+    const signature = JSON.stringify(settings.uiSections);
+    if (ui.presentationSignature === signature) return;
+    ui.presentationSignature = signature;
+    for (const [node, initial] of ui.presentationDefaults) {
+      const desired = settings.uiSections[node.dataset.uiSection] ?? initial;
+      ui.presentationState.set(node, desired);
+      if (node.open !== desired) node.open = desired;
+    }
+  }
+
+  function setPanelWidth(value) {
+    const width = normalizePanelWidth(value);
+    const rect = ui.section.getBoundingClientRect();
+    const rendered = Math.min(width, innerWidth - 24);
+    const panelPosition = settings.panelPosition
+      ? { x: Math.max(12, rect.right - rendered), y: rect.top } : null;
+    const saved = persistPresentation({ panelWidth: width, panelPosition });
+    layoutHelper();
+    return saved;
+  }
+
+  function installPresentationPreferences(root) {
+    const sections = [...root.querySelectorAll('details[data-ui-section]')]
+      .filter(node => UI_SECTION_KEYS.includes(node.dataset.uiSection));
+    ui.presentationDefaults = new Map(sections.map(node => [node, node.open]));
+    ui.presentationState = new Map(ui.presentationDefaults);
+    ui.presentationSignature = null;
+    syncPresentationSections();
+    root.addEventListener('toggle', event => {
+      const node = event.target;
+      if (!ui.presentationState.has(node)) return;
+      const previous = ui.presentationState.get(node);
+      if (previous === node.open) return;
+      if (!persistPresentation({ uiSections: { [node.dataset.uiSection]: node.open } })) {
+        ui.presentationState.set(node, previous);
+        node.open = previous;
+      }
+    }, true);
+    ui.panelWidth.addEventListener('input', () => setPanelWidth(Number(ui.panelWidth.value)));
+    ui.resetWindow.addEventListener('click', () => {
+      ui.cancelPanelDrag?.();
+      ui.cancelPriorityDrag?.();
+      ui.cancelResize?.();
+      persistPresentation({ panelWidth: PANEL_WIDTH.default, panelPosition: null });
+    });
   }
 
   function layoutHelper() {
     if (!ui || !host?.isConnected) return;
+    const width = String(settings.panelWidth);
+    if (ui.section.style.getPropertyValue('--helper-width') !== width + 'px') {
+      ui.section.style.setProperty('--helper-width', width + 'px');
+    }
+    if (ui.panelWidth.value !== width) ui.panelWidth.value = width;
+    setText(ui.panelWidthValue, width + ' px');
+    ui.resize.setAttribute('aria-valuenow', width);
+    ui.resize.setAttribute('aria-valuetext', width + ' píxeles');
     ui.section.classList.toggle('minimized', settings.minimized);
     setText(ui.minimize, settings.minimized ? '+' : '−');
     ui.minimize.setAttribute('aria-expanded', String(!settings.minimized));
@@ -1558,6 +1792,7 @@
     setStyle('left', settings.panelPosition.x + 'px');
     setStyle('top', settings.panelPosition.y + 'px');
   }
+
 
   function bindPointerDrag(target, handlers) {
     let state = null;
@@ -1602,6 +1837,7 @@
       start(event) {
         if (event.target.closest('button, input, a')) return null;
         ui.cancelPriorityDrag?.();
+        ui.cancelResize?.();
         const rect = ui.section.getBoundingClientRect();
         return { startX: event.clientX, startY: event.clientY, x: rect.left, y: rect.top,
           original: settings.panelPosition ? { ...settings.panelPosition } : null };
@@ -1623,57 +1859,122 @@
     });
   }
 
-  function installPriorityDragging() {
-    const clearMarkers = () => {
-      ui.choices.classList.remove('is-sorting');
-      for (const { item } of ui.items.values()) item.classList.remove('is-dragging', 'drop-before', 'drop-after');
-    };
-    ui.cancelPriorityDrag = bindPointerDrag(ui.choices, {
+  function installHelperResizing() {
+    ui.cancelResize = bindPointerDrag(ui.resize, {
       start(event) {
-        const handle = event.target.closest('[data-action="priority-drag"]');
-        if (!handle) return null;
         ui.cancelPanelDrag?.();
-        handle.focus({ preventScroll: true });
-        const id = handle.closest('[data-building-id]').dataset.buildingId;
-        return { id, startY: event.clientY, order: [...settings.order], index: settings.order.indexOf(id) };
+        ui.cancelPriorityDrag?.();
+        const rect = ui.section.getBoundingClientRect();
+        return { startX: event.clientX, width: settings.panelWidth, right: rect.right, top: rect.top,
+          position: settings.panelPosition ? { ...settings.panelPosition } : null };
       },
       move(state, event) {
-        if (state.order.join() !== settings.order.join()) { ui.cancelPriorityDrag(); return; }
-        if (!state.moved && Math.abs(event.clientY - state.startY) < 4) return;
+        const dx = event.clientX - state.startX;
+        if (!state.moved && Math.abs(dx) < 3) return;
         state.moved = true;
-        const section = ui.section.getBoundingClientRect();
-        if (event.clientY < section.top + 45) ui.section.scrollTop -= 18;
-        else if (event.clientY > section.bottom - 30) ui.section.scrollTop += 18;
-        const others = state.order.filter(id => id !== state.id);
-        const before = others.findIndex(id => {
-          const rect = ui.items.get(id).item.getBoundingClientRect();
-          return event.clientY < rect.top + rect.height / 2;
-        });
-        state.index = before < 0 ? others.length : before;
-        clearMarkers();
-        ui.choices.classList.add('is-sorting');
-        ui.items.get(state.id).item.classList.add('is-dragging');
-        if (before < 0) ui.items.get(others.at(-1)).item.classList.add('drop-after');
-        else ui.items.get(others[before]).item.classList.add('drop-before');
+        settings.panelWidth = normalizePanelWidth(state.width - dx);
+        settings.panelPosition = { x: state.right - Math.min(settings.panelWidth, innerWidth - 24), y: state.top };
+        layoutHelper();
       },
-      end(state, commit, event) {
-        clearMarkers();
-        const rect = ui.choices.getBoundingClientRect();
-        const section = ui.section.getBoundingClientRect();
-        const inside = event && event.clientX >= rect.left - 24 && event.clientX <= rect.right + 24
-          && event.clientY >= section.top && event.clientY <= section.bottom;
-        if (!commit || !state.moved || !inside || state.order.join() !== settings.order.join()) return;
-        const order = state.order.filter(id => id !== state.id);
-        order.splice(state.index, 0, state.id);
-        if (order.join() === settings.order.join()) return;
-        settings.order = order;
-        saveSettings();
-        notifyPriorityOrder();
-        syncChoices();
-        ui.items.get(state.id).drag.focus({ preventScroll: true });
-        schedule();
+      end(state, commit) {
+        if (!commit || !state.moved || !persistPresentation({ panelWidth: settings.panelWidth, panelPosition: settings.panelPosition })) {
+          settings.panelWidth = state.width;
+          settings.panelPosition = state.position;
+        }
+        layoutHelper();
       },
     });
+    ui.resize.addEventListener('keydown', event => {
+      const next = event.key === 'ArrowLeft' ? settings.panelWidth - 20
+        : event.key === 'ArrowRight' ? settings.panelWidth + 20
+          : event.key === 'Home' ? PANEL_WIDTH.min : event.key === 'End' ? PANEL_WIDTH.max : null;
+      if (next === null) return;
+      event.preventDefault();
+      event.stopPropagation();
+      ui.cancelResize?.();
+      setPanelWidth(next);
+    });
+    ui.resize.addEventListener('dblclick', event => {
+      event.preventDefault();
+      ui.cancelResize?.();
+      setPanelWidth(PANEL_WIDTH.default);
+    });
+  }
+
+  function installPriorityKeys(handle, id, ship = false) {
+    handle.addEventListener('keydown', event => {
+      if (!['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      movePriority(id, event.key === 'ArrowUp' ? -1 : 1, ship);
+      handle.focus({ preventScroll: true });
+    });
+  }
+
+  function installPriorityDragging() {
+    function bindList(list, items, key, ship) {
+      const clearMarkers = () => {
+        list.classList.remove('is-sorting');
+        for (const { item } of items.values()) item.classList.remove('is-dragging', 'drop-before', 'drop-after');
+      };
+      return bindPointerDrag(list, {
+        start(event) {
+          const handle = event.target.closest(`[data-action="${ship ? 'ship-drag' : 'priority-drag'}"]`);
+          if (!handle) return null;
+          ui.cancelPanelDrag?.();
+          ui.cancelResize?.();
+          handle.focus({ preventScroll: true });
+          const id = handle.closest(ship ? '[data-ship-id]' : '[data-building-id]').dataset[ship ? 'shipId' : 'buildingId'];
+          return { id, startY: event.clientY, order: [...settings[key]], index: settings[key].indexOf(id) };
+        },
+        move(state, event) {
+          if (state.order.join() !== settings[key].join()) { ui.cancelPriorityDrag(); return; }
+          if (!state.moved && Math.abs(event.clientY - state.startY) < 4) return;
+          state.moved = true;
+          const viewport = ui.scroll.getBoundingClientRect();
+          if (event.clientY < viewport.top + 35) ui.scroll.scrollTop -= 18;
+          else if (event.clientY > viewport.bottom - 30) ui.scroll.scrollTop += 18;
+          const others = state.order.filter(id => id !== state.id);
+          const before = others.findIndex(id => {
+            const rect = items.get(id).item.getBoundingClientRect();
+            return event.clientY < rect.top + rect.height / 2;
+          });
+          state.index = before < 0 ? others.length : before;
+          clearMarkers();
+          list.classList.add('is-sorting');
+          items.get(state.id).item.classList.add('is-dragging');
+          if (before < 0) items.get(others.at(-1)).item.classList.add('drop-after');
+          else items.get(others[before]).item.classList.add('drop-before');
+        },
+        end(state, commit, event) {
+          clearMarkers();
+          const rect = list.getBoundingClientRect();
+          const viewport = ui.scroll.getBoundingClientRect();
+          const inside = event && event.clientX >= rect.left - 24 && event.clientX <= rect.right + 24
+            && event.clientY >= viewport.top && event.clientY <= viewport.bottom;
+          if (!commit || !state.moved || !inside || state.order.join() !== settings[key].join()) return;
+          const order = state.order.filter(id => id !== state.id);
+          order.splice(state.index, 0, state.id);
+          if (order.join() === settings[key].join()) return;
+          settings[key] = order;
+          saveSettings();
+          notifyPriorityOrder(ship);
+          if (ship) syncFleetChoices(); else syncChoices();
+          items.get(state.id).drag.focus({ preventScroll: true });
+          announcePriority(state.id, ship);
+          schedule();
+        },
+      });
+    }
+    const cancelBuildings = bindList(ui.choices, ui.items, 'order', false);
+    const cancelShips = bindList(ui.fleetChoices, ui.shipItems, 'shipOrder', true);
+    ui.cancelPriorityDrag = () => { cancelBuildings(); cancelShips(); };
+  }
+
+  function announcePriority(id, ship) {
+    const names = ship ? SHIPS : BUILDINGS;
+    const order = ship ? settings.shipOrder : settings.order;
+    setText(ui.reorderStatus, `${names.find(([key]) => key === id)?.[1] || id}: prioridad ${order.indexOf(id) + 1} de ${order.length}.`);
   }
 
   function notifyPriorityOrder(ship = false) {
@@ -1695,7 +1996,8 @@
     if (ship) syncFleetChoices(); else syncChoices();
     const controls = (ship ? ui.shipItems : ui.items).get(id);
     const movedButton = delta < 0 ? controls.up : controls.down;
-    // Mantén el foco en el edificio movido, incluso al llegar a un extremo.
+    announcePriority(id, ship);
+    // Mantén el foco en el elemento movido, incluso al llegar a un extremo.
     (movedButton.disabled ? (delta < 0 ? controls.down : controls.up) : movedButton)
       .focus({ preventScroll: true });
     schedule();
@@ -1713,9 +2015,12 @@
       controls.up.disabled = index === 0;
       controls.down.disabled = index === settings.shipOrder.length - 1;
       const counts = fleetCounts(id);
-      setText(controls.counts, counts
-        ? `${counts.parked.toLocaleString()} en base · ${counts.away.toLocaleString()} en misión · +${counts.building.toLocaleString()} en cola`
-        : 'Selecciona un solo sistema para leer la flota');
+      for (const [kind, value] of controls.countValues) setText(value, counts ? counts[kind].toLocaleString() : '?');
+      controls.counts.title = counts
+        ? `${counts.parked.toLocaleString()} en base · ${counts.away.toLocaleString()} en misión · ${counts.building.toLocaleString()} en construcción`
+        : 'Selecciona un solo sistema para leer la flota';
+      controls.counts.setAttribute('aria-label', controls.counts.title);
+      controls.item.dataset.state = ui.eta.dataset.shipId === id ? 'next' : '';
     }
     ui.countAway.checked = settings.countAway;
     ui.shiftPresetShortcut.checked = settings.shiftPresetShortcut;
@@ -1730,6 +2035,9 @@
     const root = ui.choices.getRootNode();
     const focused = root.activeElement;
     const hadFocus = focused && ui.choices.contains(focused);
+    const current = new Map(rows().map(row => [row.id, row]));
+    const canRead = !!systemId() && [PANEL, FLEET_PANEL].some(selector => isVisible(document.querySelector(selector)));
+    setText(ui.buildingCount, `${BUILDINGS.length - settings.excluded.length} / ${BUILDINGS.length} activos`);
     for (const [index, id] of settings.order.entries()) {
       const controls = ui.items.get(id);
       const atPosition = ui.choices.children[index];
@@ -1737,6 +2045,17 @@
       if (atPosition !== controls.item) ui.choices.insertBefore(controls.item, atPosition || null);
       setText(controls.position, String(index + 1));
       controls.input.checked = !settings.excluded.includes(id);
+      const level = canRead ? /^Lvl\s+(\d+)$/i.exec(text(current.get(id)?.row.querySelector('.b-level'))) : null;
+      const next = ui.eta.dataset.buildingId === id;
+      const queued = canRead && queuedBuilding(id);
+      controls.item.dataset.state = !controls.input.checked ? 'off' : next ? 'next' : queued ? 'queued' : '';
+      const details = [level ? `Nivel ${Number(level[1])}` : 'Nivel no disponible'];
+      if (!controls.input.checked) details.push('Desactivado');
+      else if (queued) details.push('En cola');
+      else if (next) details.push('Siguiente');
+      else if (id === 'reactor') details.push('Según energía');
+      else if (id === 'warehouse') details.push(`Desde ${settings.depotFillPercent}%`);
+      setText(controls.meta, details.join(' · '));
       controls.up.disabled = index === 0;
       controls.down.disabled = index === settings.order.length - 1;
     }
@@ -1748,11 +2067,18 @@
 
   function show(message) {
     if (!ui) return;
-    setText(ui.toggle, settings.enabled ? 'Activo' : 'Pausado');
+    setText(ui.toggle, settings.enabled ? 'Pausar' : 'Reanudar');
     ui.toggle.setAttribute('aria-pressed', String(settings.enabled));
     ui.toggle.title = settings.enabled ? 'Pausar automatización' : 'Reanudar automatización';
+    ui.toggle.setAttribute('aria-label', ui.toggle.title);
     setText(ui.status, message);
-    setText(ui.last, lastClick ? `Último clic: ${lastClick}` : '');
+    setText(ui.last, lastClick ? `Última solicitud: ${lastClick}` : '');
+    const reportState = reports.getDiagnostics();
+    const reportAlert = reportState.enabled && reportState.active && (reportState.lastError || reportState.storageError)
+      ? reportState.status : '';
+    const alert = error || ui.presentationError || reportAlert;
+    ui.alert.hidden = !alert;
+    setText(ui.alert, alert);
     renderUpgradeEta();
     syncSettingsTabs();
     layoutHelper();
@@ -2518,7 +2844,15 @@
         const item = document.createElement('button');
         item.type = 'button';
         item.setAttribute('role', 'menuitem');
-        item.textContent = record.label;
+        const name = document.createElement('span');
+        name.className = 'preset-name';
+        name.textContent = record.label;
+        const action = document.createElement('span');
+        action.className = 'preset-action';
+        action.setAttribute('aria-hidden', 'true');
+        action.textContent = record.locked ? 'No disponible' : '→';
+        item.append(name, action);
+        item.setAttribute('aria-label', record.label + (record.locked ? ', no disponible' : ''));
         item.disabled = record.locked || pending;
         item.addEventListener('click', event => {
           event.preventDefault(); event.stopPropagation(); choosePreset(current, record);
@@ -2526,8 +2860,8 @@
         return item;
       });
       current.list.replaceChildren(...current.items);
-      current.note.textContent = pending ? 'Cargando presets…' : current.emptyMessage || (records.length
-        ? current.emptyFleet ? 'Clic para preparar la espera o producción' : 'Clic para enviar'
+      current.note.textContent = pending ? 'Comprobando ruta y presets…' : current.emptyMessage || (records.length
+        ? current.emptyFleet ? 'Elige un preset para esperar o producir las naves que faltan.' : 'Un clic envía la flota del preset. Esc para cerrar.'
         : current.emptyFleet ? 'Abre una vez los presets de flota con naves disponibles para recordarlos aquí.' : 'No hay presets guardados.');
       place(current);
       if (focused >= 0) current.items[focused]?.focus({ preventScroll: true });
@@ -2536,17 +2870,17 @@
       const host = document.createElement('div');
       host.id = MENU_ID;
       const shadow = host.attachShadow({ mode: 'open' });
-      shadow.innerHTML = '<style>'
-        + ':host{position:absolute;display:block;pointer-events:auto;width:192px;max-width:calc(100vw - 16px);'
-        + 'box-sizing:border-box;border:1px solid #3c5368;border-radius:10px;background:#101b27;'
-        + 'color:#e8f0f7;box-shadow:0 8px 24px #0009;font:12px/1.35 system-ui,sans-serif;padding:8px;z-index:1}'
-        + '*{box-sizing:border-box}h2{margin:0 0 6px;font-size:11px;color:#aabfd0;font-weight:600}'
-        + '[role=menu]{display:grid;gap:4px;max-height:240px;overflow:auto}'
-        + 'button{font:inherit;color:inherit;text-align:left;border:1px solid transparent;border-radius:6px;'
-        + 'background:#1c2e40;padding:7px 9px;cursor:pointer}button:hover,button:focus-visible{outline:0;'
-        + 'border-color:#78b2dc;background:#28465d}button:disabled{opacity:.4;cursor:default}'
-        + 'p{margin:6px 1px 0;color:#9fb5c7;font-size:10px}</style>'
-        + '<h2>Presets de flota</h2><div role="menu" aria-label="Presets de flota"></div><p role="status"></p>';
+      shadow.innerHTML = `<style>
+        :host{position:absolute;display:block;pointer-events:auto;width:236px;max-width:calc(100vw - 16px);box-sizing:border-box;border:1px solid var(--ol-border-strong,#456177);border-radius:var(--ol-radius,10px);background:var(--ol-bg,#0c141d);color:var(--ol-text,#e5eef6);box-shadow:0 12px 32px #0008;font:13px/1.45 system-ui,sans-serif;padding:10px;z-index:1;color-scheme:dark}
+        *{box-sizing:border-box}h2{margin:0 0 8px;font-size:12px;color:var(--ol-muted,#a2b5c6);font-weight:600}
+        [role=menu]{display:grid;gap:6px;max-height:min(280px,55vh);overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--ol-border-strong,#456177) transparent}
+        button{display:flex;align-items:center;justify-content:space-between;gap:9px;min-height:38px;font:inherit;color:inherit;text-align:left;border:1px solid var(--ol-border,#2b4053);border-radius:7px;background:var(--ol-surface,#131f2b);padding:8px 10px;cursor:pointer}
+        button:hover:not(:disabled){border-color:var(--ol-accent,#7de2c2);background:var(--ol-accent-bg,#183c36)}
+        button:focus-visible{outline:2px solid var(--ol-focus,#8bc7ff);outline-offset:-2px;border-color:var(--ol-focus,#8bc7ff)}
+        button:disabled{opacity:.5;cursor:default}.preset-name{min-width:0;overflow-wrap:anywhere}.preset-action{flex:none;color:var(--ol-accent,#7de2c2);font-size:15px}
+        button:disabled .preset-action{font-size:11.5px;color:var(--ol-muted,#a2b5c6);max-width:72px}
+        p{margin:8px 1px 0;color:var(--ol-muted,#a2b5c6);font-size:11.5px;overflow-wrap:anywhere}
+      </style><h2>Presets de flota</h2><div role="menu" aria-label="Presets de flota"></div><p role="status"></p>`;
       current.host = host;
       current.shadow = shadow;
       current.list = shadow.querySelector('[role="menu"]');
@@ -4290,6 +4624,11 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         const key = JSON.stringify({ jobs, context: current, notice, readError, storageError });
         if (key === renderKey) return;
         renderKey = key;
+        const active = mounted.getRootNode().activeElement;
+        const focus = mounted.contains(active) ? {
+          job: active.closest('[data-fleet-wait-job]')?.dataset.fleetWaitJob,
+          option: active.dataset.fleetWaitOption, action: active.dataset.fleetWaitAction,
+        } : null;
         const doc = mounted.ownerDocument;
         const el = (tag, text, className) => {
           const element = doc.createElement(tag);
@@ -4301,14 +4640,35 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         section.setAttribute('aria-label', 'Misiones pendientes');
         section.hidden = !jobs.length && !notice;
         const style = el('style');
-        style.textContent = '.oldlight-fleet-wait{font:inherit;color:inherit;max-width:100%;min-width:0}' +
-          '.oldlight-fleet-wait h4{font-size:13px;margin:12px 0 8px}.oldlight-fleet-wait article{padding:10px;border:1px solid #3b4b60;border-radius:8px;margin:8px 0;min-width:0;overflow-wrap:anywhere}' +
-          '.oldlight-fleet-wait p{font-size:12px;line-height:1.45;margin:4px 0;overflow-wrap:anywhere}' +
-          '.oldlight-fleet-wait .fw-muted{opacity:.75}.oldlight-fleet-wait .fw-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}' +
-          '.oldlight-fleet-wait button{font:inherit;font-size:12px;padding:5px 8px;max-width:100%;white-space:normal;border-radius:6px;border:1px solid #52647c;background:#223046;color:inherit;cursor:pointer}' +
-          '.oldlight-fleet-wait button:disabled{opacity:.5;cursor:default}.oldlight-fleet-wait label{display:flex;align-items:flex-start;gap:6px;font-size:12px;margin-top:6px}' +
-          '.oldlight-fleet-wait input{margin:2px 0 0}.oldlight-fleet-wait .fw-error{color:#f8c58a}';
-        section.append(style, el('h4', 'Misiones pendientes'));
+        style.textContent = `
+          .oldlight-fleet-wait{font:inherit;color:var(--ol-text,#e5eef6);max-width:100%;min-width:0;margin-top:16px}
+          .oldlight-fleet-wait .fw-heading,.oldlight-fleet-wait .fw-card-heading{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px 10px}
+          .oldlight-fleet-wait h4{font-size:13px;margin:0;font-weight:650}
+          .oldlight-fleet-wait .fw-count,.oldlight-fleet-wait .fw-badge{font-size:11.5px;line-height:1.35;border:1px solid var(--ol-border,#2b4053);border-radius:999px;padding:3px 7px;color:var(--ol-muted,#a2b5c6);background:var(--ol-surface-raised,#192939)}
+          .oldlight-fleet-wait article{padding:12px;border:1px solid var(--ol-border,#2b4053);border-radius:var(--ol-radius,10px);margin:8px 0;background:var(--ol-surface,#131f2b);min-width:0;overflow-wrap:anywhere}
+          .oldlight-fleet-wait .fw-card-heading strong{flex:1;min-width:0;font-size:13px;color:var(--ol-text,#e5eef6)}
+          .oldlight-fleet-wait p{font-size:12px;line-height:1.5;margin:6px 0;overflow-wrap:anywhere}
+          .oldlight-fleet-wait .fw-muted{color:var(--ol-muted,#a2b5c6)}
+          .oldlight-fleet-wait .fw-ships{display:flex;flex-wrap:wrap;gap:5px;margin:9px 0}
+          .oldlight-fleet-wait .fw-ship{font-size:12px;padding:3px 7px;border-radius:5px;background:var(--ol-surface-raised,#192939);font-variant-numeric:tabular-nums}
+          .oldlight-fleet-wait .fw-state{padding-top:7px;border-top:1px solid var(--ol-border,#2b4053)}
+          .oldlight-fleet-wait [data-tone=ready]{color:var(--ol-accent,#7de2c2)}
+          .oldlight-fleet-wait [data-tone=warning],.oldlight-fleet-wait .fw-error{color:var(--ol-warning,#f3cb80)}
+          .oldlight-fleet-wait .fw-options{display:grid;gap:7px;padding:9px 0 2px}
+          .oldlight-fleet-wait label{display:flex;align-items:flex-start;gap:8px;font-size:12px;line-height:1.45;cursor:pointer}
+          .oldlight-fleet-wait input{width:15px;height:15px;margin:1px 0 0;accent-color:var(--ol-accent,#7de2c2);flex:none}
+          .oldlight-fleet-wait .fw-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+          .oldlight-fleet-wait button{font:inherit;font-size:12px;min-height:34px;padding:6px 10px;max-width:100%;white-space:normal;border-radius:7px;border:1px solid var(--ol-border-strong,#456177);background:var(--ol-surface-raised,#192939);color:var(--ol-text,#e5eef6);cursor:pointer}
+          .oldlight-fleet-wait button:hover:not(:disabled){border-color:var(--ol-accent,#7de2c2)}
+          .oldlight-fleet-wait button[data-fleet-wait-action=cancel]{background:transparent;color:var(--ol-muted,#a2b5c6);border-color:var(--ol-border,#2b4053)}
+          .oldlight-fleet-wait button[data-fleet-wait-action=cancel]:hover:not(:disabled){color:var(--ol-danger,#f4a8a8);border-color:var(--ol-danger,#f4a8a8)}
+          .oldlight-fleet-wait button:disabled{opacity:.5;cursor:default}
+          .oldlight-fleet-wait button:focus-visible,.oldlight-fleet-wait input:focus-visible{outline:2px solid var(--ol-focus,#8bc7ff);outline-offset:3px}
+        `;
+        const heading = el('div', undefined, 'fw-heading');
+        const pending = jobs.filter(({ job }) => job.status !== 'sent').length;
+        heading.append(el('h4', 'Misiones pendientes'), el('span', pending ? pending + (pending === 1 ? ' pendiente' : ' pendientes') : 'Al día', 'fw-count'));
+        section.append(style, heading);
         if (notice) {
           const warning = el('p', notice, 'fw-error');
           warning.setAttribute('role', 'status');
@@ -4320,8 +4680,6 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         for (const { job, plan } of jobs) {
           const article = el('article');
           article.dataset.fleetWaitJob = job.id;
-          article.append(el('strong', job.target.label), el('p', 'Desde ' + job.originName, 'fw-muted'),
-            el('p', fleetText(job.quantities)));
           const statuses = { paused: 'Pausada', sending: 'Enviando…', sent: 'Enviada',
             uncertain: 'Envío sin confirmar. Comprueba las misiones del juego.' };
           let state = statuses[job.status];
@@ -4329,7 +4687,20 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
             state = plan?.ready ? (job.autoSend ? 'Flota completa; lista para enviar.' : 'Flota completa. Envío automático desactivado.')
               : plan ? 'Esperando: ' + fleetText(plan.missing) : 'Selecciona este origen para comprobar su flota.';
           }
-          const status = el('p', state);
+          const tone = job.status === 'uncertain' || job.needsReview ? 'warning'
+            : job.status === 'sent' || job.status === 'waiting' && plan?.ready ? 'ready' : '';
+          const cardHeading = el('div', undefined, 'fw-card-heading');
+          const badge = el('span', { waiting: plan?.ready ? 'Lista' : 'Esperando flota', paused: 'En pausa',
+            sending: 'Enviando', sent: 'Enviada', uncertain: 'Revisar envío' }[job.status], 'fw-badge');
+          badge.dataset.tone = tone;
+          cardHeading.append(el('strong', job.target.label), badge);
+          article.append(cardHeading, el('p', 'Desde ' + job.originName, 'fw-muted'));
+          const ships = el('div', undefined, 'fw-ships');
+          ships.setAttribute('aria-label', 'Flota de la misión');
+          for (const id of SHIPS) if (job.quantities[id] > 0) ships.append(el('span', job.quantities[id] + ' ' + NAMES[id], 'fw-ship'));
+          article.append(ships);
+          const status = el('p', state, 'fw-state');
+          status.dataset.tone = tone;
           status.setAttribute('role', 'status');
           article.append(status);
           if (job.message && job.message !== state) article.append(el('p', job.message, 'fw-muted'));
@@ -4337,6 +4708,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
             article.append(el('p', 'Por producir: ' + fleetText(plan.production), 'fw-muted'));
           }
           if (['waiting', 'paused', 'uncertain'].includes(job.status)) {
+            const options = el('div', undefined, 'fw-options');
             for (const [field, text] of [['produce', 'Producir las naves que faltan'], ['autoSend', 'Enviar cuando la flota esté completa']]) {
               const row = el('label');
               const input = el('input');
@@ -4346,21 +4718,23 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
               input.dataset.fleetWaitOption = field;
               input.addEventListener('change', () => safeAction(() => update(job.id, { [field]: input.checked })));
               row.append(input, el('span', text));
-              article.append(row);
+              options.append(row);
             }
+            article.append(options);
           }
           const actions = el('div', undefined, 'fw-actions');
-          const button = (text, action, disabled = false) => {
+          const button = (text, action, actionId, disabled = false) => {
             const control = el('button', text);
             control.type = 'button';
+            control.dataset.fleetWaitAction = actionId;
             control.disabled = disabled || readError;
             control.addEventListener('click', () => safeAction(action));
             actions.append(control);
           };
-          if (job.status === 'waiting') button('Pausar', () => pause(job.id));
-          if (job.status === 'paused' && !job.needsReview) button('Reanudar', () => resume(job.id));
-          if (job.status === 'uncertain' || job.needsReview) button('He comprobado que no se envió: reanudar', () => acknowledge(job.id, { notSent: true }));
-          button(job.status === 'sent' ? 'Quitar' : 'Cancelar pendiente', () => cancel(job.id), job.status === 'sending');
+          if (job.status === 'waiting') button('Pausar', () => pause(job.id), 'pause');
+          if (job.status === 'paused' && !job.needsReview) button('Reanudar', () => resume(job.id), 'resume');
+          if (job.status === 'uncertain' || job.needsReview) button('He comprobado que no se envió: reanudar', () => acknowledge(job.id, { notSent: true }), 'acknowledge');
+          button(job.status === 'sent' ? 'Quitar' : 'Cancelar pendiente', () => cancel(job.id), 'cancel', job.status === 'sending');
           article.append(actions);
           section.append(article);
         }
@@ -4368,9 +4742,14 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
           section.append(el('p', 'Pausar o cancelar detiene este pendiente. Las naves ya encargadas siguen en la cola del juego.', 'fw-muted'));
         }
         mounted.replaceChildren(section);
+        if (focus?.job) {
+          const card = [...mounted.querySelectorAll('[data-fleet-wait-job]')].find(node => node.dataset.fleetWaitJob === focus.job);
+          const control = focus.option ? [...card?.querySelectorAll('[data-fleet-wait-option]') || []].find(node => node.dataset.fleetWaitOption === focus.option)
+            : [...card?.querySelectorAll('[data-fleet-wait-action]') || []].find(node => node.dataset.fleetWaitAction === focus.action);
+          if (control && !control.disabled) control.focus({ preventScroll: true });
+        }
       } finally { rendering = false; }
     }
-
     function mount(root) {
       if (destroyed || !root?.ownerDocument || typeof root.replaceChildren !== 'function') {
         throw new TypeError('Contenedor de misiones no válido.');
@@ -5315,16 +5694,23 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       ui.minimums.checked = value.autoMinimums;
       ui.produce.checked = value.produceMissing;
       ui.details.open = value.expanded;
+      ui.mode.textContent = value.enabled || value.autoMinimums ? 'Activo' : 'Desactivado';
+      ui.mode.dataset.active = String(value.enabled || value.autoMinimums);
+      const pending = value.campaigns.filter(campaign => !TERMINAL.includes(campaign.status)).length;
+      ui.count.textContent = pending ? pending + (pending === 1 ? ' campaña' : ' campañas') : '';
+      ui.count.hidden = !pending;
       if (ui.limit !== ui.limit.getRootNode().activeElement) ui.limit.value = value.maxRetriesDraft;
       ui.limit.setAttribute('aria-invalid', /^(?:0|[1-9]\d{0,2})$/.test(value.maxRetriesDraft) && Number(value.maxRetriesDraft) <= 100 ? 'false' : 'true');
       ui.limitHint.textContent = ui.limit.getAttribute('aria-invalid') === 'true'
         ? 'Escribe un número de 0 a 100. Sigue vigente: ' + (value.maxRetries === 0 ? 'sin límite' : value.maxRetries) + '.'
         : value.maxRetries === 0 ? 'Sin límite: seguirá sumando 1 Marauder tras cada derrota hasta ganar o pausar la campaña.'
           : 'Como máximo ' + value.maxRetries + ' reintentos por campaña. 0 significa sin límite.';
+      ui.limitHint.dataset.invalid = ui.limit.getAttribute('aria-invalid');
       ui.status.textContent = notice || lastReportDecision?.message || (value.enabled
         ? value.autoMinimums ? 'Activos: reintentos y aumento de mínimos tras nuevas derrotas.' : 'Reintentos activos para nuevos ataques fallidos.'
         : value.autoMinimums ? 'Mínimos automáticos activos. El reenvío de ataques está desactivado.'
-          : 'Desactivado. Al activar una opción solo se procesarán combates posteriores.');
+          : 'Elige qué hacer tras las próximas derrotas. Las opciones funcionan por separado.');
+      ui.status.dataset.error = String(Boolean(notice || readError || storageError));
       ui.minimumStatus.hidden = !value.autoMinimums;
       ui.minimumStatus.textContent = minimumNotice || (value.minimumUpdates.length
         ? 'Hay mínimos pendientes de guardar a partir de la última derrota.' : 'Esperando la próxima derrota para revisar los mínimos.');
@@ -5332,25 +5718,42 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       const key = JSON.stringify([value.campaigns, value.enabled, readError]);
       if (key === cardsKey) return;
       cardsKey = key;
+      const active = mounted.getRootNode().activeElement;
+      const focus = ui.cards.contains(active) ? { campaign: active.closest('[data-attack-retry-campaign]')?.dataset.attackRetryCampaign,
+        action: active.dataset.attackRetryAction } : null;
       const doc = mounted.ownerDocument;
       const el = (tag, content, className) => { const result = doc.createElement(tag); if (content !== undefined) result.textContent = content; if (className) result.className = className; return result; };
       const labels = { waiting_origin: 'Esperando el origen', waiting_slot: 'Esperando turno', queued: 'Preparando flota',
         awaiting_report: 'Esperando resultado', paused: 'En pausa', uncertain: 'Revisión necesaria', completed: 'Completada', cancelled: 'Cancelada', limit: 'Límite alcanzado' };
       const cards = value.campaigns.map(campaign => {
         const card = el('article'); card.dataset.attackRetryCampaign = campaign.id;
-        card.append(el('strong', campaign.targetName), el('p', 'Desde ' + campaign.originName + ' · (' + campaign.originCoordinate.q + ', ' + campaign.originCoordinate.r + ')', 'ar-muted'),
-          el('p', 'Destino: (' + campaign.targetCoordinate.q + ', ' + campaign.targetCoordinate.r + ')', 'ar-muted'),
-          el('p', fleetText(campaign.quantities)), el('p', labels[campaign.status] + ' · Reintentos enviados: ' + campaign.retries), el('p', campaign.message, 'ar-muted'));
+        const heading = el('div', undefined, 'ar-card-heading');
+        const badge = el('span', labels[campaign.status], 'ar-badge');
+        badge.dataset.tone = campaign.status === 'completed' ? 'ready' : ['uncertain', 'limit'].includes(campaign.status) ? 'warning' : '';
+        heading.append(el('strong', campaign.targetName), badge);
+        card.append(heading, el('p', 'Desde ' + campaign.originName + ' · (' + campaign.originCoordinate.q + ', ' + campaign.originCoordinate.r + ')', 'ar-muted'),
+          el('p', 'Destino: (' + campaign.targetCoordinate.q + ', ' + campaign.targetCoordinate.r + ')', 'ar-muted'));
+        const ships = el('div', undefined, 'ar-ships');
+        ships.setAttribute('aria-label', 'Flota del reintento');
+        for (const id of SHIPS) if (campaign.quantities[id] > 0) ships.append(el('span', campaign.quantities[id] + ' ' + NAMES[id], 'ar-ship'));
+        card.append(ships, el('p', 'Reintentos enviados: ' + campaign.retries, 'ar-attempts'));
+        if (campaign.message) card.append(el('p', campaign.message, 'ar-muted'));
         const actions = el('div', undefined, 'ar-actions');
-        const button = (label, action, disabled = false) => { const control = el('button', label); control.type = 'button'; control.disabled = disabled || readError;
+        const button = (label, action, actionId, disabled = false) => { const control = el('button', label); control.type = 'button'; control.disabled = disabled || readError;
+          control.dataset.attackRetryAction = actionId;
           control.addEventListener('click', () => { try { action(); } catch (error) { showError(error); } }); actions.append(control); };
-        if (ACTIVE.includes(campaign.status)) button('Pausar', () => pause(campaign.id));
-        if (campaign.status === 'paused' && campaign.resumeStatus) button('Reanudar', () => resume(campaign.id), !value.enabled);
-        if (!TERMINAL.includes(campaign.status)) button('Cancelar campaña', () => cancel(campaign.id));
-        else button('Quitar', () => remove(campaign.id));
+        if (ACTIVE.includes(campaign.status)) button('Pausar', () => pause(campaign.id), 'pause');
+        if (campaign.status === 'paused' && campaign.resumeStatus) button('Reanudar', () => resume(campaign.id), 'resume', !value.enabled);
+        if (!TERMINAL.includes(campaign.status)) button('Cancelar campaña', () => cancel(campaign.id), 'cancel');
+        else button('Quitar', () => remove(campaign.id), 'remove');
         card.append(actions); return card;
       });
       ui.cards.replaceChildren(...cards);
+      if (focus?.campaign) {
+        const card = [...ui.cards.querySelectorAll('[data-attack-retry-campaign]')].find(node => node.dataset.attackRetryCampaign === focus.campaign);
+        const control = [...card?.querySelectorAll('[data-attack-retry-action]') || []].find(node => node.dataset.attackRetryAction === focus.action);
+        if (control && !control.disabled) control.focus({ preventScroll: true });
+      }
     }
     function mount(container) {
       if (destroyed || !container?.ownerDocument || typeof container.replaceChildren !== 'function') throw new TypeError('Contenedor de reintentos no válido.');
@@ -5362,36 +5765,77 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       const details = el('details', undefined, 'oldlight-attack-retry');
       details.dataset.attackRetry = '';
       const style = el('style');
-      style.textContent = '.oldlight-attack-retry{font:inherit;color:inherit;min-width:0;max-width:100%;margin:12px 0}.oldlight-attack-retry summary{font-size:13px;font-weight:600;cursor:pointer}' +
-        '.oldlight-attack-retry p{font-size:12px;line-height:1.45;margin:7px 0;overflow-wrap:anywhere}.oldlight-attack-retry label{display:flex;align-items:flex-start;gap:7px;font-size:12px;margin:9px 0}' +
-        '.oldlight-attack-retry input[type=checkbox]{margin-top:2px}.oldlight-attack-retry input[type=text]{font:inherit;width:65px;max-width:100%;background:#152333;color:inherit;border:1px solid #52647c;border-radius:5px;padding:5px}' +
-        '.oldlight-attack-retry input[aria-invalid=true]{border-color:#e9a267}.oldlight-attack-retry .ar-muted{opacity:.75}.oldlight-attack-retry article{padding:10px;border:1px solid #3b4b60;border-radius:8px;margin:8px 0;min-width:0;overflow-wrap:anywhere}' +
-        '.oldlight-attack-retry .ar-actions{display:flex;flex-wrap:wrap;gap:6px}.oldlight-attack-retry button{font:inherit;font-size:12px;padding:5px 8px;max-width:100%;white-space:normal;border-radius:6px;border:1px solid #52647c;background:#223046;color:inherit;cursor:pointer}' +
-        '.oldlight-attack-retry button:disabled{opacity:.5;cursor:default}.oldlight-attack-retry .ar-status{color:#b8cbd9}';
-      details.append(style, el('summary', 'Reintentar ataques fallidos'));
-      const checkbox = (label, field) => { const row = el('label'), input = el('input'); input.type = 'checkbox'; input.dataset.attackRetryOption = field;
-        input.addEventListener('change', () => { try { setConfig({ [field]: input.checked }); } catch (error) { showError(error); } }); row.append(input, el('span', label)); details.append(row); return input; };
-      const enable = checkbox('Reintentar automáticamente con +1 Marauder tras una derrota', 'enabled');
-      const minimums = checkbox('Aumentar automáticamente los mínimos tras una derrota', 'autoMinimums');
-      details.append(el('p', 'Usa la flota del último ataque fallido y suma 1 Marauder. Conserva los mínimos que ya sean mayores. Funciona aunque el reenvío esté desactivado y solo para combates posteriores a su activación.', 'ar-muted'));
-      details.append(el('p', 'Se guardan los mínimos de Flota que usa el sistema seleccionado. La producción respeta tus prioridades y la pausa del helper.', 'ar-muted'));
+      style.textContent = `
+        .oldlight-attack-retry{font:inherit;color:var(--ol-text,#e5eef6);min-width:0;max-width:100%;margin:14px 0 0;padding:12px;border:1px solid var(--ol-border,#2b4053);border-radius:var(--ol-radius,10px);background:var(--ol-surface,#131f2b)}
+        .oldlight-attack-retry>summary{font-size:13px;font-weight:650;cursor:pointer;color:var(--ol-text,#e5eef6);line-height:1.5}
+        .oldlight-attack-retry .ar-mode,.oldlight-attack-retry .ar-badge{display:inline-block;font-size:11.5px;font-weight:500;line-height:1.35;border:1px solid var(--ol-border,#2b4053);border-radius:999px;padding:3px 7px;color:var(--ol-muted,#a2b5c6);background:var(--ol-surface-raised,#192939)}
+        .oldlight-attack-retry .ar-mode{margin-left:7px}.oldlight-attack-retry .ar-mode[data-active=true]{background:var(--ol-accent-bg,#183c36);color:var(--ol-accent,#7de2c2);border-color:var(--ol-accent-bg,#183c36)}
+        .oldlight-attack-retry .ar-count{display:inline-block;font-size:11.5px;font-weight:400;color:var(--ol-muted,#a2b5c6);margin-left:7px}
+        .oldlight-attack-retry p{font-size:12px;line-height:1.5;margin:7px 0;overflow-wrap:anywhere}
+        .oldlight-attack-retry .ar-setting{display:flex;align-items:flex-start;gap:9px;font-size:13px;line-height:1.4;margin:0;padding:12px 0;cursor:pointer}
+        .oldlight-attack-retry .ar-setting+.ar-setting{border-top:1px solid var(--ol-border,#2b4053)}
+        .oldlight-attack-retry .ar-setting-copy{display:grid;gap:4px;min-width:0}.oldlight-attack-retry .ar-setting-copy strong{font-size:13px;font-weight:550;color:var(--ol-text,#e5eef6)}
+        .oldlight-attack-retry .ar-setting-copy>span{font-size:11.5px;color:var(--ol-muted,#a2b5c6)}
+        .oldlight-attack-retry input[type=checkbox]{width:15px;height:15px;margin:2px 0 0;accent-color:var(--ol-accent,#7de2c2);flex:none}
+        .oldlight-attack-retry input[type=text]{font:inherit;width:72px;min-height:34px;max-width:100%;background:var(--ol-bg,#0c141d);color:var(--ol-text,#e5eef6);border:1px solid var(--ol-border-strong,#456177);border-radius:7px;padding:6px 8px;font-variant-numeric:tabular-nums;text-align:right}
+        .oldlight-attack-retry input[aria-invalid=true]{border-color:var(--ol-warning,#f3cb80)}
+        .oldlight-attack-retry .ar-muted{color:var(--ol-muted,#a2b5c6)}
+        .oldlight-attack-retry .ar-options{padding:10px;margin-top:8px;background:var(--ol-bg,#0c141d);border:1px solid var(--ol-border,#2b4053);border-radius:8px}
+        .oldlight-attack-retry .ar-options>summary{font-size:12px;margin:0;color:var(--ol-muted,#a2b5c6);font-weight:600;cursor:pointer}
+        .oldlight-attack-retry .ar-options .ar-setting{font-size:12px;padding:10px 0}
+        .oldlight-attack-retry .ar-limit-row{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12px;margin:4px 0}
+        .oldlight-attack-retry .ar-limit-hint{font-size:11.5px;margin:6px 0 0;color:var(--ol-muted,#a2b5c6)}
+        .oldlight-attack-retry .ar-limit-hint[data-invalid=true],.oldlight-attack-retry .ar-status[data-error=true]{color:var(--ol-warning,#f3cb80)}
+        .oldlight-attack-retry .ar-status{color:var(--ol-muted,#a2b5c6);font-size:11.5px}.oldlight-attack-retry .ar-status:empty{display:none}
+        .oldlight-attack-retry article{padding:11px;border:1px solid var(--ol-border,#2b4053);border-radius:8px;margin:10px 0 0;min-width:0;overflow-wrap:anywhere;background:var(--ol-bg,#0c141d)}
+        .oldlight-attack-retry .ar-card-heading{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px 9px}.oldlight-attack-retry .ar-card-heading strong{font-size:13px;flex:1;min-width:0;color:var(--ol-text,#e5eef6)}
+        .oldlight-attack-retry [data-tone=ready]{color:var(--ol-accent,#7de2c2)}.oldlight-attack-retry [data-tone=warning]{color:var(--ol-warning,#f3cb80)}
+        .oldlight-attack-retry .ar-ships{display:flex;flex-wrap:wrap;gap:5px;margin:9px 0}.oldlight-attack-retry .ar-ship{font-size:12px;padding:3px 7px;border-radius:5px;background:var(--ol-surface-raised,#192939);font-variant-numeric:tabular-nums}
+        .oldlight-attack-retry .ar-attempts{font-size:11.5px;color:var(--ol-muted,#a2b5c6);font-variant-numeric:tabular-nums}
+        .oldlight-attack-retry .ar-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+        .oldlight-attack-retry button{font:inherit;font-size:12px;min-height:34px;padding:6px 10px;max-width:100%;white-space:normal;border-radius:7px;border:1px solid var(--ol-border-strong,#456177);background:var(--ol-surface-raised,#192939);color:var(--ol-text,#e5eef6);cursor:pointer}
+        .oldlight-attack-retry button:hover:not(:disabled){border-color:var(--ol-accent,#7de2c2)}.oldlight-attack-retry button[data-attack-retry-action=cancel]{background:transparent;color:var(--ol-muted,#a2b5c6);border-color:var(--ol-border,#2b4053)}
+        .oldlight-attack-retry button[data-attack-retry-action=cancel]:hover:not(:disabled){color:var(--ol-danger,#f4a8a8);border-color:var(--ol-danger,#f4a8a8)}
+        .oldlight-attack-retry button:disabled{opacity:.5;cursor:default}.oldlight-attack-retry [hidden]{display:none!important}
+        .oldlight-attack-retry button:focus-visible,.oldlight-attack-retry input:focus-visible,.oldlight-attack-retry summary:focus-visible{outline:2px solid var(--ol-focus,#8bc7ff);outline-offset:3px}
+      `;
+      const summary = el('summary', 'Tras una derrota');
+      const mode = el('span', '', 'ar-mode'), count = el('span', '', 'ar-count');
+      summary.append(mode, count);
+      details.append(style, summary);
+      const checkbox = (label, field, description, parent = details) => {
+        const row = el('label', undefined, 'ar-setting'), input = el('input'); input.type = 'checkbox'; input.dataset.attackRetryOption = field;
+        input.addEventListener('change', () => { try { setConfig({ [field]: input.checked }); } catch (error) { showError(error); } });
+        const copy = el('span', undefined, 'ar-setting-copy'); copy.append(el('strong', label));
+        if (description) copy.append(el('span', description));
+        row.append(input, copy); parent.append(row); return input;
+      };
+      const enable = checkbox('Reintentar ataques', 'enabled', 'Suma 1 Marauder al ataque perdido y espera a tener la flota completa.');
+      const minimums = checkbox('Aumentar mínimos de flota', 'autoMinimums', 'Flota del último ataque +1 Marauder. Conserva los mínimos que ya sean mayores.');
       const minimumStatus = el('p', '', 'ar-status'); minimumStatus.setAttribute('role', 'status'); details.append(minimumStatus);
-      const produce = checkbox('Producir las naves necesarias para nuevos reintentos', 'produceMissing');
-      const row = el('label'), limit = el('input'); limit.type = 'text'; limit.inputMode = 'numeric'; limit.maxLength = 16;
+      const options = el('details', undefined, 'ar-options');
+      options.dataset.uiSection = 'retryOptions';
+      options.append(el('summary', 'Preparación y límites'));
+      const produce = checkbox('Producir las naves que falten', 'produceMissing', '', options);
+      const row = el('label', undefined, 'ar-limit-row'), limit = el('input'); limit.type = 'text'; limit.inputMode = 'numeric'; limit.maxLength = 16;
       limit.dataset.attackRetryOption = 'maxRetries'; limit.setAttribute('aria-label', 'Máximo de reintentos; cero significa sin límite');
+      limit.setAttribute('aria-describedby', 'oldlight-attack-retry-limit-hint');
       limit.addEventListener('input', () => {
         const draft = limit.value.slice(0, 16); const patch = { maxRetriesDraft: draft };
         if (/^(?:0|[1-9]\d{0,2})$/.test(draft) && Number(draft) <= 100) patch.maxRetries = Number(draft);
         try { setConfig(patch); } catch (error) { showError(error); }
       });
-      row.append(el('span', 'Máximo de reintentos'), limit); details.append(row);
-      const limitHint = el('p', '', 'ar-muted'), status = el('p', '', 'ar-status'), cards = el('div');
+      row.append(el('span', 'Máximo de reintentos'), limit); options.append(row);
+      const limitHint = el('p', '', 'ar-limit-hint'), status = el('p', '', 'ar-status'), cards = el('div');
+      limitHint.id = 'oldlight-attack-retry-limit-hint';
       status.setAttribute('role', 'status'); limitHint.setAttribute('role', 'status');
-      details.append(limitHint, el('p', 'Conserva las demás naves del ataque. Espera a tener la flota completa en base y se detiene al ganar, capturar el sistema o encontrar un resultado dudoso.', 'ar-muted'), status, cards);
+      options.append(limitHint, el('p', 'Se aplican a derrotas posteriores a su activación. Los mínimos usan el sistema seleccionado y respetan la prioridad de flota y la pausa del helper.', 'ar-muted'),
+        el('p', 'Los reintentos conservan las demás naves y se detienen al ganar, capturar el sistema o necesitar revisión.', 'ar-muted'));
+      details.append(options, status, cards);
       details.addEventListener('toggle', () => {
         if (config && details.open !== config.expanded) try { setConfig({ expanded: details.open }); } catch (error) { showError(error); }
       });
-      ui = { details, enable, minimums, minimumStatus, produce, limit, limitHint, status, cards }; mounted.replaceChildren(details); render();
+      ui = { details, mode, count, enable, minimums, minimumStatus, produce, limit, limitHint, status, cards }; mounted.replaceChildren(details); render();
     }
     function destroy() { destroyed = true; epoch += 1; mounted?.replaceChildren(); mounted = null; ui = null; }
     refreshConfig();
@@ -5494,14 +5938,16 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const dialog = document.createElement('dialog');
     dialog.id = 'oldlight-preset-shortage-dialog';
     dialog.setAttribute('aria-label', 'Preparar misión pendiente');
-    dialog.style.cssText = 'width:390px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);overflow:auto;'
-      + 'padding:14px;border:1px solid #45637a;border-radius:12px;background:#101b27;color:#e8f0f7;font:13px/1.4 system-ui,sans-serif';
+    dialog.style.cssText = 'width:420px;max-width:calc(100vw - 24px);max-height:calc(100dvh - 24px);overflow:auto;'
+      + 'box-sizing:border-box;padding:14px;border:1px solid #456177;border-radius:12px;background:#0c141d;color:#e5eef6;font:13px/1.45 system-ui,sans-serif;color-scheme:dark;box-shadow:0 16px 48px #0009';
+    const style = document.createElement('style');
+    style.textContent = '#oldlight-preset-shortage-dialog::backdrop{background:#03080dcc}#oldlight-preset-shortage-dialog>button:focus-visible{outline:2px solid #8bc7ff;outline-offset:3px}';
     const close = document.createElement('button');
     close.type = 'button';
     close.textContent = 'Cerrar';
-    close.style.cssText = 'display:block;margin-left:auto;padding:5px 9px;color:inherit;background:#25465e;border:1px solid #628dad;border-radius:6px;cursor:pointer';
+    close.style.cssText = 'display:block;min-height:34px;margin-left:auto;padding:6px 10px;font:inherit;color:#a2b5c6;background:#131f2b;border:1px solid #2b4053;border-radius:7px;cursor:pointer';
     close.addEventListener('click', () => dialog.close());
-    dialog.append(close);
+    dialog.append(style, close);
     document.body.append(dialog);
     dialog.addEventListener('close', () => dialog.remove(), { once: true });
     dialog.addEventListener('click', event => {
@@ -5532,20 +5978,32 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const card = document.createElement('div');
     card.dataset.oldlightFleetOffer = '';
     const shadow = card.attachShadow({ mode: 'open' });
-    shadow.innerHTML = '<style>:host{display:block;margin:12px 0;color:#e8f0f7;font:13px/1.4 system-ui,sans-serif}'
-      + '*{box-sizing:border-box}.card{padding:12px;border:1px solid #45637a;border-radius:10px;background:#102131}'
-      + 'h3{font-size:14px;margin:0 0 7px}p{margin:6px 0;color:#b8cbd9}ul{padding-left:18px;margin:8px 0}'
-      + 'p,li{overflow-wrap:anywhere}'
-      + 'label{display:flex;align-items:flex-start;gap:7px;margin:9px 0}input{accent-color:#76b8e8;margin-top:3px}'
-      + 'button{font:inherit;padding:8px 10px;border-radius:7px;border:1px solid #628dad;background:#25465e;color:inherit;cursor:pointer}'
-      + 'button:disabled{opacity:.5;cursor:default}.error{color:#ffb9aa}.actions{display:flex;gap:8px;flex-wrap:wrap}'
-      + '</style><section class="card"><h3></h3><p data-field="route"></p><ul></ul>'
-      + '<label><input type="checkbox" data-option="produce">Producir las naves que faltan</label>'
-      + '<p data-field="production"></p>'
-      + '<label><input type="checkbox" data-option="auto-send" checked>Enviar automáticamente cuando el preset esté completo</label>'
-      + '<p>La misión esperará a tener todas sus naves en base. La producción descuenta las que estén en misión o en construcción.</p>'
-      + '<div class="actions"><button type="button" data-action="queue">Guardar misión pendiente</button></div>'
-      + '<p data-field="status" role="status" aria-live="polite"></p></section>';
+    shadow.innerHTML = `<style>
+      :host{display:block;margin:12px 0;color:var(--ol-text,#e5eef6);font:13px/1.45 system-ui,sans-serif;color-scheme:dark}
+      *{box-sizing:border-box}.card{padding:14px;border:1px solid var(--ol-border,#2b4053);border-radius:var(--ol-radius,10px);background:var(--ol-surface,#131f2b)}
+      .eyebrow{display:block;margin-bottom:5px;font-size:11.5px;font-weight:600;color:var(--ol-accent,#7de2c2)}
+      h3{font-size:15px;line-height:1.35;margin:0 0 9px;color:var(--ol-text,#e5eef6)}
+      p{margin:7px 0;color:var(--ol-muted,#a2b5c6)}p,li{overflow-wrap:anywhere}
+      .route{padding-bottom:10px;border-bottom:1px solid var(--ol-border,#2b4053)}
+      ul{list-style:none;padding:0;margin:10px 0 14px;display:grid;gap:7px}
+      li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 8px;padding:9px 10px;border:1px solid var(--ol-border,#2b4053);border-radius:7px;background:var(--ol-bg,#0c141d)}
+      li strong{font-size:12px;font-weight:600}li .fleet-available{font-size:12px;font-variant-numeric:tabular-nums;text-align:right}
+      li small{grid-column:1/-1;color:var(--ol-muted,#a2b5c6);font-size:11.5px}
+      label{display:flex;align-items:flex-start;gap:9px;margin:12px 0 6px;cursor:pointer}input{width:15px;height:15px;accent-color:var(--ol-accent,#7de2c2);margin:2px 0 0;flex:none}
+      .option-copy{display:grid;gap:3px}.option-copy strong{font-size:13px;font-weight:550}.option-copy span,.hint,.production{font-size:11.5px;color:var(--ol-muted,#a2b5c6)}
+      .production{margin-left:24px}.hint{margin:12px 0}
+      button{font:inherit;min-height:38px;padding:8px 12px;border-radius:7px;border:1px solid var(--ol-accent,#7de2c2);background:var(--ol-accent-bg,#183c36);color:var(--ol-accent,#7de2c2);font-weight:600;cursor:pointer;max-width:100%;white-space:normal}
+      button:hover:not(:disabled){background:#214f46}button:disabled{opacity:.5;cursor:default}.error{color:var(--ol-warning,#f3cb80)}
+      button:focus-visible,input:focus-visible{outline:2px solid var(--ol-focus,#8bc7ff);outline-offset:3px}
+      .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.actions button{flex:1}
+      [data-field=status]:empty{display:none}
+    </style><section class="card"><span class="eyebrow">Preparar flota</span><h3></h3><p class="route" data-field="route"></p><ul aria-label="Naves del preset y disponibilidad"></ul>
+      <label><input type="checkbox" data-option="produce"><span class="option-copy"><strong>Producir las naves que faltan</strong></span></label>
+      <p class="production" data-field="production"></p>
+      <label><input type="checkbox" data-option="auto-send" checked><span class="option-copy"><strong>Enviar cuando la flota esté completa</strong><span>La misión saldrá cuando todas sus naves estén en base.</span></span></label>
+      <p class="hint">Las naves en misión o en construcción se descuentan de la producción necesaria.</p>
+      <div class="actions"><button type="button" data-action="queue">Guardar misión pendiente</button></div>
+      <p data-field="status" role="status" aria-live="polite"></p></section>`;
     const title = shadow.querySelector('h3');
     title.textContent = shortage ? 'Faltan naves para este preset' : 'Esta misión ya está pendiente';
     const route = shadow.querySelector('[data-field="route"]');
@@ -5560,8 +6018,15 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     for (const [id, name] of SHIPS) {
       if (!quantities[id]) continue;
       const line = document.createElement('li');
-      line.textContent = plan ? `${name}: ${plan.parked[id]}/${quantities[id]} en base · ${plan.away[id]} en misión · ${plan.building[id]} en construcción`
-        : `${name}: ${quantities[id]} necesarias`;
+      const ship = document.createElement('strong'); ship.textContent = name;
+      const count = document.createElement('span'); count.className = 'fleet-available';
+      count.textContent = plan ? `${plan.parked[id]} / ${quantities[id]} en base` : `${quantities[id]} necesarias`;
+      line.append(ship, count);
+      if (plan) {
+        const detail = document.createElement('small');
+        detail.textContent = `${plan.away[id]} en misión · ${plan.building[id]} en construcción`;
+        line.append(detail);
+      }
       list.append(line);
     }
     production.textContent = plan ? 'Producción pendiente: ' + (SHIPS.filter(([id]) => plan.production[id] > 0)
@@ -6398,7 +6863,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       telegram.checked = config.telegramEnabled;
       telegram.disabled = !telegramAvailable;
       permit.disabled = !storageAvailable || p === 'unsupported' || p === 'denied' || permissionBusy;
-      permit.hidden = p === 'granted' && config.browserEnabled;
+      permit.hidden = p === 'granted';
       const permitText = p === 'granted' ? 'Activar avisos del navegador' : 'Permitir avisos del navegador';
       if (permit.textContent !== permitText) permit.textContent = permitText;
       token.placeholder = config.botToken ? 'Token guardado; vacío lo conserva' : 'Token del bot';
@@ -6428,6 +6893,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       for (const [channel, state] of mounted.channelStates) {
         if (state.textContent !== channelStates[channel]) state.textContent = channelStates[channel];
         state.dataset.paused = String(!!(config.paused || config[channel + 'Paused']));
+        state.dataset.tone = config.paused || config[channel + 'Paused'] ? 'paused'
+          : channelStates[channel] === 'Activo' ? 'active' : 'muted';
       }
       mounted.pauseState.textContent = config.paused ? 'Pausa global activa'
         : config.browserPaused && config.telegramPaused ? 'Ambos canales están pausados'
@@ -6438,8 +6905,9 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         input.disabled = !storageAvailable;
       }
       const enabledEvents = EVENT_TYPES.filter((type) => config.events[type]).length;
-      const eventCountText = `${enabledEvents} de ${EVENT_TYPES.length} tipos activados. Se guardan al cambiarlos.`;
+      const eventCountText = `${enabledEvents} / ${EVENT_TYPES.length}`;
       if (eventCount.textContent !== eventCountText) eventCount.textContent = eventCountText;
+      eventCount.setAttribute('aria-label', `${enabledEvents} de ${EVENT_TYPES.length} tipos activados`);
       mounted.eventsAll.disabled = !storageAvailable || enabledEvents === EVENT_TYPES.length;
       mounted.eventsNone.disabled = !storageAvailable || enabledEvents === 0;
       if (mounted.eventsDetails.open !== config.eventsExpanded) mounted.eventsDetails.open = config.eventsExpanded;
@@ -6454,6 +6922,20 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       const content = [storageError, storageError ? '' : autosaveStatus, browserLine, telegramLine, pendingLine,
         dropped ? 'Avisos descartados o cancelados: ' + dropped + '.' : ''].filter(Boolean).join('\n');
       if (status.textContent !== content) status.textContent = content;
+      const draft = credentialDraftState();
+      const attention = [storageError, draft.pending && !draft.valid ? draft.message : '',
+        p === 'denied' ? 'Navegador: permite las notificaciones desde los ajustes del sitio.' : '',
+        config.browserEnabled && /no pudo|no se pudo/i.test(browserStatus) ? browserStatus : '',
+        telegramBlocked ? 'Telegram: ' + (telegramStatus || 'Revisa la conexión y envía una prueba.') : '']
+        .filter(Boolean).join('\n');
+      if (mounted.alert.textContent !== attention) mounted.alert.textContent = attention;
+      mounted.alert.hidden = !attention;
+      const connectionLabel = draft.pending ? 'Borrador de conexión' : configured() ? 'Conexión y prueba' : 'Configurar Telegram';
+      if (mounted.connectionLabel.textContent !== connectionLabel) mounted.connectionLabel.textContent = connectionLabel;
+      const connectionStatus = /prueba|no se pudo|espera|límite|limitando|cola está llena/i.test(telegramStatus)
+        ? telegramStatus : '';
+      if (mounted.connectionStatus.textContent !== connectionStatus) mounted.connectionStatus.textContent = connectionStatus;
+      mounted.connectionStatus.hidden = !connectionStatus;
       if (root.dataset.telegramBlocked !== String(telegramBlocked)) root.dataset.telegramBlocked = String(telegramBlocked);
     }
   
@@ -6472,43 +6954,58 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       // Static markup only. Event content and API data never become HTML.
       root.innerHTML = `
         <style>
-          .notifications-details{border-top:1px solid #344257;padding-top:8px;margin-top:8px;max-width:100%;min-width:0;font:inherit;overflow-wrap:anywhere}
-          .notifications-details summary{cursor:pointer;font-weight:600;padding:3px 0}
-          .notifications-details .notify-body{display:grid;gap:8px;padding-top:8px;min-width:0}
-          .notifications-details label{display:flex;align-items:center;gap:7px;font:inherit;min-width:0}
-          .notifications-details .notify-field{display:grid;gap:4px}
-          .notifications-details input[type="text"],.notifications-details input[type="password"]{box-sizing:border-box;width:100%;min-width:0;padding:7px;border:1px solid #52657f;border-radius:5px;background:#101a2c;color:inherit;font:inherit}
-          .notifications-details input[type="checkbox"]{flex:0 0 auto;width:16px;height:16px;margin:0}
-          .notifications-details button{box-sizing:border-box;max-width:100%;padding:7px;border:1px solid #52657f;border-radius:5px;background:#23344d;color:inherit;cursor:pointer;font:inherit;white-space:normal}
-          .notifications-details button:disabled{opacity:.55;cursor:default}
-          .notifications-details .notify-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}
-          .notifications-details .notify-pause-controls{display:grid;gap:5px;padding:8px;border:1px solid #52657f;border-radius:6px;background:#152339;min-width:0}
-          .notifications-details .notify-pause-controls>button{width:100%;font-weight:600}
-          .notifications-details [data-notification-pause][aria-pressed="true"]{border-color:#a88c51;background:#3b3224}
-          .notifications-details .notify-pause-state{font-size:11px;font-weight:600}
-          .notifications-details .notify-channel{display:grid;gap:7px;min-width:0;padding:8px;border:1px solid #344257;border-radius:6px}
+          .notifications-details{border:0;padding:0;margin:0;max-width:100%;min-width:0;font:inherit;color:var(--ol-text,#e5eef6);overflow-wrap:anywhere}
+          .notifications-details [hidden]{display:none!important}
+          .notifications-details summary{cursor:pointer;font-weight:600;padding:4px 0;color:var(--ol-text,#e5eef6)}
+          .notifications-details .notify-body{display:grid;gap:10px;padding-top:0;min-width:0}
+          .notifications-details label{display:flex;align-items:center;gap:8px;font:inherit;min-width:0;cursor:pointer}
+          .notifications-details .notify-field{display:grid;gap:6px;font-size:12px;cursor:default}
+          .notifications-details input[type="text"],.notifications-details input[type="password"]{box-sizing:border-box;width:100%;min-width:0;min-height:36px;padding:8px 10px;border:1px solid var(--ol-border-strong,#456177);border-radius:7px;background:var(--ol-bg,#0c141d);color:inherit;font:inherit}
+          .notifications-details input[type="checkbox"]{flex:0 0 auto;width:16px;height:16px;margin:0;accent-color:var(--ol-accent,#7de2c2)}
+          .notifications-details button{box-sizing:border-box;max-width:100%;min-height:34px;padding:7px 10px;border:1px solid var(--ol-border-strong,#456177);border-radius:7px;background:var(--ol-surface-raised,#192939);color:var(--ol-text,#e5eef6);cursor:pointer;font:inherit;white-space:normal}
+          .notifications-details button:hover:not(:disabled){border-color:var(--ol-accent,#7de2c2)}
+          .notifications-details button:disabled{opacity:.45;cursor:default}
+          .notifications-details .notify-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+          .notifications-details .notify-pause-controls{display:grid;gap:8px;padding:12px;border:1px solid var(--ol-border,#2b4053);border-radius:var(--ol-radius,10px);background:var(--ol-surface,#131f2b);min-width:0}
+          .notifications-details .notify-pause-controls>button{width:100%;min-height:36px;font-weight:600;background:var(--ol-accent-bg,#183c36);color:var(--ol-accent,#7de2c2)}
+          .notifications-details [data-notification-pause][aria-pressed="true"]{border-color:var(--ol-warning,#f3cb80);color:var(--ol-warning,#f3cb80);background:var(--ol-surface-raised,#192939)}
+          .notifications-details .notify-pause-state{font-size:12px;font-weight:600;line-height:1.4}
+          .notifications-details .notify-channel{display:grid;gap:10px;min-width:0;padding:12px;border:1px solid var(--ol-border,#2b4053);border-radius:var(--ol-radius,10px);background:var(--ol-surface,#131f2b)}
           .notifications-details .notify-channel-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;min-width:0}
-          .notifications-details .notify-channel-info{display:grid;gap:4px;min-width:0}
-          .notifications-details .notify-channel-info>label{font-weight:600}
-          .notifications-details .notify-channel-state{font-size:11px;line-height:1.35;color:#b5c9df}
-          .notifications-details .notify-channel-state[data-paused="true"]{color:#ebc982}
-          .notifications-details .notify-channel-row>button{min-width:66px}
-          .notifications-details .notification-events-details{min-width:0;border:1px solid #344257;border-radius:5px;padding:6px}
-          .notifications-details .notification-event-groups{display:grid;gap:8px;margin-top:8px;min-width:0}
-          .notifications-details .notify-event-group{display:grid;gap:7px;min-width:0;margin:0;padding:8px;border:1px solid #344257;border-radius:4px}
-          .notifications-details .notify-event-group legend{padding:0 4px;font-weight:600}
-          .notifications-details .notify-event-group label{align-items:flex-start;font-size:11px;line-height:1.35}
-          .notifications-details .notify-note{margin:0;font-size:11px;line-height:1.4;opacity:.85}
-          .notifications-details .notify-status{margin:0;white-space:pre-line;font-size:11px;line-height:1.45}
-          .notifications-details :focus-visible{outline:2px solid #97c8ff;outline-offset:2px}
+          .notifications-details .notify-channel-info{display:grid;gap:5px;min-width:0}
+          .notifications-details .notify-channel-info>label{font-weight:600;min-height:24px}
+          .notifications-details .notify-channel-state{font-size:11.5px;line-height:1.4;color:var(--ol-muted,#a2b5c6)}
+          .notifications-details .notify-channel-state::before{content:'●';font-size:9px;margin-right:6px}
+          .notifications-details .notify-channel-state[data-tone="active"]{color:var(--ol-accent,#7de2c2)}
+          .notifications-details .notify-channel-state[data-paused="true"]{color:var(--ol-warning,#f3cb80)}
+          .notifications-details .notify-channel-row>button{min-width:76px}
+          .notifications-details .notification-events-details,.notifications-details .notification-diagnostics-details{min-width:0;margin:0;padding:10px 12px;border:1px solid var(--ol-border,#2b4053);border-radius:var(--ol-radius,10px);background:var(--ol-surface,#131f2b)}
+          .notifications-details .notify-summary-content{display:inline-flex;align-items:center;justify-content:space-between;gap:8px;width:calc(100% - 18px)}
+          .notifications-details .notification-events-count{font-size:11.5px;font-weight:500;padding:2px 7px;border-radius:12px;background:var(--ol-surface-raised,#192939);color:var(--ol-muted,#a2b5c6);white-space:nowrap;font-variant-numeric:tabular-nums}
+          .notifications-details .notification-event-groups{display:grid;gap:10px;margin-top:12px;min-width:0}
+          .notifications-details .notify-event-group{display:grid;gap:0;min-width:0;margin:0;padding:6px 0 0;border:0;border-top:1px solid var(--ol-border,#2b4053)}
+          .notifications-details .notify-event-group legend{padding:0 8px 0 0;font-size:12px;font-weight:600;color:var(--ol-muted,#a2b5c6)}
+          .notifications-details .notify-event-group label{align-items:center;min-height:32px;padding:5px 0;font-size:12px;line-height:1.4}
+          .notifications-details .notification-connection-details{min-width:0;margin:0;padding-top:8px;border-top:1px solid var(--ol-border,#2b4053)}
+          .notifications-details .notification-connection-details>summary{font-size:12px;color:var(--ol-muted,#a2b5c6)}
+          .notifications-details .notify-connection-body{display:grid;gap:10px;padding-top:10px}
+          .notifications-details .notification-clear{background:transparent;color:var(--ol-muted,#a2b5c6);border-color:var(--ol-border,#2b4053);font-size:12px}
+          .notifications-details .notification-clear:hover:not(:disabled){border-color:var(--ol-danger,#f4a8a8);color:var(--ol-danger,#f4a8a8)}
+          .notifications-details .notify-note{margin:0;font-size:11.5px;line-height:1.5;color:var(--ol-muted,#a2b5c6)}
+          .notifications-details .notification-events-details>p{margin-top:8px}
+          .notifications-details .notify-status,.notifications-details .notification-connection-status{margin:0;white-space:pre-line;font-size:11.5px;line-height:1.5;color:var(--ol-muted,#a2b5c6)}
+          .notifications-details [data-notification-diagnostics]{display:grid;gap:8px;margin-top:10px}
+          .notifications-details .notify-alert{margin:0;padding:10px 12px;white-space:pre-line;font-size:12px;line-height:1.5;border:1px solid var(--ol-warning,#f3cb80);border-radius:var(--ol-radius,10px);color:var(--ol-warning,#f3cb80);background:var(--ol-surface,#131f2b)}
+          .notifications-details :focus-visible{outline:2px solid var(--ol-focus,#8bc7ff);outline-offset:3px}
         </style>
         <summary>Notificaciones</summary>
         <div class="notify-body">
           <div class="notify-pause-controls">
             <button type="button" data-notification-pause="all">Pausar todos los avisos</button>
             <span class="notify-pause-state"></span>
-            <p class="notify-note">Esta pausa no afecta a la automatización. Al reanudar recibirás los nuevos avisos.</p>
+            <p class="notify-note">La automatización continúa. Los avisos detectados durante la pausa se descartan.</p>
           </div>
+          <p class="notify-alert" role="status" aria-live="polite" aria-atomic="true" hidden></p>
           <div class="notify-channel">
             <div class="notify-channel-row">
               <div class="notify-channel-info">
@@ -6527,24 +7024,32 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
               </div>
               <button type="button" data-notification-pause="telegram">Pausar</button>
             </div>
+            <details class="notification-connection-details" data-ui-section="telegramConnection">
+              <summary><span class="notification-connection-label">Configurar Telegram</span></summary>
+              <div class="notify-connection-body">
+                <label class="notify-field">Token del bot<input class="notification-token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="221"></label>
+                <label class="notify-field">Chat ID<input class="notification-chat-id" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="65"></label>
+                <p class="notify-note">Se guardan al escribir. Deja un campo vacío para conservar su valor guardado.</p>
+                <button class="notification-test" type="button">Enviar prueba a Telegram</button>
+                <p class="notification-connection-status" role="status" aria-live="polite" hidden></p>
+                <button class="notification-clear" type="button">Borrar credenciales de Telegram</button>
+              </div>
+            </details>
           </div>
           <details class="notification-events-details">
-            <summary>Tipos de notificación</summary>
-            <p class="notify-note">Estos filtros se aplican al navegador y a Telegram.</p>
+            <summary><span class="notify-summary-content"><span>Tipos de notificación</span><span class="notification-events-count"></span></span></summary>
+            <p class="notify-note">Los mismos filtros para ambos canales.</p>
             <div class="notify-actions"><button class="notification-events-all" type="button">Todos</button><button class="notification-events-none" type="button">Ninguno</button></div>
             <div class="notification-event-groups">${EVENT_GROUPS.map((group) =>
               `<fieldset class="notify-event-group"><legend>${group.label}</legend>${group.entries.map(([type, label]) =>
                 `<label><input class="notification-event-toggle" type="checkbox" data-notification-event="${type}"> ${label}</label>`
               ).join('')}</fieldset>`
             ).join('')}</div>
-            <p class="notify-note notification-events-count"></p>
           </details>
-          <label class="notify-field">Token de tu bot<input class="notification-token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="221"></label>
-          <label class="notify-field">Chat ID<input class="notification-chat-id" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="65"></label>
-          <p class="notify-note">Todo se guarda automáticamente. Los campos vacíos conservan las credenciales activas; un borrador incompleto queda guardado para continuar después. Enviar prueba manda un mensaje al chat guardado.</p>
-          <button class="notification-test" type="button">Enviar prueba a Telegram</button>
-          <button class="notification-clear" type="button">Borrar credenciales de Telegram</button>
-          <p class="notify-status" role="status" aria-live="polite" aria-atomic="true"></p>
+          <details class="notification-diagnostics-details" data-ui-section="notificationDiagnostics">
+            <summary>Estado y diagnóstico</summary>
+            <div data-notification-diagnostics><p class="notify-status" role="status" aria-live="polite" aria-atomic="true"></p></div>
+          </details>
         </div>`;
       const query = (selector) => root.querySelector(selector);
       mounted = {
@@ -6557,9 +7062,12 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         editing: new Set(), editorDirty: false,
         pauseButtons: new Map(['all', 'browser', 'telegram'].map(target => [target, query(`[data-notification-pause="${target}"]`)])),
         channelStates: new Map(['browser', 'telegram'].map(channel => [channel, query(`[data-notification-channel-state="${channel}"]`)])),
-        pauseState: query('.notify-pause-state'),
+        pauseState: query('.notify-pause-state'), alert: query('.notify-alert'),
+        connectionDetails: query('.notification-connection-details'), connectionLabel: query('.notification-connection-label'),
+        connectionStatus: query('.notification-connection-status'),
       };
       const ui = mounted;
+      ui.connectionDetails.open = !configured() || credentialDraftState().pending;
       for (const [target, button] of ui.pauseButtons) {
         button.addEventListener('click', () => {
           if (!refreshConfig()) return;
@@ -7868,7 +8376,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       if (!mounted) return;
       if (mounted.root.open !== config.expanded) mounted.root.open = config.expanded;
       const count = ids.filter(id => config.targets[id] > 0).length;
-      mounted.count.textContent = count ? ` · ${count} activos` : '';
+      mounted.count.textContent = count ? count + (count === 1 ? ' activo' : ' activos') : 'Sin objetivos';
+      mounted.count.dataset.active = String(count > 0);
       for (const id of ids) {
         const input = mounted.inputs.get(id);
         const draft = unsavedDrafts.has(id) ? unsavedDrafts.get(id) : config.drafts[id];
@@ -7876,12 +8385,14 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         if (input.value !== value) input.value = value;
         input.setAttribute('aria-invalid', String(draft !== null && parseDraft(draft) === null));
         const level = latest?.levels.get(id);
-        mounted.labels.get(id).textContent = `${config.targets[id] ? `Activo: nivel ${config.targets[id]}` : 'Desactivado'}` +
-          (level !== null && level !== undefined ? ` · Actual: ${level}` : '');
+        const current = level !== null && level !== undefined ? `Nivel actual: ${level}` : 'Nivel actual no disponible';
+        mounted.labels.get(id).textContent = current + (config.targets[id] ? ` · Aviso al ${config.targets[id]}` : ' · Sin aviso');
+        mounted.labels.get(id).dataset.active = String(config.targets[id] > 0);
       }
       mounted.status.textContent = unsavedDrafts.size
         ? 'El borrador sigue en esta ventana y todavía no se ha guardado. Edita el campo o sal de él para reintentar.'
         : storageError ? 'No se pudieron guardar los objetivos. Comprueba el almacenamiento local.' : fieldStatus;
+      mounted.status.dataset.error = String(Boolean(unsavedDrafts.size || storageError));
     }
 
     function mount(container) {
@@ -7890,23 +8401,40 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       const root = document.createElement('details');
       root.className = 'level-targets-details';
       const style = document.createElement('style');
-      style.textContent = '.level-targets-details{margin-top:12px;padding:10px;border:1px solid #304252;border-radius:6px}' +
-        '.level-targets-details summary{font-weight:650;cursor:pointer}' +
-        '.level-targets-details p{font-size:11px;line-height:1.45;color:#aebfd0}' +
-        '.level-target-row{display:grid;grid-template-columns:minmax(0,1fr) 76px;gap:3px 10px;align-items:center;margin-top:10px}' +
-        '.level-target-row label{min-width:0;font-size:12px}' +
-        '.level-target-row input{box-sizing:border-box;width:100%;min-width:0;padding:6px;border:1px solid #526679;border-radius:4px;background:#101923;color:#e5edf5;font:inherit}' +
-        '.level-target-row input[aria-invalid="true"]{border-color:#e9b671}' +
-        '.level-target-row small{grid-column:1/-1;font-size:10px;color:#aebfd0}' +
-        '.level-targets-status:empty{display:none}';
+      style.textContent = `
+        .level-targets-details{font:inherit;margin-top:14px;padding:12px;border:1px solid var(--ol-border,#2b4053);border-radius:var(--ol-radius,10px);background:var(--ol-surface,#131f2b);color:var(--ol-text,#e5eef6)}
+        .level-targets-details summary{font-size:13px;font-weight:650;cursor:pointer;line-height:1.5;color:var(--ol-text,#e5eef6)}
+        .level-targets-details .level-target-count{display:inline-block;margin-left:7px;padding:3px 7px;border:1px solid var(--ol-border,#2b4053);border-radius:999px;background:var(--ol-surface-raised,#192939);color:var(--ol-muted,#a2b5c6);font-size:11.5px;font-weight:500;line-height:1.35}
+        .level-targets-details .level-target-count[data-active=true]{background:var(--ol-accent-bg,#183c36);border-color:var(--ol-accent-bg,#183c36);color:var(--ol-accent,#7de2c2)}
+        .level-targets-details p{font-size:11.5px;line-height:1.5;color:var(--ol-muted,#a2b5c6);margin:9px 0;overflow-wrap:anywhere}
+        .level-targets-details .level-target-columns,.level-target-row{display:grid;grid-template-columns:minmax(0,1fr) 76px;gap:3px 10px;align-items:center}
+        .level-targets-details .level-target-columns{font-size:11.5px;color:var(--ol-muted,#a2b5c6);padding:9px 0 4px}
+        .level-targets-details .level-target-columns span:last-child{text-align:right}
+        .level-target-row{padding:9px 0;border-bottom:1px solid var(--ol-border,#2b4053)}
+        .level-target-row label{min-width:0;font-size:12px;line-height:1.4;color:var(--ol-text,#e5eef6);overflow-wrap:anywhere}
+        .level-target-row input{box-sizing:border-box;width:100%;min-width:0;min-height:34px;grid-column:2;grid-row:1 / span 2;padding:6px 8px;border:1px solid var(--ol-border-strong,#456177);border-radius:7px;background:var(--ol-bg,#0c141d);color:var(--ol-text,#e5eef6);font:inherit;text-align:right;font-variant-numeric:tabular-nums}
+        .level-target-row input::placeholder{color:var(--ol-dim,#8097aa)}
+        .level-target-row input[aria-invalid=true]{border-color:var(--ol-warning,#f3cb80)}
+        .level-target-row small{grid-column:1;grid-row:2;font-size:11.5px;line-height:1.45;color:var(--ol-muted,#a2b5c6);margin:0;overflow-wrap:anywhere}
+        .level-target-row small[data-active=true]{color:var(--ol-accent,#7de2c2)}
+        .level-targets-details input:focus-visible,.level-targets-details summary:focus-visible{outline:2px solid var(--ol-focus,#8bc7ff);outline-offset:3px}
+        .level-targets-details .level-targets-status[data-error=true]{color:var(--ol-warning,#f3cb80)}
+        .level-targets-status:empty{display:none}
+      `;
       const summary = document.createElement('summary');
       summary.append(document.createTextNode('Objetivos de nivel'));
       const count = document.createElement('span');
+      count.className = 'level-target-count';
       summary.append(count);
       const help = document.createElement('p');
-      help.textContent = 'Elige un nivel por estructura. El aviso se aplica al sistema observado cuando termina la construcción. ' +
-        'Vacío o 0 desactiva el objetivo; los niveles ya alcanzados al activarlo no generan avisos.';
-      root.append(style, summary, help);
+      help.textContent = 'Recibe un aviso cuando una estructura del sistema observado alcance el nivel elegido.';
+      const columns = document.createElement('div');
+      columns.className = 'level-target-columns';
+      columns.setAttribute('aria-hidden', 'true');
+      const structureColumn = document.createElement('span'); structureColumn.textContent = 'Estructura';
+      const targetColumn = document.createElement('span'); targetColumn.textContent = 'Avisar al nivel';
+      columns.append(structureColumn, targetColumn);
+      root.append(style, summary, help, columns);
       const inputs = new Map();
       const labels = new Map();
       for (const [id, name] of buildings) {
@@ -7916,12 +8444,14 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         label.textContent = name;
         const input = document.createElement('input');
         input.type = 'text'; input.inputMode = 'numeric'; input.maxLength = MAX_DRAFT;
-        input.pattern = '[0-9]*'; input.placeholder = '—'; input.autocomplete = 'off';
+        input.pattern = '[0-9]*'; input.placeholder = '0'; input.autocomplete = 'off';
         input.id = `oldlight-level-target-${id}`;
         input.dataset.levelTarget = id;
         input.setAttribute('aria-label', `Objetivo de nivel de ${name}`);
+        input.setAttribute('aria-describedby', `oldlight-level-target-state-${id}`);
         label.htmlFor = input.id;
         const active = document.createElement('small');
+        active.id = `oldlight-level-target-state-${id}`;
         active.dataset.levelTargetStatus = id;
         input.addEventListener('input', () => {
           if (timers.has(id)) { cancel(timers.get(id)); timers.delete(id); }
@@ -7944,9 +8474,11 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         inputs.set(id, input); labels.set(id, active);
         row.append(label, input, active); root.append(row);
       }
+      const footnote = document.createElement('p');
+      footnote.textContent = 'Vacío o 0 desactiva el aviso. Solo se notifican niveles alcanzados después de activar el objetivo.';
       const status = document.createElement('p');
       status.className = 'level-targets-status'; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
-      root.append(status);
+      root.append(footnote, status);
       root.addEventListener('toggle', () => {
         if (root.open === config.expanded) return;
         try { commit({ ...exportConfig(), expanded: root.open }); }
@@ -7957,7 +8489,6 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       render();
       return root;
     }
-
     function getDiagnostics() {
       return { configured: ids.filter(id => config.targets[id] > 0).length,
         acknowledged: config.acknowledged.length, emitted, storageError, observing: !!baseline };
@@ -8131,6 +8662,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       inputs.open.disabled = false;
       inputs.open.textContent = config.clientId || defaultClientId ? 'Abrir Google Drive' : 'Configurar Google Drive';
       inputs.close.disabled = !session;
+      inputs.close.hidden = !session;
       inputs.clear.disabled = !config.clientId && config.clientIdDraft === null;
       inputs.status.textContent = LABELS[statusCode];
       inputs.active.textContent = config.clientId ? `Client ID activo: ${config.clientId}`
@@ -8393,46 +8925,64 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       draftTimer = null;
       mountNode?.remove();
       const box = element('section', undefined, { className: 'oldlight-drive-config' });
-      box.append(element('style', '.oldlight-drive-config .drive-toggle{display:flex;gap:7px;align-items:flex-start}' +
-        '.oldlight-drive-config .drive-toggle input{flex:none;margin:1px 0 0}' +
-        '.oldlight-drive-config .drive-advanced{margin-top:10px}' +
-        '.oldlight-drive-config .drive-advanced summary{cursor:pointer}' +
-        '.oldlight-drive-config .drive-active-client,.oldlight-drive-config .drive-account{overflow-wrap:anywhere}' +
-        '.oldlight-drive-config .drive-field-status:empty,.oldlight-drive-config .drive-account:empty{display:none}'));
-      box.append(element('h4', 'Copia opcional en Google Drive'));
+      box.append(element('style', `
+        .oldlight-drive-config{min-width:0;padding:12px;border:1px solid var(--ol-border,#2b4053);border-radius:var(--ol-radius,10px);background:var(--ol-surface,#131f2b);color:var(--ol-text,#e5eef6)}
+        .oldlight-drive-config [hidden]{display:none!important}
+        .oldlight-drive-config h4{margin:0;font-size:13px;font-weight:600;color:var(--ol-text,#e5eef6)}
+        .oldlight-drive-config p{margin:8px 0 0;font-size:11.5px;line-height:1.5;color:var(--ol-muted,#a2b5c6)}
+        .oldlight-drive-config .oldlight-drive-controls{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+        .oldlight-drive-config .oldlight-drive-controls button{min-height:36px;flex:1;padding:8px 10px;border:1px solid var(--ol-border-strong,#456177);border-radius:7px;font:inherit;color:var(--ol-text,#e5eef6);background:var(--ol-surface-raised,#192939)}
+        .oldlight-drive-config .oldlight-drive-controls button:first-child{flex-basis:100%;font-weight:600;color:var(--ol-accent,#7de2c2);background:var(--ol-accent-bg,#183c36)}
+        .oldlight-drive-config .drive-toggle{display:flex;gap:8px;align-items:center;min-height:34px;margin:6px 0 0;font-size:12px;line-height:1.4}
+        .oldlight-drive-config .drive-toggle input{flex:none;width:16px;height:16px;margin:0;accent-color:var(--ol-accent,#7de2c2)}
+        .oldlight-drive-config .drive-advanced{min-width:0;margin-top:12px;padding-top:10px;border-top:1px solid var(--ol-border,#2b4053)}
+        .oldlight-drive-config .drive-advanced summary{cursor:pointer;min-height:24px;font-size:12px;font-weight:600;color:var(--ol-muted,#a2b5c6)}
+        .oldlight-drive-config .drive-advanced label{display:grid;gap:6px;margin-top:10px;font-size:12px}
+        .oldlight-drive-config .drive-advanced input[type="text"]{box-sizing:border-box;width:100%;min-width:0;min-height:36px;padding:8px 10px;border:1px solid var(--ol-border-strong,#456177);border-radius:7px;background:var(--ol-bg,#0c141d);color:var(--ol-text,#e5eef6);font:inherit}
+        .oldlight-drive-config .drive-advanced button{min-height:34px;margin-top:10px;padding:7px 10px;border:1px solid var(--ol-border,#2b4053);border-radius:7px;font:inherit;font-size:12px;background:transparent;color:var(--ol-muted,#a2b5c6)}
+        .oldlight-drive-config button:hover:not(:disabled){border-color:var(--ol-accent,#7de2c2)}
+        .oldlight-drive-config .drive-advanced button:hover:not(:disabled){border-color:var(--ol-danger,#f4a8a8);color:var(--ol-danger,#f4a8a8)}
+        .oldlight-drive-config .drive-active-client,.oldlight-drive-config .drive-account{overflow-wrap:anywhere}
+        .oldlight-drive-config .drive-account{color:var(--ol-text,#e5eef6)}
+        .oldlight-drive-config .drive-active-client{font-size:11.5px}
+        .oldlight-drive-config .drive-field-status:empty,.oldlight-drive-config .drive-account:empty{display:none}
+        .oldlight-drive-config :focus-visible{outline:2px solid var(--ol-focus,#8bc7ff);outline-offset:3px}
+      `));
+      box.append(element('h4', 'Google Drive'));
       const controls = element('div', undefined, { className: 'oldlight-drive-controls' });
       const open = element('button', 'Configurar Google Drive', { type: 'button' });
       const close = element('button', 'Desconectar', { type: 'button' });
       controls.append(open, close);
-      const status = element('p');
+      const status = element('p', undefined, { className: 'drive-connection-status' });
       status.setAttribute('role', 'status');
       status.setAttribute('aria-live', 'polite');
       const autoLabel = element('label', undefined, { className: 'drive-toggle' });
       const auto = element('input', undefined, { type: 'checkbox' });
-      autoLabel.append(auto, document.createTextNode(' Copia automática de los cambios locales'));
+      autoLabel.append(auto, document.createTextNode(' Copia automática de cada cambio'));
       const rememberLabel = element('label', undefined, { className: 'drive-toggle' });
       const remember = element('input', undefined, { type: 'checkbox' });
-      rememberLabel.append(remember, document.createTextNode(' Recordar mi cuenta para volver a conectar'));
-      const note = element('p', 'Los ajustes se guardan automáticamente. La copia automática requiere ' +
-        'la ventana de Drive abierta y la autorización vigente.');
+      rememberLabel.append(remember, document.createTextNode(' Recordar mi cuenta'));
+      const note = element('p', 'Las copias automáticas necesitan la ventana de Drive abierta y conectada.');
       const advanced = element('details', undefined, { className: 'drive-advanced' });
-      advanced.append(element('summary', 'Configuración avanzada'));
+      advanced.dataset.uiSection = 'driveAdvanced';
+      advanced.open = config.clientIdDraft !== null;
+      advanced.append(element('summary', 'Conexión avanzada'));
       const clientLabel = element('label', 'Client ID de Google OAuth');
       const client = element('input', undefined, { type: 'text', maxLength: 300,
         autocomplete: 'off', spellcheck: false, placeholder: '…apps.googleusercontent.com' });
       clientLabel.append(client);
       const active = element('p', undefined, { className: 'drive-active-client' });
       const account = element('p', undefined, { className: 'drive-account' });
-      const setupNote = element('p', 'Para usar tu propio proyecto, crea un Client ID Web con este origen autorizado: ' + HELPER_ORIGIN +
-        '. La configuración avanzada de la ventana de Drive incluye los pasos.');
+      const setupNote = element('p', 'Solo para tu propio proyecto de Google: utiliza un Client ID Web con el origen ' + HELPER_ORIGIN +
+        '. Los pasos están en la ventana de Drive.');
       const clear = element('button', 'Borrar Client ID', { type: 'button' });
-      const inputNote = element('p', 'Al escribir se guarda el borrador; se aplica cuando el Client ID esté completo. ' +
-        'Vaciar el campo conserva la conexión actual. Usa Borrar Client ID para eliminarlo.');
+      const inputNote = element('p', 'El borrador se guarda al escribir y se aplica cuando está completo. ' +
+        'Un campo vacío conserva la conexión actual.');
       const fieldStatus = element('p', undefined, { className: 'drive-field-status' });
       fieldStatus.setAttribute('role', 'status');
       fieldStatus.setAttribute('aria-live', 'polite');
-      advanced.append(clientLabel, inputNote, active, account, setupNote, clear);
-      box.append(controls, status, autoLabel, rememberLabel, note, fieldStatus, advanced);
+      advanced.append(clientLabel, inputNote, active, setupNote, clear);
+      box.append(status, account, controls, autoLabel, rememberLabel, note, fieldStatus, advanced);
 
       function flushClientDraft() {
         clearTimeout(draftTimer);
@@ -8620,6 +9170,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     shiftPresets.cancel();
     ui?.cancelPriorityDrag?.();
     ui?.cancelPanelDrag?.();
+    ui?.cancelResize?.();
     settings = readSettings();
     restoreNumericInputs();
     if (settings.enabled) { error = ''; unconfirmed = 0; }
@@ -8628,6 +9179,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   window.addEventListener('resize', () => {
     ui?.cancelPriorityDrag?.();
     ui?.cancelPanelDrag?.();
+    ui?.cancelResize?.();
     layoutHelper();
   });
   document.addEventListener('visibilitychange', schedule);
