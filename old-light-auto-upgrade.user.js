@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.8.0
+// @version      1.8.1
 // @description  Flota prioritaria con reserva de recursos y ETA, mejoras por prioridad, presets, misiones pendientes y reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -25,7 +25,7 @@
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.8.0';
+  const SCRIPT_VERSION = '1.8.1';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -5716,7 +5716,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       group.entries.map(([type]) => [type, group.enabled])));
     const storageAvailable = typeof gmGet === 'function' && typeof gmSet === 'function';
     const telegramAvailable = storageAvailable && typeof gmRequest === 'function';
-    const defaults = { browserEnabled: false, telegramEnabled: false, botToken: '', chatId: '',
+    const defaults = { browserEnabled: false, telegramEnabled: false,
+      paused: false, browserPaused: false, telegramPaused: false, browserPauseEpoch: 0, telegramPauseEpoch: 0, botToken: '', chatId: '',
       drafts: EMPTY_DRAFTS, events: DEFAULT_EVENTS, eventsExpanded: false };
     let config = { ...defaults };
     let destroyed = false;
@@ -5743,7 +5744,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const counters = {
       accepted: 0, duplicates: 0, browserSent: 0, telegramSent: 0,
       browserFailed: 0, telegramFailed: 0, browserDropped: 0, telegramDropped: 0,
-      rateRetries: 0, filtered: 0,
+      rateRetries: 0, filtered: 0, suppressed: 0,
     };
   
     function validToken(value) {
@@ -5772,9 +5773,17 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   
     function normalizeConfig(saved) {
       if (!saved || typeof saved !== 'object') return { ...defaults, events: { ...DEFAULT_EVENTS }, drafts: { ...EMPTY_DRAFTS } };
+      if (['paused', 'browserPaused', 'telegramPaused'].some(key => saved[key] !== undefined && typeof saved[key] !== 'boolean') ||
+          ['browserPauseEpoch', 'telegramPauseEpoch'].some(key => saved[key] !== undefined &&
+            (!Number.isSafeInteger(saved[key]) || saved[key] < 0))) throw new TypeError('Las pausas guardadas no son válidas.');
       return {
         browserEnabled: saved.browserEnabled === true,
         telegramEnabled: saved.telegramEnabled === true,
+        paused: saved.paused === true,
+        browserPaused: saved.browserPaused === true,
+        telegramPaused: saved.telegramPaused === true,
+        browserPauseEpoch: saved.browserPauseEpoch ?? 0,
+        telegramPauseEpoch: saved.telegramPauseEpoch ?? 0,
         eventsExpanded: saved.eventsExpanded === true,
         botToken: validToken(saved.botToken) ? saved.botToken : '',
         chatId: validChat(saved.chatId) ? saved.chatId : '',
@@ -5942,6 +5951,10 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         try { request.control?.abort(); } catch { /* Never expose a token-bearing transport error. */ }
       }
     }
+
+    function channelPaused(channel, value = config) {
+      return value.paused || value[channel + 'Paused'];
+    }
   
     function writeConfig(next) {
       if (!storageAvailable) {
@@ -5950,15 +5963,32 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         return false;
       }
       next = normalizeConfig(next);
-      try { gmSet(CONFIG_KEY, { ...next }); }
+      // Invalidations belong to a new pause, not to the age of a backup.
+      // Keep them monotonic when restoring older saved pause preferences.
+      for (const channel of ['browser', 'telegram']) {
+        const epoch = channel + 'PauseEpoch';
+        const enteringPause = (next.paused && !config.paused) || (next[channel + 'Paused'] && !config[channel + 'Paused']);
+        next[epoch] = Math.max(config[epoch], next[epoch]) + (enteringPause ? 1 : 0);
+        if (!Number.isSafeInteger(next[epoch])) {
+          storageError = 'No se pudo guardar el estado de pausa.';
+          updateUI();
+          return false;
+        }
+      }
+      try {
+        const saved = gmSet(CONFIG_KEY, { ...next });
+        if (saved === false || saved && typeof saved.then === 'function') throw new Error('El guardado debe ser síncrono.');
+      }
       catch {
         storageError = 'No se pudo guardar en el gestor. La configuración no ha cambiado.';
         updateUI();
         return false;
       }
       const destinationChanged = next.botToken !== config.botToken || next.chatId !== config.chatId;
-      if (destinationChanged || (config.telegramEnabled && !next.telegramEnabled)) clearTelegramQueue();
-      if (!next.browserEnabled) clearBrowserQueue();
+      if (destinationChanged || (config.telegramEnabled && !next.telegramEnabled) || channelPaused('telegram', next)
+          || next.telegramPauseEpoch !== config.telegramPauseEpoch) clearTelegramQueue();
+      if (!next.browserEnabled || channelPaused('browser', next)
+          || next.browserPauseEpoch !== config.browserPauseEpoch) clearBrowserQueue();
       config = { ...next };
       dropFilteredQueueItems();
       storageError = '';
@@ -5969,18 +5999,24 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     }
   
     function refreshConfig() {
-      if (destroyed || !storageAvailable) return;
+      if (destroyed || !storageAvailable) return false;
       try {
-        const next = normalizeConfig(gmGet(CONFIG_KEY, null));
+        const saved = gmGet(CONFIG_KEY, null);
+        if (saved && typeof saved.then === 'function') throw new Error('La lectura debe ser síncrona.');
+        const next = normalizeConfig(saved);
         const destinationChanged = next.botToken !== config.botToken || next.chatId !== config.chatId;
         const telegramChanged = next.telegramEnabled !== config.telegramEnabled;
         const browserChanged = next.browserEnabled !== config.browserEnabled;
         const eventsChanged = EVENT_TYPES.some((type) => next.events[type] !== config.events[type]);
         const draftsChanged = !sameDrafts(next.drafts, config.drafts);
+        const pausesChanged = ['paused', 'browserPaused', 'telegramPaused', 'browserPauseEpoch', 'telegramPauseEpoch']
+          .some(key => next[key] !== config[key]);
         if (!destinationChanged && !telegramChanged && !browserChanged && !eventsChanged
-            && !draftsChanged && next.eventsExpanded === config.eventsExpanded) return;
-        if (destinationChanged || (config.telegramEnabled && !next.telegramEnabled)) clearTelegramQueue();
-        if (config.browserEnabled && !next.browserEnabled) clearBrowserQueue();
+            && !draftsChanged && !pausesChanged && next.eventsExpanded === config.eventsExpanded) return true;
+        if (destinationChanged || (config.telegramEnabled && !next.telegramEnabled) || channelPaused('telegram', next)
+            || next.telegramPauseEpoch !== config.telegramPauseEpoch) clearTelegramQueue();
+        if ((config.browserEnabled && !next.browserEnabled) || channelPaused('browser', next)
+            || next.browserPauseEpoch !== config.browserPauseEpoch) clearBrowserQueue();
         config = next;
         dropFilteredQueueItems();
         if (draftsChanged || destinationChanged) {
@@ -5995,13 +6031,29 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         storageError = '';
         autosaveStatus = credentialDraftState().message || 'Guardado automáticamente.';
         updateUI();
+        return true;
       } catch {
         storageError = 'No se pudo actualizar la configuración desde el gestor.';
+        updateUI();
+        return false;
       }
+    }
+
+    function setPaused(target, value) {
+      if (!['all', 'browser', 'telegram'].includes(target) || typeof value !== 'boolean') {
+        throw new TypeError('La pausa debe indicar todos los avisos, navegador o Telegram y un valor booleano.');
+      }
+      if (!refreshConfig()) return false;
+      const field = target === 'all' ? 'paused' : target + 'Paused';
+      if (config[field] === value) return true;
+      const next = { ...config, [field]: value };
+      return writeConfig(next);
     }
   
     function isEnabled() {
       refreshConfig();
+      // Observation keeps running while delivery is paused, so reports and
+      // level crossings are consumed without a burst of old alerts on resume.
       return !destroyed && (config.browserEnabled || config.telegramEnabled)
         && EVENT_TYPES.some((type) => config.events[type]);
     }
@@ -6015,9 +6067,10 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     }
   
     function pumpBrowser() {
-      refreshConfig();
+      if (!refreshConfig()) { clearBrowserQueue(); return; }
       dropFilteredQueueItems();
       if (destroyed || !browserQueue.length) return;
+      if (channelPaused('browser')) { clearBrowserQueue(); updateUI(); return; }
       if (!config.browserEnabled || permission() !== 'granted') {
         clearBrowserQueue();
         browserStatus = permission() === 'denied'
@@ -6092,9 +6145,10 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     }
   
     function pumpTelegram() {
-      refreshConfig();
+      if (!refreshConfig()) { clearTelegramQueue(); return; }
       dropFilteredQueueItems();
       if (destroyed || activeRequest || !telegramQueue.length) return;
+      if (channelPaused('telegram')) { clearTelegramQueue(); updateUI(); return; }
       if (now() < nextTelegramAt) { armTelegram(); return; }
       if (telegramBlocked || !configured()) return;
       const item = telegramQueue.shift();
@@ -6112,7 +6166,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   
       function finish(kind, response) {
         if (destroyed || request.settled || activeRequest !== request) return;
-        refreshConfig();
+        if (!refreshConfig()) { clearTelegramQueue(); return; }
         if (destroyed || request.settled || activeRequest !== request) return;
         request.settled = true;
         cancelTimer(request.watchdog);
@@ -6193,7 +6247,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     function emit(event) {
       try {
         if (destroyed || !event || typeof event !== 'object') return false;
-        refreshConfig();
+        if (!refreshConfig()) return false;
         const type = typeof event.type === 'string' ? event.type : '';
         if (!eventAllowed(type)) { counters.filtered += 1; return false; }
         const meta = (type === 'game.reports' ? REPORT_META.get(event.reportKind) : null)
@@ -6207,15 +6261,19 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         const identity = typeof event.id === 'string' && event.id ? event.id.slice(0, 8192)
           : typeof event.id === 'number' ? String(event.id) : title + '\n' + message;
         const key = keyFor(type + '\0' + identity);
-        const browserOn = config.browserEnabled && permission() === 'granted';
-        const telegramOn = config.telegramEnabled && configured() && !telegramBlocked;
-        if (!browserOn && !telegramOn) return false;
+        const browserConfigured = config.browserEnabled && permission() === 'granted';
+        const telegramConfigured = config.telegramEnabled && configured();
+        const browserOn = browserConfigured && !channelPaused('browser');
+        const telegramOn = telegramConfigured && !channelPaused('telegram') && !telegramBlocked;
+        const suppressed = (browserConfigured && channelPaused('browser')) || (telegramConfigured && channelPaused('telegram'));
+        if (!browserOn && !telegramOn && !suppressed) return false;
         refreshSeen();
         if (seen.has(key) && seen.get(key) > now() - SEEN_TTL) {
           counters.duplicates += 1;
           return false;
         }
         remember(key);
+        if (suppressed) counters.suppressed += 1;
         const item = { key, type, title, message, text: formatted, retries: 0 };
         let accepted = false;
         if (browserOn) {
@@ -6239,7 +6297,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     function commitCredentialDraft(clearFields = false, expectedDrafts = null) {
       if (destroyed) return false;
       cancelDraftTimer();
-      refreshConfig();
+      if (!refreshConfig()) return false;
       // A remote import or another tab supersedes the draft captured by an older timer.
       if (expectedDrafts && !sameDrafts(expectedDrafts, config.drafts)) return false;
       const draft = credentialDraftState();
@@ -6282,7 +6340,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       const drafts = { botToken: mounted.token.value, chatId: mounted.chat.value };
       mounted.editorDirty = true;
       cancelDraftTimer();
-      refreshConfig();
+      if (!refreshConfig()) return false;
       if (!validDrafts(drafts)) {
         storageError = 'El borrador supera la longitud permitida. Acorta el campo para guardarlo.';
         updateUI();
@@ -6296,7 +6354,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   
     function flushEditorDraft(clearFields) {
       if (destroyed || !mounted) return false;
-      refreshConfig();
+      if (!refreshConfig()) return false;
       const tokenValue = mounted.token.value.trim();
       const chatValue = mounted.chat.value.trim();
       const alreadyApplied = !credentialDraftState().pending
@@ -6308,16 +6366,21 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     function getDiagnostics() {
       return {
         destroyed,
+        paused: config.paused,
         storageAvailable,
         storageError,
         autosave: { status: autosaveStatus, draftStored: credentialDraftState().pending, pending: draftTimer !== null },
         events: { ...config.events },
         browser: {
           enabled: config.browserEnabled, permission: permission(),
+          paused: config.browserPaused, effectivePaused: channelPaused('browser'),
+          deliveryEnabled: config.browserEnabled && permission() === 'granted' && !channelPaused('browser'),
           queued: browserQueue.length, status: browserStatus,
         },
         telegram: {
           available: telegramAvailable, enabled: config.telegramEnabled,
+          paused: config.telegramPaused, effectivePaused: channelPaused('telegram'),
+          deliveryEnabled: config.telegramEnabled && configured() && !telegramBlocked && !channelPaused('telegram'),
           configured: configured(), blocked: telegramBlocked,
           queued: telegramQueue.length, sending: !!activeRequest,
           retryAfterMs: Math.max(0, nextTelegramAt - now()), status: telegramStatus,
@@ -6335,12 +6398,41 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       telegram.checked = config.telegramEnabled;
       telegram.disabled = !telegramAvailable;
       permit.disabled = !storageAvailable || p === 'unsupported' || p === 'denied' || permissionBusy;
+      permit.hidden = p === 'granted' && config.browserEnabled;
       const permitText = p === 'granted' ? 'Activar avisos del navegador' : 'Permitir avisos del navegador';
       if (permit.textContent !== permitText) permit.textContent = permitText;
       token.placeholder = config.botToken ? 'Token guardado; vacío lo conserva' : 'Token del bot';
       chat.placeholder = config.chatId ? 'Chat guardado; vacío lo conserva' : 'ID numérico o @canal';
       token.disabled = chat.disabled = !storageAvailable;
-      test.disabled = !configured() || credentialDraftState().pending || !!activeRequest || telegramQueue.some((item) => item.test);
+      test.disabled = config.paused || config.telegramPaused || !configured() || credentialDraftState().pending
+        || !!activeRequest || telegramQueue.some((item) => item.test);
+      for (const [target, button] of mounted.pauseButtons) {
+        const paused = target === 'all' ? config.paused : config[target + 'Paused'];
+        const label = target === 'all' ? paused ? 'Reanudar avisos' : 'Pausar todos los avisos'
+          : paused ? 'Reanudar' : 'Pausar';
+        const channel = target === 'browser' ? 'del navegador' : 'por Telegram';
+        if (button.textContent !== label) button.textContent = label;
+        button.disabled = !storageAvailable;
+        button.setAttribute('aria-pressed', String(!!paused));
+        button.setAttribute('aria-label', target === 'all' ? label : `${paused ? 'Reanudar' : 'Pausar'} avisos ${channel}`);
+      }
+      const channelStates = {
+        browser: config.paused ? config.browserPaused ? 'Pausa global y del canal' : 'Pausa global'
+          : config.browserPaused ? 'Pausado en este canal' : !config.browserEnabled ? 'Desactivado'
+            : p === 'denied' ? 'Permiso bloqueado' : p === 'unsupported' ? 'No disponible'
+              : p !== 'granted' ? 'Falta permiso' : 'Activo',
+        telegram: config.paused ? config.telegramPaused ? 'Pausa global y del canal' : 'Pausa global'
+          : config.telegramPaused ? 'Pausado en este canal' : !config.telegramEnabled ? 'Desactivado'
+            : !configured() ? 'Faltan credenciales' : telegramBlocked ? 'Revisa la conexión' : 'Activo',
+      };
+      for (const [channel, state] of mounted.channelStates) {
+        if (state.textContent !== channelStates[channel]) state.textContent = channelStates[channel];
+        state.dataset.paused = String(!!(config.paused || config[channel + 'Paused']));
+      }
+      mounted.pauseState.textContent = config.paused ? 'Pausa global activa'
+        : config.browserPaused && config.telegramPaused ? 'Ambos canales están pausados'
+          : config.browserPaused ? 'Navegador pausado' : config.telegramPaused ? 'Telegram pausado'
+            : 'Sin pausas activas';
       for (const [type, input] of eventInputs) {
         input.checked = config.events[type];
         input.disabled = !storageAvailable;
@@ -6351,10 +6443,12 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       mounted.eventsAll.disabled = !storageAvailable || enabledEvents === EVENT_TYPES.length;
       mounted.eventsNone.disabled = !storageAvailable || enabledEvents === 0;
       if (mounted.eventsDetails.open !== config.eventsExpanded) mounted.eventsDetails.open = config.eventsExpanded;
-      const browserLine = p === 'denied' ? 'Navegador: permiso bloqueado en los ajustes del sitio.'
+      const browserLine = config.paused || config.browserPaused ? 'Navegador: ' + channelStates.browser.toLowerCase() + '.'
+        : p === 'denied' ? 'Navegador: permiso bloqueado en los ajustes del sitio.'
         : p === 'unsupported' ? 'Este navegador no admite avisos de escritorio.'
           : 'Navegador: ' + (config.browserEnabled ? browserStatus || 'activado.' : 'desactivado.');
-      const telegramLine = 'Telegram: ' + (telegramStatus || (config.telegramEnabled ? 'activado.' : 'desactivado.'));
+      const telegramLine = 'Telegram: ' + (config.paused || config.telegramPaused
+        ? channelStates.telegram.toLowerCase() + '.' : telegramStatus || (config.telegramEnabled ? 'activado.' : 'desactivado.'));
       const pendingLine = 'En cola: ' + browserQueue.length + ' navegador / ' + telegramQueue.length + ' Telegram.';
       const dropped = counters.browserDropped + counters.telegramDropped;
       const content = [storageError, storageError ? '' : autosaveStatus, browserLine, telegramLine, pendingLine,
@@ -6388,6 +6482,17 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
           .notifications-details button{box-sizing:border-box;max-width:100%;padding:7px;border:1px solid #52657f;border-radius:5px;background:#23344d;color:inherit;cursor:pointer;font:inherit;white-space:normal}
           .notifications-details button:disabled{opacity:.55;cursor:default}
           .notifications-details .notify-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+          .notifications-details .notify-pause-controls{display:grid;gap:5px;padding:8px;border:1px solid #52657f;border-radius:6px;background:#152339;min-width:0}
+          .notifications-details .notify-pause-controls>button{width:100%;font-weight:600}
+          .notifications-details [data-notification-pause][aria-pressed="true"]{border-color:#a88c51;background:#3b3224}
+          .notifications-details .notify-pause-state{font-size:11px;font-weight:600}
+          .notifications-details .notify-channel{display:grid;gap:7px;min-width:0;padding:8px;border:1px solid #344257;border-radius:6px}
+          .notifications-details .notify-channel-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;min-width:0}
+          .notifications-details .notify-channel-info{display:grid;gap:4px;min-width:0}
+          .notifications-details .notify-channel-info>label{font-weight:600}
+          .notifications-details .notify-channel-state{font-size:11px;line-height:1.35;color:#b5c9df}
+          .notifications-details .notify-channel-state[data-paused="true"]{color:#ebc982}
+          .notifications-details .notify-channel-row>button{min-width:66px}
           .notifications-details .notification-events-details{min-width:0;border:1px solid #344257;border-radius:5px;padding:6px}
           .notifications-details .notification-event-groups{display:grid;gap:8px;margin-top:8px;min-width:0}
           .notifications-details .notify-event-group{display:grid;gap:7px;min-width:0;margin:0;padding:8px;border:1px solid #344257;border-radius:4px}
@@ -6399,9 +6504,30 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         </style>
         <summary>Notificaciones</summary>
         <div class="notify-body">
-          <label><input class="notification-browser-toggle" type="checkbox"> Avisos del navegador</label>
-          <button class="notification-permission" type="button">Permitir avisos del navegador</button>
-          <label><input class="notification-telegram-toggle" type="checkbox"> Avisos por Telegram</label>
+          <div class="notify-pause-controls">
+            <button type="button" data-notification-pause="all">Pausar todos los avisos</button>
+            <span class="notify-pause-state"></span>
+            <p class="notify-note">Esta pausa no afecta a la automatización. Al reanudar recibirás los nuevos avisos.</p>
+          </div>
+          <div class="notify-channel">
+            <div class="notify-channel-row">
+              <div class="notify-channel-info">
+                <label><input class="notification-browser-toggle" type="checkbox"> Navegador</label>
+                <span class="notify-channel-state" data-notification-channel-state="browser"></span>
+              </div>
+              <button type="button" data-notification-pause="browser">Pausar</button>
+            </div>
+            <button class="notification-permission" type="button">Permitir avisos del navegador</button>
+          </div>
+          <div class="notify-channel">
+            <div class="notify-channel-row">
+              <div class="notify-channel-info">
+                <label><input class="notification-telegram-toggle" type="checkbox"> Telegram</label>
+                <span class="notify-channel-state" data-notification-channel-state="telegram"></span>
+              </div>
+              <button type="button" data-notification-pause="telegram">Pausar</button>
+            </div>
+          </div>
           <details class="notification-events-details">
             <summary>Tipos de notificación</summary>
             <p class="notify-note">Estos filtros se aplican al navegador y a Telegram.</p>
@@ -6429,12 +6555,21 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         eventCount: query('.notification-events-count'), eventsAll: query('.notification-events-all'),
         eventsNone: query('.notification-events-none'), eventsDetails: query('.notification-events-details'),
         editing: new Set(), editorDirty: false,
+        pauseButtons: new Map(['all', 'browser', 'telegram'].map(target => [target, query(`[data-notification-pause="${target}"]`)])),
+        channelStates: new Map(['browser', 'telegram'].map(channel => [channel, query(`[data-notification-channel-state="${channel}"]`)])),
+        pauseState: query('.notify-pause-state'),
       };
       const ui = mounted;
+      for (const [target, button] of ui.pauseButtons) {
+        button.addEventListener('click', () => {
+          if (!refreshConfig()) return;
+          setPaused(target, !(target === 'all' ? config.paused : config[target + 'Paused']));
+        });
+      }
       ui.eventsDetails.addEventListener('toggle', () => {
         const open = ui.eventsDetails.open;
         if (open === config.eventsExpanded) return;
-        refreshConfig();
+        if (!refreshConfig()) return;
         writeConfig({ ...config, eventsExpanded: open });
       });
   
@@ -6452,19 +6587,19 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       for (const [type, input] of ui.eventInputs) {
         input.addEventListener('change', () => {
           const enabled = input.checked;
-          refreshConfig();
+          if (!refreshConfig()) return;
           writeConfig({ ...config, events: { ...config.events, [type]: enabled } });
         });
       }
       function setAllEvents(enabled) {
-        refreshConfig();
+        if (!refreshConfig()) return;
         writeConfig({ ...config, events: Object.fromEntries(EVENT_TYPES.map((type) => [type, enabled])) });
       }
       ui.eventsAll.addEventListener('click', () => setAllEvents(true));
       ui.eventsNone.addEventListener('click', () => setAllEvents(false));
       ui.telegram.addEventListener('change', () => {
         const desired = ui.telegram.checked;
-        refreshConfig();
+        if (!refreshConfig()) return;
         if (writeConfig({ ...config, telegramEnabled: desired })) {
           telegramStatus = desired ? configured() ? 'Activado.' : 'Activado; completa las credenciales para recibir avisos.' : 'Desactivado.';
           if (desired) armTelegram();
@@ -6473,7 +6608,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       });
       ui.browser.addEventListener('change', () => {
         const desired = ui.browser.checked && permission() === 'granted';
-        refreshConfig();
+        if (!refreshConfig()) return;
         if (writeConfig({ ...config, browserEnabled: desired })) browserStatus = desired ? 'Activado.' : 'Desactivado.';
         updateUI();
       });
@@ -6485,7 +6620,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
           // The only requestPermission call is inside this explicit button's click handler.
           const result = permission() === 'granted' ? 'granted' : await NativeNotification.requestPermission();
           if (destroyed) return;
-          refreshConfig();
+          if (!refreshConfig()) return;
           if (result === 'granted') {
             writeConfig({ ...config, browserEnabled: true });
             browserStatus = 'Permiso concedido; avisos activados.';
@@ -6497,8 +6632,9 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         finally { permissionBusy = false; updateUI(); }
       });
       ui.test.addEventListener('click', () => {
-        refreshConfig();
-        if (destroyed || !configured() || activeRequest || telegramQueue.some((item) => item.test)) return;
+        if (!refreshConfig()) return;
+        if (destroyed || config.paused || config.telegramPaused || !configured()
+            || activeRequest || telegramQueue.some((item) => item.test)) return;
         if (now() - lastTestAt < 10000) {
           telegramStatus = 'Espera unos segundos antes de volver a enviar una prueba.';
           updateUI();
@@ -6528,7 +6664,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         armTelegram();
       });
       query('.notification-clear').addEventListener('click', () => {
-        refreshConfig();
+        if (!refreshConfig()) return;
         cancelDraftTimer();
         if (writeConfig({ ...config, botToken: '', chatId: '', drafts: EMPTY_DRAFTS, telegramEnabled: false })) {
           ui.token.value = '';
@@ -6561,6 +6697,9 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     function validateConfig(value) {
       if (!value || typeof value !== 'object' || Array.isArray(value)
           || typeof value.browserEnabled !== 'boolean' || typeof value.telegramEnabled !== 'boolean'
+          || ['paused', 'browserPaused', 'telegramPaused'].some(key => value[key] !== undefined && typeof value[key] !== 'boolean')
+          || ['browserPauseEpoch', 'telegramPauseEpoch'].some(key => value[key] !== undefined &&
+            (!Number.isSafeInteger(value[key]) || value[key] < 0))
           || typeof value.botToken !== 'string' || typeof value.chatId !== 'string'
           || (value.botToken && !validToken(value.botToken)) || (value.chatId && !validChat(value.chatId))
           || (value.drafts !== undefined && !validDrafts(value.drafts))
@@ -6574,6 +6713,9 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   
     function importConfig(value) {
       const next = validateConfig(value);
+      // A restore can introduce a new pause. Use the latest invalidations
+      // when available; explicit imports can still repair unreadable storage.
+      refreshConfig();
       if (!writeConfig(next)) throw new Error('No se pudo guardar la configuración de avisos.');
       cancelDraftTimer();
       restoreDraftFields(true);
@@ -6591,7 +6733,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       mounted = null;
     }
   
-    return Object.freeze({ emit, isEnabled, isEventEnabled, mount, getDiagnostics, exportConfig, validateConfig, importConfig,
+    return Object.freeze({ emit, isEnabled, isEventEnabled, setPaused, mount, getDiagnostics, exportConfig, validateConfig, importConfig,
       destroy, get status() { return getDiagnostics(); } });
   }
   // END NOTIFIER

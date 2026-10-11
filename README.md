@@ -1,6 +1,6 @@
 # Old Light Auto Upgrade
 
-Userscript para [Old Light](https://oldlight.io/play) que da prioridad a la flota, reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.8.0**. La versión cargada aparece en la cabecera del helper, también al minimizarlo.
+Userscript para [Old Light](https://oldlight.io/play) que da prioridad a la flota, reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.8.1**. La versión cargada aparece en la cabecera del helper, también al minimizarlo.
 
 ## Instalación
 
@@ -154,8 +154,8 @@ Si los reintentos estaban desactivados cuando llegó el informe, activarlos ahor
 
 La pestaña **Avisos** reúne los canales y los filtros de notificaciones. Los dos canales son independientes y están **desactivados por defecto**:
 
-- **Navegador:** pulsa **Permitir avisos del navegador**. Solo ese botón solicita permiso; al concederlo se activa el canal. Después puedes controlarlo con **Avisos del navegador**.
-- **Telegram:** introduce el **token de tu bot** y el **Chat ID** y activa **Avisos por Telegram**. Los cambios se guardan automáticamente; no hay botón Guardar. **Enviar prueba a Telegram** envía una prueba al chat guardado, independientemente de los filtros y sin necesidad de activar el canal. La prueba se bloquea mientras quedan credenciales incompletas en edición.
+- **Navegador:** pulsa **Permitir avisos del navegador**. Solo ese botón solicita permiso; al concederlo se activa el canal. Después puedes controlarlo con el interruptor **Navegador**.
+- **Telegram:** introduce el **token de tu bot** y el **Chat ID** y activa el interruptor **Telegram**. Los cambios se guardan automáticamente; no hay botón Guardar. **Enviar prueba a Telegram** envía una prueba al chat guardado, independientemente de los filtros y sin necesidad de activar el canal. La prueba respeta la pausa global y la de Telegram; también se bloquea mientras quedan credenciales incompletas en edición.
 
 El token y el Chat ID se guardan en el almacenamiento del gestor de userscripts, mediante GM, fuera del archivo publicado. Cada pulsación guarda un borrador privado; cuando el par de credenciales es válido, se aplica tras **400 ms** sin cambios o al salir del campo. Mientras está incompleto, se conserva la conexión anterior. Los campos vacíos conservan lo guardado. Al recargar, se recuperan los borradores pendientes, sin rellenar los campos con las credenciales activas. **Borrar credenciales de Telegram** elimina tanto las credenciales como los borradores y desactiva el canal.
 
@@ -167,6 +167,16 @@ En **Tipos de notificación** puedes activar o desactivar individualmente los **
 Cada aviso muestra una sola marca **Old Light**, un encabezado con el icono y tipo de evento, el sistema cuando se puede identificar y el detalle separado. Los cambios de vista del helper no envían avisos. Un cambio de flota se comunica como tal; por sí solo no demuestra que haya terminado una construcción. Los mensajes privados del juego se anuncian por su contador; su contenido no se descarga.
 
 Cada canal tiene su propia cola de avisos **en memoria**, que no se conserva al recargar o cerrar la pestaña. Telegram separa los envíos al menos **3,1 segundos** y, si pide esperar por exceso de solicitudes, respeta ese plazo antes de reintentar. El panel muestra el estado de cada canal.
+
+### Pausar y reanudar los avisos
+
+En **Avisos**, pulsa **Pausar todos los avisos** para detener temporalmente las notificaciones de ambos canales. El botón cambia a **Reanudar avisos**. Las tarjetas **Navegador** y **Telegram** tienen sus propios botones **Pausar / Reanudar** y muestran el estado de cada canal.
+
+Las pausas son independientes de los interruptores de activación, los filtros y las credenciales. Por ejemplo, si pausas Telegram y después pausas todos los avisos, **reanudar la pausa global deja Telegram pausado**. Reanudar un canal durante la pausa global lo deja preparado para cuando reanudes los avisos globales. Un canal desactivado sigue desactivado.
+
+Se descartan los avisos pendientes del canal que pausas y los eventos detectados mientras está pausado, para que al reanudar recibas los nuevos avisos. Una notificación que ya se haya entregado no se puede retirar. La pausa global y las de cada canal se guardan al pulsar el botón, se sincronizan entre las pestañas y se incluyen en la exportación, importación y copias de Drive.
+
+**La automatización continúa:** estas pausas solo controlan las notificaciones; las mejoras, la reposición de flota, las misiones pendientes y el seguimiento de combates mantienen su funcionamiento habitual. Cambiar la pausa de avisos no envía una notificación ni solicita permisos del navegador.
 
 ### Objetivos de nivel por estructura
 
@@ -200,11 +210,11 @@ Deja **Structures o Shipyard abierto y la pestaña visible**. Los dos paneles de
 
 Cuando la pestaña está oculta, el cliente del juego aplaza el refresco de sus contadores y **el script no inicia nuevas acciones**. Los avisos dependen de los cambios que lleguen a la interfaz mientras se observa. No ofrece una cobertura completa de eventos del servidor ni actividad continua en segundo plano; al cerrar, suspender o descartar la pestaña, deja de actuar.
 
-La versión **1.8.0** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las construcciones ya encoladas mantienen su orden en el juego.
+La versión **1.8.1** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las construcciones ya encoladas mantienen su orden en el juego.
 
 ## Guardado local, exportación e importación
 
-Todo lo configurable se guarda automáticamente en este navegador, sin botones de Guardar ajustes: edificios, prioridades, mínimos y modo de flota, atajo y catálogo de presets recordados, misiones pendientes, ajustes y campañas de reintentos, objetivos de nivel, umbral del depósito, pausa, posición de la ventana, estado minimizado, pestaña seleccionada, secciones desplegadas, canales y filtros de avisos, credenciales de Telegram y configuración de Drive.
+Todo lo configurable se guarda automáticamente en este navegador, sin botones de Guardar ajustes: edificios, prioridades, mínimos y modo de flota, atajo y catálogo de presets recordados, misiones pendientes, ajustes y campañas de reintentos, objetivos de nivel, umbral del depósito, pausa, posición de la ventana, estado minimizado, pestaña seleccionada, secciones desplegadas, canales, filtros y pausas global y por canal de avisos, credenciales de Telegram y configuración de Drive.
 
 Los campos de texto y números guardan el **borrador en cada cambio**. Los números y las credenciales se aplican cuando son válidos, tras 400 ms sin escribir o al salir del campo; el máximo de reintentos se aplica en cuanto el valor es válido. Puedes recargar y continuar una edición incompleta; los valores válidos anteriores siguen activos mientras tanto. Los toggles se aplican inmediatamente; las prioridades y la posición se guardan al terminar el movimiento.
 
