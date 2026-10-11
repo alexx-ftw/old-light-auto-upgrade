@@ -101,6 +101,48 @@ test('exact omitted ship types normalize to zero', async () => {
   assert.equal(h.controller.observeReport(report), true); await h.controller.tick(); assert.deepEqual(h.queue[0].quantities, amounts(8));
 });
 for (const [name, edit] of [
+  ['detail timestamp differs by one millisecond', r => { r.detail.createdAt += 1; }],
+  ['detail timestamp differs by several seconds', r => { r.detail.createdAt -= 1500; }],
+  ['exact numeric entries omit kind', r => { for (const entry of r.detail.sections.battle.attackerShips) delete entry.kind; }],
+  ['independent timestamps and omitted kind together', r => {
+    r.detail.createdAt = new Date(r.item.takenAt - 1000).toISOString();
+    for (const entry of r.detail.sections.battle.attackerShips) delete entry.kind;
+  }],
+]) test('native report compatibility: ' + name + ' continues 8 -> 9 -> 10 and stops on Victory', async () => {
+  const h = harness(); h.enable();
+  let report = h.report(1, { quantities: amounts(8) }); edit(report);
+  assert.equal(h.controller.observeReport(report), true); await h.controller.tick();
+  assert.deepEqual(h.queue[0].quantities, amounts(9));
+  assert.equal(h.events.filter(event => event.type === 'attack.retry' && event.id.endsWith(':planned')).length, 1);
+  assert.equal(campaign(h).lastOutcomeAt, report.item.takenAt, 'The list timestamp controls outcome ordering');
+  h.sendJob(3000); await h.controller.tick(); h.reload(); h.now = 4000;
+  report = h.report(2, { quantities: amounts(9) }); edit(report);
+  assert.equal(h.controller.observeReport(report), true); await h.controller.tick();
+  assert.deepEqual(h.queue[0].quantities, amounts(10)); assert.equal(h.calls.length, 2);
+  assert.equal(h.controller.observeReport(report), false, 'A duplicate report never creates another retry');
+  h.sendJob(5000); await h.controller.tick(); h.now = 6000;
+  report = h.report(3, { verdict: 'Victory', quantities: amounts(10) }); edit(report);
+  assert.equal(h.controller.observeReport(report), true); await h.controller.tick();
+  assert.equal(campaign(h).status, 'completed'); assert.equal(h.calls.length, 2);
+});
+for (const takenAt of [undefined, null, 'not a date']) test('detail timestamp is a fallback for invalid list timestamp: ' + String(takenAt), async () => {
+  const h = harness(); h.enable(); const report = h.report(1, { quantities: amounts(8) });
+  report.item.takenAt = takenAt; report.detail.createdAt = new Date(h.now).toISOString();
+  assert.equal(h.controller.observeReport(report), true); await h.controller.tick();
+  assert.deepEqual(h.queue[0].quantities, amounts(9)); assert.equal(campaign(h).lastOutcomeAt, h.now);
+});
+for (const createdAt of [undefined, null, 'not a date']) test('valid list timestamp is authoritative despite unusable detail timestamp: ' + String(createdAt), async () => {
+  const h = harness(); h.enable(); const report = h.report(1, { quantities: amounts(8) }); report.detail.createdAt = createdAt;
+  assert.equal(h.controller.observeReport(report), true); await h.controller.tick();
+  assert.deepEqual(h.queue[0].quantities, amounts(9)); assert.equal(campaign(h).lastOutcomeAt, report.item.takenAt);
+});
+test('omitted exact kinds preserve every other ship type in the retry', async () => {
+  const h = harness(); h.enable(); const report = h.report(1, { quantities: amounts(8, { probe: 2, sentinel: 3, vanguard: 1 }) });
+  for (const entry of report.detail.sections.battle.attackerShips) delete entry.kind;
+  assert.equal(h.controller.observeReport(report), true); await h.controller.tick();
+  assert.deepEqual(h.queue[0].quantities, amounts(9, { probe: 2, sentinel: 3, vanguard: 1 }));
+});
+for (const [name, edit] of [
   ['incoming attack', r => { r.detail.route.from.ownerKind = 'human'; r.detail.route.to.ownerKind = 'owned'; }],
   ['incoming section', r => { r.detail.sections.incoming = {}; }],
   ['probe section', r => { r.detail.sections.probe = { tier: 0 }; }],
@@ -108,11 +150,17 @@ for (const [name, edit] of [
   ['unknown verdict despite total losses', r => { r.item.verdict = ''; }],
   ['unknown report variant', r => { r.detail.variant = { kind: 'territory_raid' }; }],
   ['unknown attacker quantities', r => { r.detail.sections.battle.attackerShips[1].kind = 'unknown'; }],
+  ['null attacker kind', r => { r.detail.sections.battle.attackerShips[1].kind = null; }],
+  ['unrecognized attacker kind', r => { r.detail.sections.battle.attackerShips[1].kind = 'estimate'; }],
   ['approximate attacker quantities', r => { r.detail.sections.battle.attackerShips[1].kind = 'approximate'; }],
   ['approximate marker on exact entry', r => { r.detail.sections.battle.attackerShips[1].approximate = true; }],
+  ['approximate marker on entry without kind', r => { delete r.detail.sections.battle.attackerShips[1].kind; r.detail.sections.battle.attackerShips[1].approximate = true; }],
   ['duplicate attacker type', r => { r.detail.sections.battle.attackerShips[0].type = 'marauder'; }],
   ['unknown attacker type', r => { r.detail.sections.battle.attackerShips[0].type = 'destroyer'; }],
   ['negative quantity', r => { r.detail.sections.battle.attackerShips[1].quantity = -1; }],
+  ['fractional quantity without kind', r => { delete r.detail.sections.battle.attackerShips[1].kind; r.detail.sections.battle.attackerShips[1].quantity = 8.5; }],
+  ['string quantity without kind', r => { delete r.detail.sections.battle.attackerShips[1].kind; r.detail.sections.battle.attackerShips[1].quantity = '8'; }],
+  ['null quantity without kind', r => { delete r.detail.sections.battle.attackerShips[1].kind; r.detail.sections.battle.attackerShips[1].quantity = null; }],
   ['unsafe quantity', r => { r.detail.sections.battle.attackerShips[1].quantity = Number.MAX_SAFE_INTEGER; }],
   ['over 50000 ships', r => { r.detail.sections.battle.attackerShips[1].quantity = 50001; }],
   ['fractional coordinate', r => { r.detail.route.to.q = -93.5; }],
@@ -120,7 +168,12 @@ for (const [name, edit] of [
   ['origin and target identical', r => { r.detail.route.to.q = -95; r.detail.route.to.r = 260; }],
   ['same origin name alone', r => { delete r.detail.route.from.ownerKind; }],
   ['mismatched report UUID', r => { r.detail.id = uuid(2); }],
-  ['mismatched timestamps', r => { r.detail.createdAt += 1; }],
+  ['no valid timestamp', r => { r.item.takenAt = null; r.detail.createdAt = 'not a date'; }],
+  ['list timestamp before activation despite newer detail timestamp', r => { r.item.takenAt = 999; }],
+  ['fallback timestamp before activation', r => { r.item.takenAt = null; r.detail.createdAt = 999; }],
+  ['fallback timestamp exactly at activation', r => { r.item.takenAt = null; r.detail.createdAt = 1000; }],
+  ['future list timestamp despite past detail timestamp', r => { r.item.takenAt += 10000; }],
+  ['future fallback timestamp', r => { r.item.takenAt = null; r.detail.createdAt += 10000; }],
   ['future report', r => { r.item.takenAt += 10000; r.detail.createdAt += 10000; }],
   ['Probe-only fleet', r => { r.detail.sections.battle.attackerShips = [{ type: 'probe', kind: 'exact', quantity: 7 }]; }],
   ['Vanguard-only fleet', r => { r.detail.sections.battle.attackerShips = [{ type: 'vanguard', kind: 'exact', quantity: 7 }]; }],

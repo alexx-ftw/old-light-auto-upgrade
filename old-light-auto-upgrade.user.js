@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.7.0
+// @version      1.7.1
 // @description  Flota prioritaria con reserva de recursos y ETA, mejoras por prioridad, presets, misiones pendientes y reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -73,7 +73,8 @@
   const reports = createReportsWatcher({ send: event => notifier.emit(event),
     getAccount: () => missionContext().scope.split('/')[1] || '',
     getBaselineSince: () => attackRetry?.isEnabled() ? attackRetry.getEnabledAt() : null,
-    onReport: report => attackRetry?.observeReport(report) });
+    onReport: report => attackRetry?.observeReport(report),
+    onRecoverReports: batch => attackRetry?.recoverReports(batch) });
   let driveBackup = null;
   let importingBackup = false;
   const notificationSession = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
@@ -1271,7 +1272,7 @@
     return {
       format: 'old-light-auto-upgrade-backup',
       schemaVersion: 1,
-      scriptVersion: '1.7.0',
+      scriptVersion: '1.7.1',
       exportedAt: new Date().toISOString(),
       settings: normalizeSettings(settings),
       notifications: notifier.exportConfig(),
@@ -1829,6 +1830,12 @@
     acquireLeadership();
     if (!leader) {
       show(lockError ? 'No se pudo coordinar esta pestaña. Recarga para reintentar.' : 'Esperando control de esta pestaña');
+      return;
+    }
+    // Finish reading the latest outcomes before spending resources on an old
+    // fleet minimum or allowing an already queued retry to leave.
+    if (reports.isRecovering()) {
+      show(reportsState.lastError ? reportsState.status : 'Comprobando los últimos combates antes de continuar…');
       return;
     }
     if (missionAdapter.isBusy()) { show('Preparando la misión pendiente…'); return; }
@@ -4326,6 +4333,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     let readError = false;
     let storageError = false;
     let notice = '';
+    let lastReportDecision = null;
     let destroyed = false;
     let running = false;
     let mounted = null;
@@ -4603,6 +4611,9 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     }
     function reconcileOne(campaign, queue) {
       if (!campaign.queueJobId || TERMINAL.includes(campaign.status)) return campaign;
+      // Pausing a queue job does not resolve an ambiguous attack. Preserve its
+      // explanation, including an imported pause that explicitly needs review.
+      if (campaign.status === 'uncertain' || (campaign.status === 'paused' && campaign.resumeStatus === null)) return campaign;
       const job = queue.find(item => item.id === campaign.queueJobId);
       if (!job) {
         if (campaign.sentAt !== null && campaign.lastSentQuantities) return campaign;
@@ -4640,40 +4651,137 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       for (const campaign of sent) emit(campaign, 'sent', 'Reintento ' + campaign.retries + ' enviado a ' + campaign.targetName + '.\n' + fleetText(campaign.quantities));
       return queue;
     }
-    function parseReport(value) {
-      if (!object(value) || !SCOPE.test(value.scope || '') || !object(value.item) || !object(value.detail)) return null;
+    function parseReport(value, onReject) {
+      const reject = message => { onReject?.(message); return null; };
+      if (!object(value) || !SCOPE.test(value.scope || '') || !object(value.item) || !object(value.detail)) {
+        return reject('Falta el detalle del combate o la identidad de la cuenta.');
+      }
       const { item, detail } = value;
-      if (!UUID.test(item.id || '') || !UUID.test(detail.id || '') || item.id.toLowerCase() !== detail.id.toLowerCase()) return null;
-      const takenAt = stamp(item.takenAt), createdAt = stamp(detail.createdAt);
-      if (takenAt === null || (detail.createdAt !== undefined && (createdAt === null || createdAt !== takenAt)) || takenAt > now()) return null;
+      if (!UUID.test(item.id || '') || !UUID.test(detail.id || '') || item.id.toLowerCase() !== detail.id.toLowerCase()) {
+        return reject('El identificador del detalle no coincide con el informe.');
+      }
+      // The native list and detail carry independent timestamps. Use the list
+      // outcome time, as the report formatter does, and fall back to the detail
+      // only when the list has no usable date. Report UUIDs bind both payloads.
+      const takenAt = stamp(item.takenAt) ?? stamp(detail.createdAt);
+      if (takenAt === null || takenAt > now()) return reject('La fecha del combate falta, no es válida o está en el futuro.');
       const route = detail.route, sections = detail.sections, variant = detail.variant;
       if (!object(route) || !object(route.from) || !object(route.to) || !object(sections) || !object(sections.battle) ||
           route.from.ownerKind !== 'owned' || !['human', 'npc', 'dormant'].includes(route.to.ownerKind) ||
           sections.incoming != null || sections.probe != null || item.verdict === 'Probed' ||
           sections.battle.targetOwnerKind === 'owned' || (variant != null && !object(variant)) ||
-          (variant?.kind && variant.kind !== 'capture_success')) return null;
+          (variant?.kind && variant.kind !== 'capture_success')) return reject('El informe no identifica un combate de salida compatible.');
       let originCoordinate, targetCoordinate;
       try { originCoordinate = coordinate({ q: route.from.q, r: route.from.r }); targetCoordinate = coordinate({ q: route.to.q, r: route.to.r }); }
-      catch (_) { return null; }
-      if (sameCoordinate(originCoordinate, targetCoordinate)) return null;
+      catch (_) { return reject('El informe no incluye coordenadas exactas de origen y destino.'); }
+      if (sameCoordinate(originCoordinate, targetCoordinate)) return reject('El origen y el destino del combate coinciden.');
       let verdict = item.verdict;
       if (variant?.kind === 'capture_success' || sections.battle.loyaltyChange?.captured === true) verdict = 'Captured';
-      if (!['Defeat', 'Victory', 'Captured', 'Draw'].includes(verdict)) return null;
+      if (!['Defeat', 'Victory', 'Captured', 'Draw'].includes(verdict)) return reject('El resultado del combate no está reconocido.');
       let amounts = null;
       if (Array.isArray(sections.battle.attackerShips) && sections.battle.attackerShips.length <= SHIPS.length) {
         const out = zeros(), found = new Set();
         let valid = true;
         for (const entry of sections.battle.attackerShips) {
-          if (!object(entry) || !SHIPS.includes(entry.type) || found.has(entry.type) || entry.kind !== 'exact' ||
+          if (!object(entry) || !SHIPS.includes(entry.type) || found.has(entry.type) || (entry.kind !== undefined && entry.kind !== 'exact') ||
               entry.approximate === true || !Number.isSafeInteger(entry.quantity) || entry.quantity < 0 || entry.quantity > MAX_QUANTITY) { valid = false; break; }
           found.add(entry.type); out[entry.type] = entry.quantity;
         }
         if (valid) try { amounts = quantities(out); } catch (_) { /* No exact offensive fleet. */ }
       }
-      if ((verdict === 'Defeat' || verdict === 'Draw') && !amounts) return null;
+      if ((verdict === 'Defeat' || verdict === 'Draw') && !amounts) {
+        return reject('Falta una flota atacante exacta: cantidades enteras conocidas y al menos un Marauder o Sentinel.');
+      }
       let originName, targetName;
-      try { originName = text(route.from.name, 400); targetName = text(route.to.name, 500); } catch (_) { return null; }
+      try { originName = text(route.from.name, 400); targetName = text(route.to.name, 500); }
+      catch (_) { return reject('Falta un nombre válido para el origen o el destino.'); }
       return { scope: value.scope, id: item.id.toLowerCase(), takenAt, verdict, originCoordinate, targetCoordinate, originName, targetName, quantities: amounts };
+    }
+    function reportDecision(value, message) {
+      lastReportDecision = { scope: value?.scope || '', reportId: UUID.test(value?.item?.id || '') ? value.item.id.toLowerCase() : '',
+        receivedAt: now(), message };
+      render();
+    }
+    function recoverReports(batch) {
+      if (destroyed) return 0;
+      ensureReady();
+      if (!config.enabled) return 0;
+      if (!object(batch) || !SCOPE.test(batch.scope || '') || !Array.isArray(batch.reports) || batch.reports.length > 20) {
+        throw new TypeError('La recuperación de combates no es válida.');
+      }
+      const latest = new Map();
+      const cutoff = Math.max(config.enabledAt, config.floorAt);
+      const incomplete = (entry, message) => {
+        reportDecision({ scope: batch.scope, item: entry?.item }, 'La recuperación sigue pendiente. ' + message);
+        throw new Error(message);
+      };
+      for (const entry of batch.reports) {
+        if (!object(entry) || !object(entry.item) || !object(entry.detail)) {
+          incomplete(entry, 'Falta el detalle completo de un combate reciente.');
+        }
+        const { item, detail } = entry;
+        if (!UUID.test(item.id || '') || !UUID.test(detail.id || '') || item.id.toLowerCase() !== detail.id.toLowerCase() ||
+            !['Defeat', 'Victory', 'Captured', 'Draw'].includes(item.verdict)) {
+          incomplete(entry, 'No se puede confirmar la identidad o el resultado de un combate reciente.');
+        }
+        const takenAt = stamp(item.takenAt) ?? stamp(detail.createdAt);
+        if (takenAt === null) incomplete(entry, 'No se puede confirmar la fecha de un combate reciente.');
+        if (takenAt <= cutoff) continue;
+        let originCoordinate, targetCoordinate;
+        try {
+          originCoordinate = coordinate({ q: detail.route?.from?.q, r: detail.route?.from?.r });
+          targetCoordinate = coordinate({ q: detail.route?.to?.q, r: detail.route?.to?.r });
+        } catch (_) { incomplete(entry, 'Faltan coordenadas exactas en un combate reciente. No se reactivará una derrota anterior.'); }
+        if (sameCoordinate(originCoordinate, targetCoordinate)) {
+          incomplete(entry, 'Un combate reciente identifica el mismo punto como origen y destino.');
+        }
+        const value = { scope: batch.scope, item, detail };
+        const route = routeKey({ scope: batch.scope, originCoordinate, targetCoordinate });
+        const previous = latest.get(route);
+        // Select using identity and outcome time before validating the fleet.
+        // A newer malformed result must never revive an older defeat.
+        if (!previous || takenAt > previous.takenAt) latest.set(route, {
+          value, takenAt, originCoordinate, targetCoordinate, ambiguous: false });
+        else if (takenAt === previous.takenAt && item.id.toLowerCase() !== previous.value.item.id.toLowerCase()) previous.ambiguous = true;
+      }
+      let accepted = 0;
+      for (const [route, entry] of [...latest].sort((a, b) => b[1].takenAt - a[1].takenAt)) {
+        ensureReady();
+        if (!config.enabled) break;
+        const value = entry.value;
+        const known = config.processed.some(item => item.scope === batch.scope && item.id === value.item.id.toLowerCase());
+        const outcome = config.outcomes.find(item => routeKey(item) === route);
+        if (!entry.ambiguous && (known || (outcome && outcome.takenAt >= entry.takenAt))) continue;
+        if (entry.ambiguous && outcome && outcome.takenAt > entry.takenAt) continue;
+        let reason = '';
+        const parsed = parseReport(value, message => { reason = message; });
+        if (entry.ambiguous || !parsed) {
+          const message = entry.ambiguous ? 'Hay dos combates de esta ruta con la misma fecha. Revisa sus resultados antes de reintentar.'
+            : 'El último combate no se pudo usar para reintentar. ' + reason;
+          const campaign = config.campaigns.find(item => routeKey(item) === route && !TERMINAL.includes(item.status));
+          // Keep the outcome boundary even when no fleet can be authorized.
+          // The normal watcher may still have older reports pending after this
+          // batch; neither they nor a reload may turn them into a stale attack.
+          const boundary = { scope: batch.scope, id: value.item.id.toLowerCase(), takenAt: entry.takenAt,
+            verdict: value.item.verdict, originCoordinate: entry.originCoordinate, targetCoordinate: entry.targetCoordinate };
+          let next = known ? copy(config) : remember(copy(config), boundary);
+          if (campaign) next.campaigns = next.campaigns.map(item => item.id === campaign.id
+            ? { ...uncertain(item, message), updatedAt: Math.max(now(), item.updatedAt) } : item);
+          commit(next);
+          if (campaign) try { controlOwnJob(campaign, 'pause'); } catch (_) { /* The persisted review state blocks dispatch. */ }
+          reportDecision(value, message);
+          continue;
+        }
+        if (parsed.verdict === 'Defeat' && !config.campaigns.some(item => routeKey(item) === route && !TERMINAL.includes(item.status))
+            && config.campaigns.some(item => routeKey(item) === route && TERMINAL.includes(item.status))) {
+          // Backfilling history cannot reopen a campaign the user already
+          // cancelled, completed or stopped at its configured limit.
+          commit(remember(copy(config), parsed));
+          continue;
+        }
+        if (observeReport(value)) accepted += 1;
+      }
+      return accepted;
     }
     function remember(value, report) {
       const route = routeKey(report);
@@ -4693,8 +4801,15 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       if (destroyed) return false;
       if (!refreshConfig()) throw new Error('No se pudieron leer los reintentos guardados. El informe sigue pendiente.');
       if (!config.enabled) return false;
-      const report = parseReport(value);
-      if (!report || report.takenAt <= Math.max(config.enabledAt, config.floorAt) ||
+      let reason = '';
+      const report = parseReport(value, message => { reason = message; });
+      if (!report) {
+        if (value?.item?.verdict === 'Defeat' && (value.detail?.route?.from?.ownerKind === 'owned' || /^You attacked\b/i.test(value.item.title || ''))) {
+          reportDecision(value, 'No se preparó un reintento para la última derrota. ' + reason);
+        }
+        return false;
+      }
+      if (report.takenAt <= Math.max(config.enabledAt, config.floorAt) ||
           config.processed.some(item => item.scope === report.scope && item.id === report.id)) return false;
       const route = routeKey(report);
       const outcome = config.outcomes.find(item => routeKey(item) === route);
@@ -4760,6 +4875,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         }
       }
       commit(next);
+      lastReportDecision = null;
+      render();
       if (previous && campaign && ['completed', 'paused', 'uncertain'].includes(campaign.status)) {
         try { controlOwnJob(previous, campaign.status === 'completed' ? 'cancel' : 'pause'); }
         catch (_) { notice = 'No se pudo detener la misión pendiente. Comprueba la cola de misiones.'; render(); }
@@ -4969,7 +5086,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         ? 'Escribe un número de 0 a 100. Sigue vigente: ' + (value.maxRetries === 0 ? 'sin límite' : value.maxRetries) + '.'
         : value.maxRetries === 0 ? 'Sin límite: seguirá sumando 1 Marauder tras cada derrota hasta ganar o pausar la campaña.'
           : 'Como máximo ' + value.maxRetries + ' reintentos por campaña. 0 significa sin límite.';
-      ui.status.textContent = notice || (!value.enabled ? 'Desactivado. Al activarlo solo se procesarán informes nuevos.' : 'Activo para nuevos ataques fallidos.');
+      ui.status.textContent = notice || (!value.enabled ? 'Desactivado. Al activarlo solo se procesarán informes nuevos.'
+        : lastReportDecision?.message || 'Activo para nuevos ataques fallidos.');
       for (const input of [ui.enable, ui.produce, ui.limit]) input.disabled = readError;
       const key = JSON.stringify([value.campaigns, value.enabled, readError]);
       if (key === cardsKey) return;
@@ -5033,13 +5151,13 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     }
     function destroy() { destroyed = true; epoch += 1; mounted?.replaceChildren(); mounted = null; ui = null; }
     refreshConfig();
-    return { observeReport, tick, canRunJob, setConfig, pause, resume, cancel, remove, mount, exportConfig, validateConfig,
+    return { observeReport, recoverReports, tick, canRunJob, setConfig, pause, resume, cancel, remove, mount, exportConfig, validateConfig,
       importConfig, backupCheckpoint, restoreCheckpoint, refreshConfig, destroy,
       isEnabled: () => !destroyed && refreshConfig() && config.enabled,
       getEnabledAt: () => !destroyed && refreshConfig() ? config.enabledAt : 0,
       isBusy: () => running,
       getDiagnostics: () => ({ enabled: config?.enabled ?? false, enabledAt: config?.enabledAt ?? 0,
-        running, readError, storageError, notice, count: config?.campaigns.length ?? null,
+        running, readError, storageError, notice, lastReportDecision: lastReportDecision ? copy(lastReportDecision) : null, count: config?.campaigns.length ?? null,
         campaigns: config ? copy(config.campaigns) : [] }) };
   }
   // END ATTACK RETRY CONTROLLER
@@ -5091,6 +5209,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   function canOperateMission() {
     const context = missionContext();
     return Boolean(leader && settings.enabled && !importingBackup && !pending && !document.hidden
+      && !reports.isRecovering()
       && context.scope && context.originId && context.selectionCount === 1
       && !document.querySelector(`${PANEL} .b-loading, ${FLEET_PANEL} .b-loading`)
       && (isVisible(document.querySelector(PANEL)) || isVisible(document.querySelector(FLEET_PANEL))));
@@ -6236,12 +6355,14 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
    * Verified in galaxy-CRpoK2yj.js and base-DKX6or_P.js supplied with this task.
    * No UI clicks, POST /read, action tokens, or mutation endpoints are used.
    *
-   * createReportsWatcher({ send, fetch?, gmGetValue?, gmSetValue?, now?,
-   *   getPathname?, getHidden?, AbortController?, setTimeout?, clearTimeout? })
+   * createReportsWatcher({ send, onReport?, onRecoverReports?, fetch?, gmGetValue?, gmSetValue?, now?,
+   *   getPathname?, getHidden?, getAccount?, getBaselineSince?, AbortController?, setTimeout?, clearTimeout? })
    * .tick({ active, enabled = true, unread }) is synchronous and never awaits I/O.
    * active must mean: this tab holds the root Web Lock, visible HUD, visible tab.
-   * enabled must reflect game.reports plus a notification channel, even while
-   * inactive. Explicitly disabling it starts a new silent baseline when enabled.
+   * enabled must reflect report notifications or an enabled automation consumer,
+   * even while inactive. Explicitly disabling it starts a new silent baseline.
+   * Recovery reads at most 20 recent combat details across five native pages,
+   * without notifying them again. Its callback must persist its decision synchronously.
    * .getDiagnostics() exposes status only; .destroy() cancels timers and GETs.
    * The old unread-count notification should be used only as an API fallback.
    * Runtime checkpoints are not settings and should not be imported/exported.
@@ -6258,6 +6379,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       : (typeof AbortController === 'function' ? AbortController : null);
     const send = typeof deps.send === 'function' ? deps.send : null;
     const onReport = typeof deps.onReport === 'function' ? deps.onReport : null;
+    const onRecoverReports = typeof deps.onRecoverReports === 'function' ? deps.onRecoverReports : null;
     const now = deps.now || (() => Date.now());
     const later = deps.setTimeout || ((fn, ms) => setTimeout(fn, ms));
     const cancelTimer = deps.clearTimeout || ((id) => clearTimeout(id));
@@ -6275,6 +6397,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const DETAILS_PER_CYCLE = 20;
     const MAX_PENDING = 100;
     const MAX_SEEN = 512;
+    const RECOVERY_VERSION = 1;
+    const RECOVERY_VERDICTS = new Set(['defeat', 'victory', 'draw', 'captured']);
     const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const shipNames = { probe: 'Probe', marauder: 'Marauder', sentinel: 'Sentinel', vanguard: 'Vanguard' };
     const buildingNames = {
@@ -6302,11 +6426,12 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     let storageError = false;
     let lastListAt = null;
     let phase = 'idle';
-    const counters = { polls: 0, pages: 0, details: 0, emitted: 0, fallbacks: 0, invalidItems: 0, errors: 0 };
+    let recoveringSince = null;
+    const counters = { polls: 0, pages: 0, details: 0, recovered: 0, emitted: 0, fallbacks: 0, invalidItems: 0, errors: 0 };
 
     function blankCheckpoint() {
       return { version: 1, initialized: false, suspended: false, watermark: null,
-        seen: [], pending: [], scan: null };
+        seen: [], pending: [], scan: null, recovery: null };
     }
 
     function object(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
@@ -6334,7 +6459,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       } catch { return ''; }
     }
     function canRead() {
-      return !!slug && typeof fetchRead === 'function' && typeof Controller === 'function' && !!(send || onReport);
+      return !!slug && typeof fetchRead === 'function' && typeof Controller === 'function'
+        && !!(send || onReport || onRecoverReports);
     }
     function accountId() {
       try { const value = getAccount(); return typeof value === 'string' && UUID.test(value) ? value : ''; }
@@ -6343,9 +6469,27 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     function checkpointKey() {
       return PREFIX + slug + (account ? `:${account}` : '');
     }
+    function recoveryBaseline() {
+      try {
+        const value = getBaselineSince();
+        return finite(value) && value > 0 && stamp(value) === value ? value : null;
+      } catch { return null; }
+    }
+    function recoveryPending() {
+      const since = recoveryBaseline();
+      return !!onRecoverReports && since !== null
+        && !(checkpoint.recovery?.version === RECOVERY_VERSION && checkpoint.recovery.since === since);
+    }
+    function isRecovering() {
+      // Keep the gate through the entire live batch too. A defeat callback may
+      // precede a newer victory in pending, or on the next backlog page.
+      return !destroyed && enabled && active && canRead() && recoveryBaseline() !== null
+        && !!(recoveryPending() || request || running || checkpoint.pending.length || checkpoint.scan);
+    }
     function current(token) {
       try { return !destroyed && active && enabled && token === epoch && pathSlug() === slug
-        && accountId() === account && !getHidden(); }
+        && accountId() === account && !getHidden()
+        && (recoveringSince === null || recoveryBaseline() === recoveringSince); }
       catch { return false; }
     }
     function fault(kind, status = 0, waitMs = 0) {
@@ -6368,6 +6512,14 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       out.initialized = saved.initialized === true;
       out.suspended = saved.suspended === true;
       out.watermark = stamp(saved.watermark);
+      if (object(saved.recovery) && saved.recovery.version === RECOVERY_VERSION
+          && finite(saved.recovery.since) && saved.recovery.since > 0
+          && stamp(saved.recovery.since) === saved.recovery.since) {
+        const floor = saved.recovery.floor === undefined ? saved.recovery.since : saved.recovery.floor;
+        if (finite(floor) && floor >= saved.recovery.since && stamp(floor) === floor) {
+          out.recovery = { version: RECOVERY_VERSION, since: saved.recovery.since, floor };
+        }
+      }
       if (Array.isArray(saved.seen)) {
         const unique = new Map();
         for (const pair of saved.seen.slice(-MAX_SEEN)) {
@@ -6404,14 +6556,16 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     }
 
     function saveCheckpoint() {
-      if (!slug || typeof gmSet !== 'function') return;
+      if (!slug || typeof gmSet !== 'function') return false;
       try {
         gmSet(checkpointKey(), { ...checkpoint,
           seen: checkpoint.seen.map((pair) => [...pair]),
           pending: checkpoint.pending.map((item) => ({ ...item })),
-          scan: checkpoint.scan ? { ...checkpoint.scan, anchors: [...checkpoint.scan.anchors] } : null });
+          scan: checkpoint.scan ? { ...checkpoint.scan, anchors: [...checkpoint.scan.anchors] } : null,
+          recovery: checkpoint.recovery ? { ...checkpoint.recovery } : null });
         storageError = false;
-      } catch { storageError = true; }
+        return true;
+      } catch { storageError = true; return false; }
     }
 
     function remember(item) {
@@ -6501,7 +6655,9 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       if (!checkpoint.initialized || checkpoint.suspended) {
         const page = await readPage(null, token);
         assertCurrent(token);
+        const recovery = checkpoint.recovery;
         checkpoint = blankCheckpoint();
+        checkpoint.recovery = recovery;
         checkpoint.initialized = true;
         let since = null;
         try { since = stamp(getBaselineSince()); } catch { /* The normal silent baseline still applies. */ }
@@ -6566,6 +6722,87 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         if (page.nextCursor === before || visited.has(page.nextCursor)) throw fault('schema');
         scan.before = page.nextCursor;
         saveCheckpoint();
+      }
+    }
+
+    async function recoverReports(token) {
+      if (!recoveryPending()) return;
+      const since = recoveryBaseline();
+      if (since === null) return;
+      recoveringSince = since;
+      try {
+        assertCurrent(token);
+        phase = 'recovery-list';
+        const selected = new Map();
+        const visited = new Set();
+        let before = null;
+        let truncated = false;
+        let newestRead = null;
+        for (let pageNumber = 0; pageNumber < PAGES_PER_CYCLE; pageNumber++) {
+          if (visited.has(before)) throw fault('schema');
+          visited.add(before);
+          const invalidBefore = counters.invalidItems;
+          const page = await readPage(before, token);
+          assertCurrent(token);
+          // A skipped malformed row could be a newer victory for a route. Do
+          // not reconstruct an attack from an incomplete recovery timeline.
+          if (counters.invalidItems !== invalidBefore) throw fault('schema');
+          for (const item of page.items) newestRead = maxStamp(newestRead, item.takenAt);
+          let boundary = false;
+          for (const [index, item] of page.items.entries()) {
+            if (item.takenAt !== null && item.takenAt <= since) { boundary = true; break; }
+            if (!RECOVERY_VERDICTS.has(item.verdict.toLowerCase())) continue;
+            if (item.takenAt === null) throw fault('schema');
+            const duplicate = selected.get(item.id);
+            if (duplicate) {
+              if (duplicate.takenAt !== item.takenAt || duplicate.verdict !== item.verdict) throw fault('schema');
+              continue;
+            }
+            selected.set(item.id, item);
+            if (selected.size >= DETAILS_PER_CYCLE) {
+              truncated = index < page.items.length - 1 || page.nextCursor !== null;
+              break;
+            }
+          }
+          if (boundary || selected.size >= DETAILS_PER_CYCLE || page.nextCursor === null) break;
+          if (page.nextCursor === before || visited.has(page.nextCursor)) throw fault('schema');
+          if (pageNumber === PAGES_PER_CYCLE - 1) { truncated = true; break; }
+          before = page.nextCursor;
+        }
+        // Reports outside this bounded recovery window can still be pending
+        // from an earlier scan. Persist a floor so their normal notifications
+        // cannot later activate an older defeat without its newer outcome.
+        if (truncated && !selected.size && newestRead === null) throw fault('schema');
+        const floor = truncated ? Math.max(since, selected.size
+          ? Math.min(...Array.from(selected.values(), item => item.takenAt)) : newestRead) : since;
+        const reports = [];
+        phase = 'recovery-detail';
+        for (const item of selected.values()) {
+          const detail = await readJSON(`${API}${slug}/reports/${item.id}`, token);
+          assertCurrent(token);
+          if (!object(detail) || typeof detail.id !== 'string' || detail.id.toLowerCase() !== item.id
+              || !(object(detail.sections) || object(detail.route) || object(detail.variant))) throw fault('schema');
+          counters.details++;
+          reports.push({ item: { ...item }, detail });
+        }
+        assertCurrent(token);
+        try {
+          const accepted = onRecoverReports({ scope: `${slug}/${account}`, reports });
+          if (accepted && typeof accepted.then === 'function') {
+            accepted.catch?.(() => {});
+            throw new Error('La recuperación debe guardarse antes de continuar.');
+          }
+        } catch { throw fault('recovery-callback'); }
+        assertCurrent(token);
+        const previous = checkpoint.recovery;
+        checkpoint.recovery = { version: RECOVERY_VERSION, since, floor };
+        if (!saveCheckpoint()) {
+          checkpoint.recovery = previous;
+          throw fault('recovery-storage');
+        }
+        counters.recovered += reports.length;
+      } finally {
+        recoveringSince = null;
       }
     }
 
@@ -6785,13 +7022,18 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       if (error?.kind === 'timeout') return 'tiempo de espera agotado';
       if (error?.kind === 'schema') return 'formato de respuesta no compatible';
       if (error?.kind === 'callback') return 'el canal no pudo aceptar el informe';
+      if (error?.kind === 'recovery-callback') return 'no se pudo completar la recuperación de ataques';
+      if (error?.kind === 'recovery-storage') return 'no se pudo guardar el progreso de recuperación';
       return 'conexión no disponible';
     }
 
     function dispatch(item, detail, token, unavailable = '') {
       assertCurrent(token);
       try {
-        if (onReport) {
+        const since = recoveryBaseline();
+        const outsideRecoveryWindow = since !== null && checkpoint.recovery?.since === since
+          && (item.takenAt === null || item.takenAt <= checkpoint.recovery.floor);
+        if (onReport && !outsideRecoveryWindow) {
           const observed = onReport({ scope: `${slug}/${account}`, item: { ...item }, detail });
           if (observed && typeof observed.then === 'function') {
             observed.catch?.(() => {});
@@ -6860,6 +7102,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       try {
         await scanList(token);
         assertCurrent(token);
+        await recoverReports(token);
+        assertCurrent(token);
         await drainDetails(token);
         assertCurrent(token);
         failures = 0; lastError = ''; retryAt = 0; phase = 'ready';
@@ -6893,6 +7137,11 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       let nextActive = nextEnabled && input.active === true;
       try { if (getHidden()) nextActive = false; } catch { nextActive = false; }
       const changedSlug = nextSlug !== slug || nextAccount !== account;
+      if (recoveringSince !== null && recoveryBaseline() !== recoveringSince) {
+        active = false;
+        stop();
+        nextPollAt = now(); retryAt = 0; failures = 0; lastError = '';
+      }
       if (changedSlug) {
         active = false;
         stop();
@@ -6941,18 +7190,19 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     function getDiagnostics() {
       let status;
       if (destroyed) status = 'Informes: detenido.';
-      else if (!enabled) status = 'Informes: notificaciones desactivadas.';
+      else if (!enabled) status = 'Informes: lectura automática desactivada.';
       else if (!canRead()) status = 'Informes: lectura automática no disponible en esta página.';
       else if (!active) status = 'Informes: esperando una pestaña visible con el control.';
       else if (phase === 'error') status = `Informes: ${lastError}; se reintentará automáticamente.`;
       else if (!checkpoint.initialized) status = 'Informes: preparando la referencia inicial, sin enviar historial.';
+      else if (isRecovering()) status = 'Informes: recuperando los combates recientes antes de reanudar los ataques.';
       else if (request) status = `Informes: leyendo ${phase === 'detail' ? 'el contenido' : 'la lista'}.`;
       else if (checkpoint.pending.length || checkpoint.scan) status = `Informes: ${checkpoint.pending.length} pendientes; se continuará automáticamente.`;
       else status = 'Informes: al día; comprobación cada 25 segundos.';
       if (storageError) status += ' No se pudo guardar la referencia entre pestañas.';
       return { status, phase, active, enabled, apiAvailable: canRead(),
         baselineReady: checkpoint.initialized, inFlight: !!request, pending: checkpoint.pending.length,
-        scanningBacklog: !!checkpoint.scan, slug, lastListAt, nextPollAt: Math.max(nextPollAt, retryAt),
+        scanningBacklog: !!checkpoint.scan, recovering: isRecovering(), slug, lastListAt, nextPollAt: Math.max(nextPollAt, retryAt),
         lastError, failures, storageAvailable: typeof gmGet === 'function' && typeof gmSet === 'function',
         storageError, counters: { ...counters } };
     }
@@ -6962,7 +7212,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       destroyed = true; active = false; stop(); phase = 'destroyed';
     }
 
-    return { tick, getDiagnostics, destroy };
+    return { tick, getDiagnostics, isRecovering, destroy };
   }
   // END REPORTS
 

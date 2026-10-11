@@ -1,6 +1,6 @@
 # Old Light Auto Upgrade
 
-Userscript para [Old Light](https://oldlight.io/play) que da prioridad a la flota, reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.7.0**.
+Userscript para [Old Light](https://oldlight.io/play) que da prioridad a la flota, reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.7.1**.
 
 ## Instalación
 
@@ -118,6 +118,20 @@ El seguimiento usa el identificador único de cada informe y conserva su estado 
 
 Funciona también con Telegram y las notificaciones del navegador desactivados. Si quieres avisos, activa **Avisos → Tipos de notificación → Reintentos de ataque** y el canal correspondiente. Los cambios de estos ajustes no generan notificaciones. Los ajustes, borradores y campañas se guardan automáticamente y se incluyen en las copias locales y de Drive; **importar una copia desactiva los reintentos y pausa sus campañas**.
 
+### Recuperación de reintentos en 1.7.1
+
+Corrige informes que podían aparecer correctamente en Telegram y no llegar al reintento: la fecha de la lista y la del detalle no tienen que coincidir, y una cantidad numérica exacta puede omitir el indicador `kind`. Se siguen exigiendo el mismo identificador de informe, coordenadas exactas y una flota ofensiva conocida.
+
+Si la función **ya estaba activada antes del combate**, la actualización vuelve a comprobar hasta **20 combates recientes**, recorriendo como máximo **5 páginas** de la lista. Incluye informes ya notificados, conserva la fecha de activación y guarda el progreso por cuenta y galaxia. **No vuelve a enviar sus reportes a Telegram o al navegador**; sí puede avisar de un reintento que acaba de preparar.
+
+Para recuperar solo considera el resultado más reciente de cada ruta. Una victoria, captura, empate o resultado que requiera revisión impide revivir una derrota anterior. El historial que quede fuera de esa ventana no inicia ataques durante la recuperación. Las campañas canceladas, terminadas o detenidas por su límite permanecen detenidas. Una campaña que necesita revisión conserva ese estado tras recargar.
+
+Mientras comprueba un lote de resultados, espera antes de gastar recursos o enviar una misión pendiente. Un fallo de lectura o guardado deja la recuperación pendiente, muestra la causa y reintenta después. Si falta información para decidir un ataque, **Flota → Reintentar ataques fallidos** muestra una explicación.
+
+Ejemplo: tras perder **8 Marauder**, el nuevo objetivo es **9**. Con **8 en base**, encarga **1**; con **0 en base, 0 en misión y 0 en construcción**, necesita producir **9**. El mínimo permanente de 8 no limita la cantidad del reintento, y el envío espera a tener los 9 en base. Se conserva el orden de prioridades de naves configurado.
+
+Si los reintentos estaban desactivados cuando llegó el informe, activarlos ahora comienza con los combates nuevos. Desactivarlos y activarlos otra vez cambia la fecha de inicio; no es necesario hacerlo para aplicar esta corrección.
+
 ## Notificaciones
 
 La pestaña **Avisos** reúne los canales y los filtros de notificaciones. Los dos canales son independientes y están **desactivados por defecto**:
@@ -168,7 +182,7 @@ Deja **Structures o Shipyard abierto y la pestaña visible**. Los dos paneles de
 
 Cuando la pestaña está oculta, el cliente del juego aplaza el refresco de sus contadores y **el script no inicia nuevas acciones**. Los avisos dependen de los cambios que lleguen a la interfaz mientras se observa. No ofrece una cobertura completa de eventos del servidor ni actividad continua en segundo plano; al cerrar, suspender o descartar la pestaña, deja de actuar.
 
-La versión **1.7.0** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las construcciones ya encoladas mantienen su orden en el juego.
+La versión **1.7.1** conserva las preferencias anteriores, incluidos pausa, edificios seleccionados y configuración de los canales con sus credenciales. Las construcciones ya encoladas mantienen su orden en el juego.
 
 ## Guardado local, exportación e importación
 
@@ -244,7 +258,7 @@ Las pruebas usan los planificadores incluidos en el propio userscript y módulos
 node --test tests/*.test.cjs
 ```
 
-Cubren la reserva para la flota, orden de naves, lotes parciales, recursos y capacidad, colas separadas, prioridades de edificios, condiciones de Reactor y Depot, producción negativa y datos incompletos. También cubren detección de derrotas, escalado de Marauder, límites, pausa, persistencia, deduplicación, autorización de la misión antes de enviar, identidad del origen y paginación de informes con separación por cuenta. No conectan al juego ni envían pedidos o notificaciones.
+Cubren la reserva para la flota, orden de naves, lotes parciales, recursos y capacidad, colas separadas, prioridades de edificios, condiciones de Reactor y Depot, producción negativa y datos incompletos. También cubren detección de derrotas, escalado de Marauder, límites, pausa, persistencia, deduplicación, autorización de la misión antes de enviar, identidad del origen y paginación de informes con separación por cuenta. Incluyen formatos nativos con fechas independientes y cantidades sin `kind`, recuperación de informes ya notificados, elección del último resultado por ruta, bloqueo de historial anterior y conservación de campañas en revisión. No conectan al juego ni envían pedidos o notificaciones.
 
 ## Incidencias
 
