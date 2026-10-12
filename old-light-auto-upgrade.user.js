@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.10.1
+// @version      1.10.2
 // @description  Flota prioritaria con reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -26,7 +26,7 @@
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.10.1';
+  const SCRIPT_VERSION = '1.10.2';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -3256,6 +3256,9 @@
     const MASK = 'data-oldlight-mission-preparing';
     const GUARD_MS = 130;
     const SETTLE_MS = 8000;
+    const QUIET_MS = 1500;
+    const WAIT_CODE = 'OLDLIGHT_MISSION_WAIT';
+    const waitError = message => Object.assign(new Error(message), { code: WAIT_CODE });
     const captures = new WeakMap();
     const attached = new Map();
     const attempted = new Set();
@@ -3266,6 +3269,7 @@
     let active = null;
     let capturing = false;
     let destroyed = false;
+    let quietUntil = 0;
 
     const clean = value => String(value ?? '').normalize('NFKC').replace(/\s+/g, ' ').trim();
     const keyOf = button => clean(button?.getAttribute('aria-label') || button?.textContent);
@@ -3555,7 +3559,8 @@
 
     function delay(ms, operation) {
       return new Promise((resolve, reject) => {
-        const abort = () => { clearTimeout(timer); reject(new Error(operation.reason || 'Preparación cancelada.')); };
+        const abort = () => { clearTimeout(timer); reject(operation.controller.signal.reason
+          || waitError(operation.reason || 'Esperando para continuar la preparación.')); };
         const timer = setTimeout(() => { operation.controller.signal.removeEventListener('abort', abort); resolve(); }, ms);
         if (operation.controller.signal.aborted) abort();
         else operation.controller.signal.addEventListener('abort', abort, { once: true });
@@ -3567,7 +3572,8 @@
     }
 
     function assertOperation(operation) {
-      if (!validOperation(operation)) throw new Error(operation.reason || 'El origen, la selección o el estado del helper ha cambiado.');
+      if (!validOperation(operation)) throw operation.controller.signal.reason
+        || waitError(operation.reason || 'Esperando a que el origen, la selección y el helper estén disponibles.');
     }
 
     function readError(dialog) {
@@ -3678,7 +3684,8 @@
       const claim = attemptKey(job);
       if (attempted.has(claim)) return result('uncertain', 'Esta misión ya pasó al juego. Comprueba sus movimientos antes de volver a enviarla.');
       if (active || capturing) return result('waiting', 'Hay otra misión en preparación.');
-    if (!readyToAct(job)) return result('waiting', 'Esperando a que el helper pueda actuar.');
+      if (!readyToAct(job)) return result('waiting', 'Esperando a que el helper pueda actuar.');
+      if (quietUntil > 0 && performance.now() < quietUntil) return result('waiting', 'Esperando a que termines de interactuar con el juego.');
       if (!sameContext(spec)) return result('waiting', `Selecciona ${spec.originName || 'el sistema de origen'} para continuar esta misión.`);
       if (!enough(spec.quantities)) return result('waiting', 'Esperando a que todas las naves del preset estén en base.');
       const customMode = spec.target.mode === 'custom';
@@ -3714,7 +3721,8 @@
         assertOperation(operation);
         if (unavailable(action) || !enough(spec.quantities)) return outcome = result('waiting', 'El juego todavía no permite preparar la flota completa.');
         const dialog = nativeDialog();
-        if (!dialog || document.querySelector('dialog[open]')) throw new Error('Hay otro diálogo del juego abierto. Se ha pausado la preparación.');
+        if (!dialog) throw new Error('El despacho del juego no está disponible.');
+        if (document.querySelector('dialog[open]')) throw waitError('Cierra los diálogos del juego para continuar la misión.');
         operation.dialog = dialog; operation.previousMask = dialog.getAttribute(MASK);
         const oldRoute = route(dialog);
         dialog.setAttribute(MASK, 'dispatch'); dialog.setAttribute('open', '');
@@ -3788,7 +3796,17 @@
         dialog.addEventListener('close', onClose, { once: true, signal: operation.controller.signal });
         operation.permitConfirm = true;
         try { confirm.click(); } finally { operation.permitConfirm = false; }
-        if (!operation.confirmed) throw new Error('El juego no aceptó el clic de envío.');
+        if (!operation.confirmed) {
+          // A context change in another capture listener can block this click
+          // before it reaches the game. Retry only with the same verified form;
+          // route, action and composition changes still require review.
+          if (!validOperation(operation) && routeKey(dialog) === openedRoute && singleNativeRoute(dialog)
+              && inputsMatch(dialog, spec.quantities) && (!amountsMode || isAttackAction(confirm))
+              && (!customMode || confirmationMissionAction(confirm) === operation.missionAction)) {
+            throw operation.controller.signal.reason || waitError('El origen o el helper cambió antes del envío. Esperando para continuar.');
+          }
+          throw new Error('El juego no aceptó el clic de envío.');
+        }
         const started = performance.now();
         while (performance.now() - started < SETTLE_MS) {
           if (operation.controller.signal.aborted) throw new Error(operation.reason || 'Se ha interrumpido la espera de confirmación.');
@@ -3810,7 +3828,9 @@
           expose(operation);
           return outcome = result('uncertain', `${error.message || 'Envío sin confirmar.'} Comprueba sus movimientos antes de reintentar.`);
         }
-        return outcome = result('paused', error.message || 'No se pudo preparar la misión.');
+        // Only known, pre-send interruptions may retry automatically. Unknown
+        // errors and identity/action mismatches remain paused for review.
+        return outcome = result(error?.code === WAIT_CODE ? 'waiting' : 'paused', error?.message || 'No se pudo preparar la misión.');
       } finally {
         if (operation.guard) window.removeEventListener('click', operation.guard, true);
         if (operation.dialog && !operation.keepDialog && operation.dialog.open) resetPreparedDialog(operation.dialog);
@@ -3824,7 +3844,7 @@
     function cancel(jobId = null, message = 'Preparación cancelada.') {
       if (!active || (jobId !== null && active.jobId !== jobId)) return false;
       active.reason = message;
-      active.controller.abort();
+      active.controller.abort(waitError(message));
       return true;
     }
 
@@ -3843,7 +3863,9 @@
 
     for (const eventName of ['pointerdown', 'keydown', 'wheel']) {
       window.addEventListener(eventName, event => {
-        if (active && event.isTrusted) cancel(active.jobId, 'Has interactuado con el juego durante la preparación.');
+        if (!event.isTrusted) return;
+        quietUntil = performance.now() + QUIET_MS;
+        if (active) cancel(active.jobId, 'Esperando a que termines de interactuar con el juego.');
       }, { capture: true, signal: lifetime.signal });
     }
     return { capture, captureInspect, captureRadial, attach, dispatch, connected, detach, cancel, destroy,
@@ -3855,6 +3877,8 @@
 // Recover a saved destination through the native map and Inspector controls.
 // This resolver never builds ships, changes the active system, or submits fleets.
 function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
+  const WAIT_CODE = 'OLDLIGHT_MISSION_WAIT';
+  const waitError = message => Object.assign(new Error(message), { code: WAIT_CODE });
   const MASK = 'data-oldlight-target-preparing';
   const POINTER_ID = 2147483647;
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -3903,17 +3927,17 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   }
   function assertOperation(operation) {
     if (destroyed || current !== operation || operation.controller.signal.aborted) {
-      throw new Error(operation.reason || 'Se ha cancelado la recuperación del destino.');
+      throw operation.controller.signal.reason || waitError(operation.reason || 'Esperando para recuperar el destino.');
     }
     let permitted = false;
     try { permitted = canAct() !== false; } catch (_) {}
-    if (!permitted) throw new Error('El helper está pausado. No se ha recuperado el destino.');
+    if (!permitted) throw waitError('Esperando a que el helper pueda recuperar el destino.');
     if (!contextMatches(operation.spec)) {
-      throw new Error('El origen, la cuenta o la selección han cambiado. Selecciona un único sistema de origen para reanudar.');
+      throw waitError('El origen, la cuenta o la selección han cambiado. Selecciona el sistema de origen para continuar.');
     }
-    if (performance.now() > operation.deadline) throw new Error('El mapa no ha permitido recuperar el destino a tiempo. Vuelve a intentarlo.');
+    if (performance.now() > operation.deadline) throw waitError('Esperando a que el mapa termine de cargar el destino.');
     const foreign = [...document.querySelectorAll('dialog[open]')].find(dialog => !operation.dialogs.has(dialog));
-    if (foreign) throw new Error('El juego ha abierto otro diálogo. Ciérralo antes de recuperar esta misión.');
+    if (foreign) throw waitError('El juego ha abierto otro diálogo. Ciérralo para continuar esta misión.');
   }
   function mask(operation, node) {
     if (!operation.masks.has(node)) operation.masks.set(node, {
@@ -3931,7 +3955,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   }
   function prepareDialog(operation, dialog) {
     assertOperation(operation);
-    if (!(dialog instanceof HTMLDialogElement) || dialog.open) throw new Error('Hay un diálogo del juego abierto. Se ha pausado la recuperación.');
+    if (!(dialog instanceof HTMLDialogElement)) throw new Error('El diálogo del juego no está disponible.');
+    if (dialog.open) throw waitError('Cierra los diálogos del juego para continuar la misión.');
     operation.dialogs.set(dialog, { content: dialog.dataset.contentType,
       body: dialog.querySelector('.info-modal-body')?.firstChild, used: false });
     mask(operation, dialog);
@@ -3981,10 +4006,11 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     operation.finished = Promise.all(operation.closeWaits).then(() => undefined);
     return operation.finished;
   }
-  function abort(operation, message) {
+  function abort(operation, reason) {
     if (operation.controller.signal.aborted) return;
-    operation.reason = message;
-    operation.controller.abort();
+    const error = reason instanceof Error ? reason : waitError(reason);
+    operation.reason = error.message;
+    operation.controller.abort(error);
     void finish(operation);
   }
   function waitFor(operation, read, message, timeout = 5000) {
@@ -3996,13 +4022,13 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         operation.controller.signal.removeEventListener('abort', aborted);
         error ? reject(error) : resolve(value);
       };
-      const aborted = () => done(new Error(operation.reason || 'Se ha cancelado la recuperación del destino.'));
+      const aborted = () => done(operation.controller.signal.reason || waitError(operation.reason || 'Esperando para recuperar el destino.'));
       const check = () => {
         try {
           assertOperation(operation);
           const value = read();
           if (value) { done(null, value); return; }
-          if (performance.now() >= until) { done(new Error(message)); return; }
+          if (performance.now() >= until) { done(waitError(message)); return; }
           timer = setTimeout(check, 25);
         } catch (error) { done(error); }
       };
@@ -4016,7 +4042,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   }
   function center(element) {
     const rect = element.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) throw new Error('El mapa no tiene una superficie disponible.');
+    if (rect.width <= 0 || rect.height <= 0) throw waitError('Esperando a que el mapa tenga una superficie disponible.');
     return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
   }
   function pointerClick(operation, element, point, captureCompatibility = false) {
@@ -4081,7 +4107,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   async function openInspector(operation, button) {
     assertOperation(operation);
     const candidates = [...document.querySelectorAll('dialog.info-modal')];
-    if (!candidates.length) throw new Error('El juego todavía no ha preparado el Inspector.');
+    if (!candidates.length) throw waitError('Esperando a que el juego prepare el Inspector.');
     for (const dialog of candidates) prepareDialog(operation, dialog);
     button.click();
     assertOperation(operation);
@@ -4094,18 +4120,19 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const inspector = opened[0];
     operation.dialogs.get(inspector).used = true;
     for (const dialog of candidates) if (dialog !== inspector) releaseDialog(operation, dialog);
-    await waitFor(operation, () => inspectCoordinate(inspector), 'El Inspector no ha mostrado las coordenadas del destino.', 2000);
+    await waitFor(operation, () => inspectCoordinate(inspector), 'Esperando las coordenadas del Inspector del destino.', 2000);
     return inspector;
   }
   async function resolveTarget(job, { signal } = {}) {
     if (destroyed) throw new Error('El helper se ha detenido.');
-    if (current) throw new Error('Ya se está recuperando el destino de otra misión.');
+    if (current) throw waitError('Esperando a que termine la preparación de otra misión.');
     const spec = jobSpec(job);
-    if (!spec || !contextMatches(spec)) throw new Error('Selecciona el único sistema de origen de la misión antes de recuperar su destino.');
-    if (signal?.aborted) throw new Error('La recuperación del destino se ha cancelado.');
-    if (document.querySelector('dialog[open]')) throw new Error('Cierra los diálogos del juego antes de recuperar el destino.');
+    if (!spec) throw new Error('La misión no tiene un origen y destino válidos.');
+    if (!contextMatches(spec)) throw waitError('Selecciona el único sistema de origen de la misión para continuar.');
+    if (signal?.aborted) throw signal.reason || waitError('Esperando para recuperar el destino.');
+    if (document.querySelector('dialog[open]')) throw waitError('Cierra los diálogos del juego para continuar la misión.');
     if (displayed(one('#app > .star-actions')) || displayed(one('#app > .selection-menu'))) {
-      throw new Error('Cierra el menú del mapa antes de recuperar esta misión.');
+      throw waitError('Cierra el menú del mapa para continuar esta misión.');
     }
     const operation = { spec, controller: new AbortController(), listeners: new AbortController(),
       masks: new Map(), dialogs: new Map(), closeWaits: [], previousFocus: document.activeElement,
@@ -4116,15 +4143,15 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     current = operation;
     const options = { capture: true, signal: operation.listeners.signal };
     for (const name of ['pointerdown', 'keydown', 'wheel']) window.addEventListener(name, event => {
-      if (event.isTrusted) abort(operation, 'Has interactuado con el juego. La recuperación del destino se ha pausado.');
+      if (event.isTrusted) abort(operation, 'Esperando a que termines de interactuar con el juego.');
     }, options);
     for (const name of ['resize', 'pagehide', 'blur', 'popstate', 'hashchange']) window.addEventListener(name,
       event => { if (name !== 'blur' || event.target === window) abort(operation,
-        'La vista del juego ha cambiado. Vuelve a recuperar el destino.'); }, options);
-    if (signal) signal.addEventListener('abort', () => abort(operation, 'La recuperación del destino se ha cancelado.'),
+        'La vista del juego ha cambiado. Esperando para continuar la misión.'); }, options);
+    if (signal) signal.addEventListener('abort', () => abort(operation, signal.reason || waitError('Esperando para recuperar el destino.')),
       { once: true, signal: operation.listeners.signal });
     operation.observer = new MutationObserver(() => {
-      try { assertOperation(operation); } catch (error) { abort(operation, error.message); }
+      try { assertOperation(operation); } catch (error) { abort(operation, error); }
     });
     operation.observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true,
       attributeFilter: ['open'] });
@@ -4143,7 +4170,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       const input = await waitFor(operation, () => {
         const node = viewport.querySelector('input.gmap-search-input');
         return node instanceof HTMLInputElement && !node.disabled ? node : null;
-      }, 'El mapa global no ha cargado. Vuelve a intentar la conexión del destino.', 7000);
+      }, 'Esperando a que termine de cargar el mapa global.', 7000);
       input.value = `${spec.coordinate.q}, ${spec.coordinate.r}`;
       input.dispatchEvent(new Event('input', { bubbles: true }));
       const text = `Go to ${spec.coordinate.q}, ${spec.coordinate.r}`;
@@ -4172,7 +4199,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
           const next = found.radial.style.left + '|' + found.radial.style.top;
           if (next !== anchor) { anchor = next; stableAt = performance.now(); }
           return displayed(found.radial) && performance.now() - stableAt >= 170;
-        }, 'La cámara del mapa sigue moviéndose. Vuelve a recuperar el destino.', Math.max(100, locateDeadline - performance.now()));
+        }, 'Esperando a que la cámara del mapa termine de moverse.', Math.max(100, locateDeadline - performance.now()));
         // Re-hit-test after the camera settles; the first selected star may
         // have been underneath the centre while the camera was still moving.
         const settled = freshRadial(operation, stage);
@@ -5419,6 +5446,10 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     function uncertain(campaign, message) {
       return { ...campaign, status: 'uncertain', resumeStatus: null, message };
     }
+    function jobMessage(job, fallback) {
+      try { return text(job?.message, 500, true).trim() || fallback; }
+      catch (_) { return fallback; }
+    }
     function reconcileOne(campaign, queue) {
       if (!campaign.queueJobId || TERMINAL.includes(campaign.status)) return campaign;
       // Pausing a queue job does not resolve an ambiguous attack. Preserve its
@@ -5440,7 +5471,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
           return uncertain(campaign, 'La misión pendiente cambió durante la edición. Revisa su destino y su flota antes de continuar.');
         }
         if (job.status === 'paused' && campaign.status !== 'paused') return { ...campaign, status: 'paused',
-          resumeStatus: 'queued', queueConfirmed: true, message: 'La misión pendiente está en pausa.' };
+          resumeStatus: 'queued', queueConfirmed: true, message: jobMessage(job, 'La misión pendiente está en pausa.') };
         return campaign;
       }
       if (!jobMatches(campaign, job)) return uncertain(campaign, 'La misión guardada cambió. Comprueba su destino y su flota antes de continuar.');
@@ -5457,10 +5488,14 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       }
       if (campaign.sentAt !== null) return uncertain(campaign, 'El estado del envío retrocedió. Comprueba las misiones del juego.');
       if (job.status === 'paused' && campaign.status !== 'paused') return { ...campaign, status: 'paused',
-        resumeStatus: 'queued', queueConfirmed: true, message: 'La misión pendiente está en pausa.' };
+        resumeStatus: 'queued', queueConfirmed: true, message: jobMessage(job, 'La misión pendiente está en pausa.') };
       if (!['waiting', 'paused', 'sending'].includes(job.status)) return uncertain(campaign, 'El estado de la misión no se reconoce.');
+      // Older versions hid the child's pause reason behind this generic text.
+      // Restore the explanation without resuming any previously paused intent.
+      const pausedMessage = campaign.message === 'La misión pendiente está en pausa.' && job.status === 'paused'
+        ? jobMessage(job, campaign.message) : campaign.message;
       return { ...campaign, queueConfirmed: true, message: job.status === 'sending' ? 'Confirmando el envío del reintento…'
-        : campaign.status === 'paused' ? campaign.message : 'Esperando la flota completa para atacar.' };
+        : campaign.status === 'paused' ? pausedMessage : jobMessage(job, 'Esperando la flota completa para atacar.') };
     }
     function reconcile() {
       ensureReady();
