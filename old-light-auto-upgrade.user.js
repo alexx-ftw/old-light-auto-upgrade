@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.10.2
+// @version      1.10.3
 // @description  Flota prioritaria con reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -26,7 +26,7 @@
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.10.2';
+  const SCRIPT_VERSION = '1.10.3';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -127,7 +127,11 @@
         `mission-uncertain:${job.id}`, job.originName);
       return result;
     },
-    onSettingsChange: () => { settingsChanged(); schedule(); },
+    onSettingsChange: () => {
+      settingsChanged();
+      if (!importingBackup) attackRetry?.cleanupCancelledJobs();
+      schedule();
+    },
   });
 
   attackRetry = createAttackRetryController({
@@ -138,7 +142,9 @@
     queueOnce: (spec, options) => fleetWait.queue(spec, options),
     pauseJob: id => fleetWait.pause(id),
     resumeJob: id => fleetWait.resume(id),
-    cancelJob: id => fleetWait.cancel(id),
+    cancelJob: id => { const result = fleetWait.cancel(id); missionAdapter.detach(id); return result; },
+    cancelPreparingJob: id => missionAdapter.cancel(id, 'Campaña cancelada. Cerrando la preparación de su misión.'),
+    setJobCampaignOwner: (id, campaignId, options) => fleetWait.setCampaignOwner(id, campaignId, options),
     setJobFleetQuantities: (id, quantities, options) => {
       const job = fleetWait.setFleetQuantities(id, quantities, options);
       missionAdapter.detach(id);
@@ -1697,6 +1703,7 @@
         : 'La importación falló y no pudo restaurar todos los ajustes. Automatización pausada.');
     } finally {
       importingBackup = false;
+      attackRetry.cleanupCancelledJobs();
       schedule();
     }
     settingsChanged();
@@ -4367,6 +4374,15 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       return quantities(requested);
     }
 
+    function campaignOwner(value, id) {
+      if (value === undefined) return undefined;
+      if (typeof value !== 'string' || !value.startsWith('attack:') || !UUID.test(value.slice(7)) ||
+          typeof id !== 'string' || !id.startsWith('retry:') || !UUID.test(id.slice(6))) {
+        throw new TypeError('El vínculo de la misión con su campaña no es válido.');
+      }
+      return 'attack:' + value.slice(7).toLowerCase();
+    }
+
     function validateConfig(value = {}) {
       if (!keys(value, ['schemaVersion', 'jobs']) ||
           (value.schemaVersion !== undefined && value.schemaVersion !== 1) ||
@@ -4377,7 +4393,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       const ids = new Set();
       const jobs = (value.jobs || []).map(item => {
         if (!keys(item, ['id', 'scope', 'originId', 'originName', 'target', 'quantities', 'produce',
-          'autoSend', 'status', 'createdAt', 'updatedAt', 'claimedAt', 'sentAt', 'message', 'needsReview', 'fleetEdit']) ||
+          'autoSend', 'status', 'createdAt', 'updatedAt', 'claimedAt', 'sentAt', 'message', 'needsReview', 'fleetEdit', 'campaignId']) ||
             !ID.test(item.id || '') || ids.has(item.id) || !STATES.includes(item.status) ||
             (item.needsReview !== undefined && typeof item.needsReview !== 'boolean')) {
           throw new TypeError('Un pendiente de misión no es válido.');
@@ -4407,12 +4423,13 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         if (editing && (item.status !== 'paused' || item.needsReview || item.id.startsWith('retry:'))) {
           throw new TypeError('La edición de flota necesita una misión en pausa y sin envíos pendientes de revisión.');
         }
+        const owner = campaignOwner(item.campaignId, item.id);
         ids.add(item.id);
         identities.add(identity);
         return { id: item.id, ...clean, status: item.status, createdAt: item.createdAt,
           updatedAt: item.updatedAt, claimedAt: item.claimedAt, sentAt: item.sentAt,
           message: label(item.message, 500, true), needsReview: item.needsReview === true || item.status === 'uncertain',
-          ...(editing ? { fleetEdit: editing } : {}) };
+          ...(editing ? { fleetEdit: editing } : {}), ...(owner ? { campaignId: owner } : {}) };
       });
       const normalized = { schemaVersion: 1, jobs };
       const serialized = JSON.stringify(normalized);
@@ -4537,15 +4554,19 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     function queue(value, options = {}) {
       ensureReady();
       const clean = spec(value);
-      if (!keys(options, ['id']) || (options.id !== undefined && (typeof options.id !== 'string' || !ID.test(options.id)))) {
+      if (!keys(options, ['id', 'campaignId']) || (options.id !== undefined && (typeof options.id !== 'string' || !ID.test(options.id)))) {
         throw new TypeError('Identificador de misión no válido.');
       }
+      const owner = campaignOwner(options.campaignId, options.id);
       if (options.id !== undefined) {
         const sameId = config.jobs.find(item => item.id === options.id);
         if (sameId) {
           const existingSpec = spec({ scope: sameId.scope, originId: sameId.originId, originName: sameId.originName,
             target: sameId.target, quantities: sameId.quantities, produce: sameId.produce, autoSend: sameId.autoSend });
-          if (JSON.stringify(existingSpec) !== JSON.stringify(clean)) throw new Error('Este identificador ya pertenece a otra misión.');
+          if (JSON.stringify(existingSpec) !== JSON.stringify(clean) || (sameId.campaignId && sameId.campaignId !== owner)) {
+            throw new Error('Este identificador ya pertenece a otra misión o campaña.');
+          }
+          if (owner && !sameId.campaignId) return setCampaignOwner(sameId.id, owner, { expected: sameId });
           return copy(sameId);
         }
       }
@@ -4559,7 +4580,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       let id = options.id || random || 'fleet-' + time.toString(36) + '-' + (++idSequence).toString(36);
       while (config.jobs.some(item => item.id === id)) id = 'fleet-' + time.toString(36) + '-' + (++idSequence).toString(36);
       const job = { id, ...clean, status: 'waiting', createdAt: time, updatedAt: time,
-        claimedAt: null, sentAt: null, message: '', needsReview: false };
+        claimedAt: null, sentAt: null, message: '', needsReview: false, ...(owner ? { campaignId: owner } : {}) };
       commit({ ...config, jobs: [...retained, job] });
       return copy(job);
     }
@@ -4591,6 +4612,16 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     function changedJob(id, transform) {
       const result = changeJob(id, transform);
       return copy(result.jobs.find(item => item.id === id));
+    }
+
+    function setCampaignOwner(id, value, options = {}) {
+      const owner = campaignOwner(value, id);
+      if (!owner) throw new TypeError('Falta la campaña de esta misión.');
+      return changedJob(id, job => {
+        expectSavedJob(job, options);
+        if (job.campaignId && job.campaignId !== owner) throw new Error('La misión pertenece a otra campaña.');
+        return { ...job, campaignId: owner };
+      });
     }
 
     function beginFleetEdit(id) {
@@ -5080,7 +5111,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       notice = 'No se pudo leer o recuperar la cola guardada. Las misiones pendientes están detenidas.';
     }
 
-    return { queue, update, reconnect, cancel, pause, resume, acknowledge, productionPlan, productionDemand,
+    return { queue, update, reconnect, cancel, pause, resume, acknowledge, productionPlan, productionDemand, setCampaignOwner,
       beginFleetEdit, getFleetEdit, setFleetDraft, applyFleetEdit, cancelFleetEdit, setFleetQuantities,
       getJobFor, tick, exportConfig, validateConfig, importConfig, backupCheckpoint, restoreCheckpoint,
       refreshConfig, mount, destroy,
@@ -5129,6 +5160,9 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     let ui = null;
     let cardsKey = '';
     let epoch = 0;
+    let cleaningCancelled = false;
+    const CLEANUP_PENDING = 'Campaña cancelada. Esperando a que termine el envío en curso para retirar su registro.';
+    const CLEANUP_ERROR = 'La campaña está cancelada. No se pudieron retirar sus misiones; se volverá a intentar.';
 
     function keys(value, allowed) {
       return object(value) && Object.keys(value).every(key => allowed.includes(key));
@@ -5405,15 +5439,54 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     }
     function jobMatches(campaign, job) {
       return Boolean(job && job.id === campaign.queueJobId && job.scope === campaign.scope && job.originId === campaign.originId &&
+        (job.campaignId === undefined || job.campaignId === campaign.id) &&
         job.originName === campaign.originName && job.target?.mode === 'amounts' && job.target.routeKey === '' &&
         job.target.presetKey === '' && job.target.label === campaign.targetName &&
         sameCoordinate(job.target.coordinate, campaign.targetCoordinate) && sameCoordinate(job.target.originCoordinate, campaign.originCoordinate) &&
         sameQuantities(job.quantities, campaign.quantities) && job.produce === campaign.produce && job.autoSend === true);
     }
     function jobOwned(campaign, job) {
-      return Boolean(job && job.id === campaign.queueJobId && job.scope === campaign.scope && job.originId === campaign.originId &&
+      return Boolean(job && (job.campaignId === undefined ? job.id === campaign.queueJobId : job.campaignId === campaign.id) &&
+        job.scope === campaign.scope && job.originId === campaign.originId &&
         sameCoordinate(job.target?.coordinate, campaign.targetCoordinate) &&
         sameCoordinate(job.target?.originCoordinate, campaign.originCoordinate));
+    }
+    function cancelOwnJobs(campaign) {
+      let complete = true;
+      for (const job of jobs().filter(item => jobOwned(campaign, item))) {
+        // Keep an active claim until the adapter records its outcome. Closing the
+        // campaign already revokes its authorization before the native send guard.
+        if (job.status === 'sending') {
+          syncResult(deps.cancelPreparingJob?.(job.id));
+          complete = false;
+          continue;
+        }
+        if (typeof deps.cancelJob !== 'function') throw new Error('La cola de misiones no está disponible.');
+        syncResult(deps.cancelJob(job.id));
+      }
+      return complete && !jobs().some(item => jobOwned(campaign, item));
+    }
+    function cleanupCancelledJobs() {
+      if (destroyed || cleaningCancelled || !refreshConfig()) return false;
+      cleaningCancelled = true;
+      let complete = true;
+      try {
+        for (const campaign of config.campaigns.filter(item => item.status === 'cancelled')) {
+          try {
+            const removed = cancelOwnJobs(campaign);
+            complete &&= removed;
+            const message = removed ? 'Campaña cancelada. Sus misiones se han retirado del helper.' : CLEANUP_PENDING;
+            if (campaign.message !== message) updateCampaign(campaign.id, item => item.status === 'cancelled'
+              ? { ...item, message } : item);
+          } catch (_) {
+            complete = false;
+            notice = CLEANUP_ERROR;
+          }
+        }
+        if (complete && notice === CLEANUP_ERROR) notice = '';
+        render();
+        return complete;
+      } finally { cleaningCancelled = false; }
     }
     function controlOwnJob(campaign, action) {
       if (!campaign.queueJobId) return true;
@@ -5833,6 +5906,15 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
             : 'Derrota en ' + campaign.targetName + '.\nSiguiente intento: ' + fleetText(campaign.quantities) + '.\n+1 Marauder respecto al ataque perdido.';
         }
       }
+      // Older jobs did not record their campaign. Preserve that ownership before
+      // a new defeat replaces queueJobId, including when the next save fails.
+      if (previous?.queueJobId && campaign && campaign.queueJobId !== previous.queueJobId &&
+          typeof deps.setJobCampaignOwner === 'function') {
+        const job = jobs().find(item => item.id === previous.queueJobId);
+        if (job && jobOwned(previous, job) && !job.campaignId) {
+          syncResult(deps.setJobCampaignOwner(job.id, previous.id, { expected: job }));
+        }
+      }
       commit(next);
       lastReportDecision = null;
       render();
@@ -5845,6 +5927,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     }
     async function tick() {
       if (destroyed || running || !refreshConfig()) return null;
+      cleanupCancelledJobs();
       let queue;
       try { queue = reconcile(); } catch (_) { render(); return null; }
       if (!config.enabled) {
@@ -5854,7 +5937,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         return null;
       }
       for (const campaign of config.campaigns) {
-        if (campaign.status === 'completed' || campaign.status === 'cancelled') {
+        if (campaign.status === 'completed') {
           try { controlOwnJob(campaign, 'cancel'); } catch (_) { /* Authorization gate remains closed until cleanup succeeds. */ }
         }
         if (campaign.status === 'paused' || campaign.status === 'uncertain' || campaign.status === 'limit') {
@@ -5904,7 +5987,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         if (!live || !same(live, claimed) || !mayAct(beforeQueue) || beforeQueue.scope !== current.scope ||
             beforeQueue.originId !== current.originId) return null;
         let created;
-        try { created = syncResult(deps.queueOnce(specFor(claimed), { id: claimed.queueJobId })); }
+        try { created = syncResult(deps.queueOnce(specFor(claimed), { id: claimed.queueJobId, campaignId: claimed.id })); }
         catch (_) {
           try {
             const existing = jobs().find(item => item.id === claimed.queueJobId);
@@ -6090,13 +6173,14 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     }
     function cancel(id) {
       const saved = updateCampaign(id, item => ({ ...item, status: 'cancelled', resumeStatus: null, fleetEdit: null, message: 'Campaña cancelada. No se prepararán más ataques.' }));
-      try { controlOwnJob(saved, 'cancel'); } catch (_) { notice = 'La campaña está cancelada; comprueba la misión que ya estaba pendiente.'; render(); }
-      return saved;
+      cleanupCancelledJobs();
+      return copy(config.campaigns.find(item => item.id === saved.id) || saved);
     }
     function remove(id) {
       ensureReady();
       const campaign = config.campaigns.find(item => item.id === id);
       if (!campaign || !TERMINAL.includes(campaign.status)) throw new Error('Cancela la campaña antes de quitarla.');
+      if (!cancelOwnJobs(campaign)) throw new Error('La misión todavía está cerrando su envío. Se retirará automáticamente cuando termine; después podrás quitar la campaña.');
       commit({ ...config, campaigns: config.campaigns.filter(item => item.id !== id) });
       return true;
     }
@@ -6201,7 +6285,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         if (ACTIVE.includes(campaign.status)) button('Pausar', () => pause(campaign.id), 'pause');
         if (campaign.status === 'paused' && campaign.resumeStatus) button('Reanudar', () => resume(campaign.id), 'resume', !value.enabled || editing);
         if (!TERMINAL.includes(campaign.status)) button('Cancelar campaña', () => cancel(campaign.id), 'cancel');
-        else button('Quitar', () => remove(campaign.id), 'remove');
+        else button('Quitar', () => remove(campaign.id), 'remove', campaign.status === 'cancelled' && campaign.message === CLEANUP_PENDING);
         card.append(actions); return card;
       });
       ui.cards.replaceChildren(...cards);
@@ -6295,7 +6379,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     }
     function destroy() { destroyed = true; epoch += 1; mounted?.replaceChildren(); mounted = null; ui = null; }
     refreshConfig();
-    return { observeReport, recoverReports, flushMinimums, tick, canRunJob, setConfig, pause, resume, cancel, remove, mount, exportConfig, validateConfig,
+    cleanupCancelledJobs();
+    return { observeReport, recoverReports, flushMinimums, tick, canRunJob, setConfig, pause, resume, cancel, remove, cleanupCancelledJobs, mount, exportConfig, validateConfig,
       beginFleetEdit, getFleetEdit, setFleetDraft, applyFleetEdit, cancelFleetEdit,
       importConfig, backupCheckpoint, restoreCheckpoint, refreshConfig, destroy,
       isEnabled: () => !destroyed && refreshConfig() && config.enabled,
