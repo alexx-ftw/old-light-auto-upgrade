@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.12.0
-// @description  Flota prioritaria con reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive. Con actualización automática.
+// @version      1.12.1
+// @description  Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
 // @supportURL   https://github.com/alexx-ftw/old-light-auto-upgrade/issues
@@ -524,7 +524,7 @@
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.12.0';
+  const SCRIPT_VERSION = '1.12.1';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -554,6 +554,10 @@
   const MAX_UNCONFIRMED = 3;
   const upgradeEta = createUpgradeEtaEstimator();
   const fleetPriority = createFleetPriorityPlanner(upgradeEta.formatDuration);
+  const infrastructurePriority = createInfrastructurePriorityPlanner(upgradeEta);
+  // A chosen Depot remains necessary while saving or waiting for its Reactor.
+  // Keep this local to the active system; forecasts never change this intent.
+  let depotPrioritySystem = null;
 
   if (window.top !== window.self || document.getElementById(HOST_ID)) return;
 
@@ -1494,7 +1498,9 @@
       const snapshot = readUpgradeEtaSnapshot(rows(), resources);
       const fleetSnapshot = readFleetPrioritySnapshot(shipRows(), resources);
       const fleetPlan = fleetPriority.select(fleetSnapshot);
-      if (fleetPlan.reserve) forecast = fleetPriority.estimate(fleetSnapshot, fleetPlan);
+      const infrastructurePlan = infrastructurePriority.select(snapshot, fleetSnapshot, depotPrioritySystem === systemId());
+      if (infrastructurePlan.reserve) forecast = infrastructurePlan.forecast;
+      else if (fleetPlan.reserve) forecast = fleetPriority.estimate(fleetSnapshot, fleetPlan);
       else {
         forecast = upgradeEta.estimate(snapshot);
         if (fleetPlan.target) {
@@ -1503,7 +1509,8 @@
           } else forecast = fleetPriority.estimate(fleetSnapshot, fleetPlan);
         }
       }
-      clockKey = JSON.stringify({ ...snapshot, system: systemId(), nextClickAt, cooldownMs: 0,
+      if (!infrastructurePlan.reserve && infrastructurePlan.notice) forecast.detail = `${infrastructurePlan.notice} ${forecast.detail}`;
+      clockKey = JSON.stringify({ ...snapshot, system: systemId(), depotPrioritySystem, nextClickAt, cooldownMs: 0,
         queue: { ...snapshot.queue, waitMs: null }, fleet: { ...fleetSnapshot, cooldownMs: 0,
           queue: { ...fleetSnapshot.queue, waitMs: null } } });
     }
@@ -2039,8 +2046,8 @@
               <div data-field="level-targets"></div>
             </details>
             <details class="settings-page fleet-details" data-page="fleet" id="oldlight-settings-fleet" role="tabpanel" tabindex="0" aria-labelledby="oldlight-tab-fleet" open hidden><summary>Flota</summary>
-              <div class="page-heading"><h3>Flota mínima</h3><span class="count-badge">Prioridad sobre edificios</span></div>
-              <p class="page-intro">Ordena las naves e indica cuántas mantener. 0 desactiva su reposición.</p>
+              <div class="page-heading"><h3>Flota mínima</h3><span class="count-badge">Depot necesario primero</span></div>
+              <p class="page-intro">Ordena las naves e indica cuántas mantener. 0 desactiva su reposición. El Depot necesario y su Reactor se atienden antes.</p>
               <div class="fleet-choices" role="list" aria-label="Mínimos y prioridad de naves"></div>
               <label class="count-away"><input type="checkbox">Contar también las naves en misión</label>
               <div class="priority-tools"><span class="hint">Se descuenta la producción en cola</span><button type="button" class="reset-ships">Restablecer orden</button></div>
@@ -3258,10 +3265,21 @@
     }
 
     let fleetCandidate = null;
+    let infrastructureCandidate = null;
     const activeSystem = systemId();
-    const fleetSnapshot = readFleetPrioritySnapshot(ships);
+    const resources = readResourceSnapshot();
+    const fleetSnapshot = readFleetPrioritySnapshot(ships, resources);
     const fleetPlan = fleetPriority.select(fleetSnapshot);
-    if (fleetPlan.reserve && fleetPlan.target) {
+    const infrastructurePlan = activeSystem
+      ? infrastructurePriority.select(readUpgradeEtaSnapshot(current, resources), fleetSnapshot, depotPrioritySystem === activeSystem)
+      : { reserve: false, needed: false, notice: '' };
+    depotPrioritySystem = infrastructurePlan.needed ? activeSystem : null;
+    if (infrastructurePlan.reserve) {
+      infrastructureCandidate = infrastructurePlan.forecast.state === 'ready'
+        ? current.find(row => row.id === infrastructurePlan.forecast.buildingId && isAvailable(row.button)) : null;
+      if (!infrastructureCandidate) { show(infrastructurePlan.notice); return; }
+    }
+    if (!infrastructurePlan.reserve && fleetPlan.reserve && fleetPlan.target) {
       const row = ships.find(item => item.id === fleetPlan.target.id);
       const quantity = row && fleetPlan.target.blocker !== 'mission' ? prepareShip(row, fleetPlan.target.quantity) : 0;
       if (!quantity) {
@@ -3272,8 +3290,10 @@
       // resources or mission demand. Revalidate the same priority before clicking.
       const latestSnapshot = readFleetPrioritySnapshot(shipRows());
       const latestPlan = fleetPriority.select(latestSnapshot);
+      const latestInfrastructure = infrastructurePriority.select(readUpgradeEtaSnapshot(rows(), latestSnapshot.resources),
+        latestSnapshot, depotPrioritySystem === activeSystem);
       const latest = fleetCounts(row.id);
-      if (activeSystem !== systemId() || !latest || !latestPlan.reserve
+      if (activeSystem !== systemId() || latestInfrastructure.reserve || !latest || !latestPlan.reserve
           || latestPlan.target?.id !== row.id || latestPlan.target.deficit < quantity
           || latestPlan.target.quantity < quantity
           || !isAvailable(row.button, FLEET_PANEL)) {
@@ -3285,8 +3305,8 @@
         feedbackLine: shipFeedbackLine(), target: `×${quantity}` };
     }
 
-    const candidate = fleetCandidate || selectBuilding(current);
-    if (!candidate) { show(fleetPlan.notice || 'Esperando recursos o hueco en la cola…'); return; }
+    const candidate = infrastructureCandidate || fleetCandidate || selectBuilding(current);
+    if (!candidate) { show(infrastructurePlan.notice || fleetPlan.notice || 'Esperando recursos o hueco en la cola…'); return; }
 
     // Registra la petición ANTES del clic: el juego puede actualizarse de forma síncrona.
     const request = { ...candidate, system: activeSystem, systemName: text(document.querySelector('[data-field="nameplate-name"]')),
@@ -3312,6 +3332,77 @@
       console.warn('[Old Light Auto Upgrade]', cause);
     }
   }
+
+  // BEGIN INFRASTRUCTURE PRIORITY PLANNER
+  function createInfrastructurePriorityPlanner(upgradeEta) {
+    const RESOURCES = ['palladium', 'iridium'];
+    const feasibleBlockers = ['ready', 'resources', 'queue'];
+    const finiteAmount = value => Number.isFinite(value) && value >= 0;
+    const costKnown = cost => RESOURCES.every(id => finiteAmount(cost?.[id]));
+
+    function select(snapshot, fleetSnapshot = {}, retained = false) {
+      const none = (notice = '') => ({ reserve: false, needed: false, notice, forecast: null });
+      const excluded = new Set(snapshot.excluded || []);
+      const byId = new Map((snapshot.buildings || []).map(row => [row.id, row]));
+      const enabled = id => (snapshot.order || []).includes(id) && !excluded.has(id);
+      const depot = byId.get('warehouse');
+      const queued = snapshot.queue?.buildings || {};
+      if (!depot || !enabled('warehouse') || queued.warehouse) return none();
+      const resources = snapshot.resources || {};
+      const exceedsCapacity = cost => costKnown(cost) && RESOURCES.some(id =>
+        Number.isFinite(resources[id]?.cap) && resources[id].cap > 0 && cost[id] > resources[id].cap);
+      const fills = RESOURCES.filter(id => finiteAmount(resources[id]?.amount)
+        && Number.isFinite(resources[id]?.cap) && resources[id].cap > 0)
+        .map(id => resources[id].amount / resources[id].cap * 100);
+      const fill = fills.length ? Math.max(...fills) : null;
+      const threshold = Math.min(100, Math.max(1, snapshot.depotFillPercent || 90));
+      const capacityBuilding = (snapshot.buildings || []).find(row =>
+        !['warehouse', 'reactor'].includes(row.id) && enabled(row.id) && row.visible
+        && Number.isSafeInteger(row.targetLevel) && row.targetLevel > 0
+        && [...feasibleBlockers, 'capacity'].includes(row.blocker) && exceedsCapacity(row.cost));
+      const capacityShip = fleetSnapshot.active && fleetSnapshot.contextReady
+        && (fleetSnapshot.ships || []).find(ship => Number.isSafeInteger(ship.deficit) && ship.deficit > 0
+          && !['locked', 'error', 'unavailable'].includes(ship.blocker) && exceedsCapacity(ship.unitCost));
+      const needed = retained || (fill !== null && fill >= threshold) || capacityBuilding || capacityShip;
+      if (!needed) return none();
+      const why = capacityBuilding || capacityShip
+        ? `Resource Depot prioritario: su capacidad bloquea ${capacityBuilding?.name || capacityShip.name}.`
+        : fill !== null && fill >= threshold
+          ? `Resource Depot prioritario: almacén al ${fill.toFixed(1)}% (umbral ${threshold}%).`
+          : 'Resource Depot prioritario: completar la mejora ya priorizada.';
+      if (!depot.visible || !Number.isSafeInteger(depot.targetLevel) || depot.targetLevel <= 0
+          || !feasibleBlockers.includes(depot.blocker)) {
+        return none(`${why} El juego no permite mejorar el Depot ahora${depot.nativeReason ? ` (${depot.nativeReason})` : ''}.`);
+      }
+      if (exceedsCapacity(depot.cost)) return none(`${why} La propia mejora del Depot supera su capacidad actual.`);
+      const needsPower = Number.isFinite(snapshot.energy) && Number.isFinite(depot.energy)
+        && depot.energy < 0 && snapshot.energy + depot.energy < 0;
+      const reactor = byId.get('reactor');
+      if (needsPower && !queued.reactor) {
+        if (!enabled('reactor')) return none(`${why} Necesita más energía, pero Reactor está desmarcado.`);
+        if (!reactor?.visible || !Number.isSafeInteger(reactor.targetLevel) || reactor.targetLevel <= 0
+            || !feasibleBlockers.includes(reactor.blocker) || (Number.isFinite(reactor.energy) && reactor.energy <= 0)) {
+          return none(`${why} El juego no permite mejorar el Reactor necesario ahora.`);
+        }
+        if (exceedsCapacity(reactor.cost)) return none(`${why} El Reactor necesario supera la capacidad actual.`);
+      }
+      // Only this required dependency chain bypasses the user's ordinary order.
+      // It uses the BUILDING queue; an occupied ship queue cannot delay it.
+      const forecast = upgradeEta.estimate({ ...snapshot, order: ['reactor', 'warehouse'],
+        buildings: [reactor, depot].filter(Boolean), depotRequired: true });
+      if (['capacity', 'production', 'maxed', 'locked', 'error', 'unavailable'].includes(forecast.reason)) {
+        return none(`${why} ${forecast.detail}`);
+      }
+      const target = needsPower && !queued.reactor ? reactor : depot;
+      const detail = `${why} ${forecast.detail} La flota espera a que se encole el Depot.`;
+      return { reserve: true, needed: true, notice: detail, forecast: { ...forecast, kind: 'building',
+        buildingId: forecast.buildingId || target?.id || 'warehouse',
+        name: forecast.name || target?.name || 'Resource Depot',
+        targetLevel: forecast.targetLevel ?? target?.targetLevel ?? null, detail } };
+    }
+    return { select };
+  }
+  // END INFRASTRUCTURE PRIORITY PLANNER
 
   // BEGIN FLEET PRIORITY PLANNER
   function createFleetPriorityPlanner(formatDuration) {
@@ -3368,7 +3459,7 @@
           if (!firstBlocked) firstBlocked = { target, reserve: false, blocker, notice };
           continue;
         }
-        return { target, reserve: true, blocker: '', notice: `Flota prioritaria: ${ship.name}. Reservando recursos antes de mejorar edificios.` };
+        return { target, reserve: true, blocker: '', notice: `Flota prioritaria: ${ship.name}. Reservando recursos tras la infraestructura necesaria.` };
       }
       return firstBlocked || none();
     }
@@ -3379,7 +3470,7 @@
         kind: ship ? 'ship' : '', shipId: ship?.id || '', buildingId: '', name: ship?.name || '',
         quantity: ship?.quantity || 0, targetLevel: null });
       if (!ship) return result(plan.blocker === 'context' ? 'blocked' : 'idle', plan.notice);
-      const reservation = 'Se reservan recursos para la flota; los edificios esperan.';
+      const reservation = 'Se reservan recursos para la flota; solo el Depot necesario y su Reactor se adelantan.';
       if (!plan.reserve) return result('blocked', plan.notice, null, plan.blocker);
       const resources = snapshot.resources || {};
       if (!costKnown(ship) || RESOURCES.some(id => !finiteAmount(resources[id]?.amount)
@@ -3500,6 +3591,7 @@
       }
       const notBefore = Math.max(0, snapshot.cooldownMs || 0, queueWait || 0);
       const threshold = Math.min(100, Math.max(1, snapshot.depotFillPercent || 90));
+      const depotRequired = snapshot.depotRequired === true;
       const costKnown = row => RESOURCES.every(id => Number.isFinite(row.cost?.[id]) && row.cost[id] >= 0);
       const capacityFits = row => costKnown(row) && RESOURCES.every(id => row.cost[id] <= resources[id].cap);
       const powerKnown = row => Number.isFinite(row.energy) && Number.isFinite(snapshot.energy);
@@ -3535,13 +3627,16 @@
         const available = models.filter(row =>
           (ms > 0 || row.blocker === 'ready') &&
           RESOURCES.every(id => amounts[id] + EPSILON >= row.cost[id]) &&
-          (row.id !== 'warehouse' || fill + EPSILON >= threshold));
-        const consumer = available.find(row => row.id !== 'reactor' && needsPower(row));
+          (row.id !== 'warehouse' || depotRequired || fill + EPSILON >= threshold));
+        // An urgent Depot justifies starting its Reactor before the Depot's
+        // own resources are complete; no speculative Reactor for normal builds.
+        const consumer = available.find(row => row.id !== 'reactor' && needsPower(row))
+          || (depotRequired ? models.find(row => row.id === 'warehouse' && needsPower(row)) : null);
         const candidate = available.find(row => row.id === 'reactor' ? Boolean(consumer) : !needsPower(row));
         if (!candidate) continue;
         const notes = [];
         if (candidate.id === 'reactor') notes.push(`Energía necesaria para ${consumer.name}.`);
-        if (candidate.id === 'warehouse') notes.push(`Depot al ${threshold}% de capacidad.`);
+        if (candidate.id === 'warehouse') notes.push(depotRequired ? 'Ampliación necesaria del Depot.' : `Depot al ${threshold}% de capacidad.`);
         if (queue.full) notes.push(`Hueco en cola en ≈${formatDuration(queueWait)}.`);
         const missing = RESOURCES.filter(id => candidate.cost[id] > resources[id].amount)
           .map(id => `${Math.ceil(candidate.cost[id] - resources[id].amount).toLocaleString()} ${RESOURCE_NAMES[id]}`);
