@@ -1,6 +1,16 @@
 # Old Light Auto Upgrade
 
-Userscript para [Old Light](https://oldlight.io/play) que da prioridad a la flota, reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.11.0**, que retira automáticamente las misiones vinculadas al cancelar su campaña. Reintenta las interrupciones temporales, muestra su motivo concreto y funciona en las vistas estrechas Galaxy y Movements. Permite editar las flotas de misiones y campañas, con borradores guardados automáticamente. La versión cargada aparece en la cabecera del helper, también al minimizarlo.
+Userscript para [Old Light](https://oldlight.io/play) que da prioridad a la flota, reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.12.0**, que retira automáticamente las misiones vinculadas al cancelar su campaña. Reintenta las interrupciones temporales, muestra su motivo concreto y funciona en las vistas estrechas Galaxy y Movements. Permite editar las flotas de misiones y campañas, con borradores guardados automáticamente. La versión cargada aparece en la cabecera del helper, también al minimizarlo.
+
+## Interfaz por tareas (1.12.0)
+
+**Flota** se divide en **Mínimos**, **Campañas** y **Misiones**, con contadores de pendientes. Campañas y misiones tienen filtros **Pendientes**, **Revisar** y **Todas**. Revisar incluye pausas, envíos sin confirmar, límites alcanzados y ediciones pendientes; Todas conserva el historial. Filtrar solo cambia lo que ves: nunca pausa, reanuda, cancela ni envía una operación. Las tarjetas de campaña siguen visibles cuando pliegas los ajustes de reintentos.
+
+La cabecera identifica el sistema seleccionado. **Siguiente acción** aparece en Edificios y Mínimos, no ocupa espacio en las otras vistas. El pie mantiene un acceso directo al estado de Drive: diferencia conexión, autorización, cambios pendientes, sincronización, reintentos y errores. Solo una confirmación de sincronización muestra **Drive sincronizado**; una copia guardada no se presenta como sincronización. Pulsarlo abre Datos, donde Drive aparece antes que las copias manuales.
+
+**Datos → Ventana del helper → Densidad** permite elegir Cómoda o Compacta. La subvista, los filtros y la densidad sobreviven a una recarga en este navegador, pero no se sincronizan ni modifican preferencias operativas. Las subvistas admiten flechas, Inicio y Fin; los paneles admiten foco de teclado. Hay estados vacíos explicativos y controles adaptados al ancho del propio helper y a pantallas táctiles. El botón de pausa aclara que afecta a mejoras y reposición, no cancela campañas o misiones.
+
+Verificación de 1.12.0: 601 pruebas automatizadas y 57 comprobaciones de interfaz con Camoufox/Playwright en un escenario aislado (1280×900, 560×800, 390×844, 320×700 y 900×420). Incluye filtros con tarjetas del controlador real, navegación por teclado, autoguardado, persistencia tras recargar, minimizar/restaurar y ausencia de desbordamiento horizontal. No se enviaron acciones al juego ni peticiones a Google durante esas comprobaciones.
 
 ## Sincronización automática de ajustes (1.11.0)
 
@@ -28,7 +38,7 @@ Si el enlace muestra texto, utiliza la opción de instalar desde URL de tu gesto
 
 ## Interfaz y navegación
 
-El helper mantiene la cabecera y las cuatro pestañas accesibles mientras desplazas su contenido. La ventana conserva su altura al cambiar de pestaña. **Siguiente acción** destaca la ETA, el próximo pedido y el motivo de espera; la fila de ese edificio o nave también queda resaltada.
+El helper mantiene la cabecera y las cuatro pestañas accesibles mientras desplazas su contenido. La ventana conserva su altura al cambiar de pestaña. **Siguiente acción**, en Edificios y Mínimos, destaca la ETA, el próximo pedido y el motivo de espera; la fila de ese edificio o nave también queda resaltada.
 
 | Pestaña | Contenido |
 | --- | --- |
@@ -66,7 +76,7 @@ Si ya hay una mejora de Reactor o Depot en cola, espera antes de encargar otra d
 
 ### ETA del siguiente pedido
 
-El indicador **Siguiente acción**, al principio del contenido de cada pestaña, muestra la **nave y cantidad** o el **edificio y nivel**, la **cuenta atrás aproximada** y el motivo de la espera. La cuenta atrás también se ve debajo de **Old Light** al minimizar el helper; al pasar el cursor aparece el detalle. No necesita activar ningún ajuste.
+El indicador **Siguiente acción**, al principio de Edificios y Mínimos, muestra la **nave y cantidad** o el **edificio y nivel**, la **cuenta atrás aproximada** y el motivo de la espera. La cuenta atrás también se ve debajo de **Old Light** al minimizar el helper; al pasar el cursor aparece el detalle. No necesita activar ningún ajuste.
 
 La ETA corresponde a cuándo se podrá **encolar el siguiente pedido automático de flota o mejora**. Una construcción que ya esté en curso puede continuar mientras se añade otro pedido si queda un hueco. El tiempo de construcción de la nave o del nuevo nivel es distinto y lo muestra el juego.
 

@@ -1759,6 +1759,7 @@
     }
     const fleetTab = ui.tabs.find(tab => tab.dataset.settingsTab === 'fleet');
     fleetTab.dataset.attention = String(totalAttention > 0);
+    fleetTab.setAttribute('aria-label', totalAttention ? `Flota: ${totalAttention} elementos para revisar` : 'Flota');
     fleetTab.title = totalAttention ? `${totalAttention} elementos requieren revisión` : 'Mínimos, campañas y misiones';
     for (const button of ui.section.querySelectorAll('[data-helper-density]')) button.setAttribute('aria-pressed', String(button.dataset.helperDensity === state.density));
     const status = driveBackup?.getStatus?.() || null;
@@ -1870,6 +1871,7 @@
           .priority-row[data-state="next"], .fleet-row[data-state="next"] { border-color:#3c826c; background:#112c29; }
           .priority-drag { width:24px; height:34px; min-height:34px; padding:0; color:var(--ol-muted); background:transparent;
             border-color:transparent; font-size:18px; cursor:grab; touch-action:none; user-select:none; }
+          .priority-drag svg { width:16px; height:20px; display:block; margin:auto; pointer-events:none; }
           .priority-drag:hover:not(:disabled) { border-color:var(--ol-border); background:var(--ol-surface-raised); }
           .priority-row.is-dragging, .fleet-row.is-dragging { opacity:.55; }
           .priority-row.drop-before, .fleet-row.drop-before { box-shadow:0 -2px 0 var(--ol-accent); }
@@ -2128,7 +2130,7 @@
         drag.type = 'button';
         drag.className = 'priority-drag';
         drag.dataset.action = 'priority-drag';
-        drag.textContent = '⠿';
+        drag.innerHTML = '<svg viewBox="0 0 16 20" fill="currentColor" aria-hidden="true"><circle cx="5" cy="4" r="1.4"/><circle cx="11" cy="4" r="1.4"/><circle cx="5" cy="10" r="1.4"/><circle cx="11" cy="10" r="1.4"/><circle cx="5" cy="16" r="1.4"/><circle cx="11" cy="16" r="1.4"/></svg>';
         drag.title = `Arrastrar prioridad de ${name}`;
         drag.setAttribute('aria-label', drag.title);
         const position = document.createElement('span');
@@ -2186,7 +2188,7 @@
         drag.type = 'button';
         drag.className = 'priority-drag';
         drag.dataset.action = 'ship-drag';
-        drag.textContent = '⠿';
+        drag.innerHTML = '<svg viewBox="0 0 16 20" fill="currentColor" aria-hidden="true"><circle cx="5" cy="4" r="1.4"/><circle cx="11" cy="4" r="1.4"/><circle cx="5" cy="10" r="1.4"/><circle cx="11" cy="10" r="1.4"/><circle cx="5" cy="16" r="1.4"/><circle cx="11" cy="16" r="1.4"/></svg>';
         drag.title = `Arrastrar prioridad de ${name}`;
         drag.setAttribute('aria-label', drag.title);
         installPriorityKeys(drag, id, true);
