@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.11.0
+// @version      1.12.0
 // @description  Flota prioritaria con reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -524,7 +524,7 @@
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.11.0';
+  const SCRIPT_VERSION = '1.12.0';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -1568,6 +1568,210 @@
     if (node.textContent !== value) node.textContent = value;
   }
 
+
+  // BEGIN HELPER WORKSPACE: local presentation only, never shared automation state.
+  function normalizeHelperWorkspace(value) {
+    const pick = (key, allowed, fallback) => allowed.includes(value?.[key]) ? value[key] : fallback;
+    return {
+      fleetView: pick('fleetView', ['minimums', 'campaigns', 'missions'], 'minimums'),
+      campaignFilter: pick('campaignFilter', ['pending', 'attention', 'all'], 'pending'),
+      missionFilter: pick('missionFilter', ['pending', 'attention', 'all'], 'pending'),
+      density: pick('density', ['comfortable', 'compact'], 'comfortable'),
+    };
+  }
+
+  function helperOperationSummary(records, filter = 'pending') {
+    const history = new Set(['completed', 'cancelled', 'sent']);
+    const attention = record => record.attention === true || ['paused', 'uncertain', 'limit'].includes(record.status);
+    return {
+      total: records.length,
+      pending: records.filter(record => !history.has(record.status)).length,
+      attention: records.filter(attention).length,
+      visible: records.map(record => filter === 'all' || (filter === 'attention' ? attention(record) : !history.has(record.status))),
+    };
+  }
+
+  function helperDriveIndicator(value) {
+    if (!value) return { text: 'Drive no disponible', tone: 'muted' };
+    const code = value.code;
+    if (value.autoSync === false) return { text: 'Sync desactivada', tone: 'muted' };
+    if (code === 'synced') return { text: 'Drive sincronizado', tone: 'ready' };
+    if (['sync_pending', 'syncing'].includes(code)) return { text: code === 'syncing' ? 'Sincronizando…' : 'Cambios pendientes', tone: 'working' };
+    if (['opening', 'connecting', 'library_loading', 'renewing', 'switching_account'].includes(code)) return { text: 'Conectando Drive…', tone: 'working' };
+    if (['disconnected', 'missing_client', 'sync_waiting'].includes(code)) return { text: 'Conectar Drive', tone: 'muted' };
+    if (['bridge_ready', 'auth_closed', 'auth_cancelled'].includes(code)) return { text: 'Autorizar Drive', tone: 'warning' };
+    if (code === 'expired' || code === 'renew_soon') return { text: 'Renovar Drive', tone: 'warning' };
+    if (code === 'sync_retry') return { text: 'Drive reintentando', tone: 'warning' };
+    if (['connected', 'listing', 'saving', 'saved', 'unchanged', 'restoring', 'restored', 'busy'].includes(code)) {
+      return { text: 'Drive conectado', tone: 'muted' };
+    }
+    return { text: 'Revisar Drive', tone: 'warning' };
+  }
+  // END HELPER WORKSPACE PURE HELPERS
+
+  function installHelperWorkspace(shadow) {
+    const key = 'old-light-helper-workspace:v1';
+    let state;
+    try { state = normalizeHelperWorkspace(JSON.parse(localStorage.getItem(key) || '{}')); }
+    catch { state = normalizeHelperWorkspace(null); }
+    const el = (tag, label, className) => {
+      const node = document.createElement(tag);
+      if (label !== undefined) node.textContent = label;
+      if (className) node.className = className;
+      return node;
+    };
+    const workspace = ui.workspace = { state, controls: new Map(), views: new Map(), lists: new Map(), scroll: new Map() };
+    const save = patch => {
+      Object.assign(state, normalizeHelperWorkspace({ ...state, ...patch }));
+      try { localStorage.setItem(key, JSON.stringify(state)); }
+      catch { presentationFailure('No se pudo guardar la vista del helper. La automatización no ha cambiado.'); }
+    };
+    const nav = el('nav', undefined, 'fleet-workspace-tabs');
+    nav.setAttribute('role', 'tablist');
+    nav.setAttribute('aria-label', 'Vistas de flota');
+    const minimums = el('section');
+    minimums.dataset.fleetView = 'minimums';
+    for (const child of [...ui.fleetDetails.children]) {
+      if (child.tagName !== 'SUMMARY' && child !== ui.attackRetryContainer && child !== ui.fleetWaitContainer) minimums.append(child);
+    }
+    const definitions = [
+      ['minimums', 'Mínimos', minimums],
+      ['campaigns', 'Campañas', ui.attackRetryContainer],
+      ['missions', 'Misiones', ui.fleetWaitContainer],
+    ];
+    for (const [id, label, content] of definitions) {
+      const button = el('button'); button.type = 'button'; button.dataset.fleetViewTab = id;
+      button.id = `oldlight-fleet-tab-${id}`; button.setAttribute('role', 'tab');
+      button.setAttribute('aria-controls', `oldlight-fleet-view-${id}`);
+      const caption = el('span', label), count = el('span', '', 'workspace-count');
+      count.setAttribute('aria-hidden', 'true'); count.hidden = true; button.append(caption, count);
+      nav.append(button); workspace.controls.set(id, { button, count, label });
+      const page = id === 'minimums' ? minimums : el('section');
+      page.id = `oldlight-fleet-view-${id}`; page.dataset.fleetView = id;
+      page.setAttribute('role', 'tabpanel'); page.setAttribute('aria-labelledby', button.id);
+      page.tabIndex = 0;
+      if (id !== 'minimums') {
+        const heading = el('div', undefined, 'workspace-heading');
+        heading.append(el('h3', id === 'campaigns' ? 'Campañas de ataque' : 'Cola de misiones'));
+        const summary = el('span', '', 'workspace-list-summary'); heading.append(summary); page.append(heading);
+        const filterKey = id === 'campaigns' ? 'campaignFilter' : 'missionFilter';
+        const filters = el('div', undefined, 'workspace-filters');
+        filters.setAttribute('role', 'group'); filters.setAttribute('aria-label', `Filtrar ${label.toLowerCase()}`);
+        for (const [filter, text] of [['pending', 'Pendientes'], ['attention', 'Revisar'], ['all', 'Todas']]) {
+          const control = el('button', text); control.type = 'button'; control.dataset.operationFilter = filter;
+          control.addEventListener('click', () => { save({ [filterKey]: filter }); syncHelperWorkspace(); });
+          filters.append(control);
+        }
+        const empty = el('div', undefined, 'workspace-empty'); empty.setAttribute('role', 'status');
+        empty.append(el('strong'), el('p'));
+        page.append(filters, content, empty);
+        workspace.lists.set(id, { content, filters, empty, summary, filterKey,
+          selector: id === 'campaigns' ? '[data-attack-retry-campaign]' : '[data-fleet-wait-job]' });
+      }
+      workspace.views.set(id, page);
+      button.addEventListener('click', () => {
+        ui.cancelPriorityDrag?.();
+        workspace.scroll.set(state.fleetView, ui.scroll.scrollTop);
+        save({ fleetView: id }); syncSettingsTabs();
+        ui.scroll.scrollTop = workspace.scroll.get(id) || 0;
+      });
+    }
+    const buttons = [...nav.querySelectorAll('button')];
+    buttons.forEach((button, index) => button.addEventListener('keydown', event => {
+      const target = event.key === 'ArrowRight' ? (index + 1) % buttons.length
+        : event.key === 'ArrowLeft' ? (index + buttons.length - 1) % buttons.length
+          : event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : null;
+      if (target === null) return;
+      event.preventDefault(); buttons[target].click(); buttons[target].focus();
+    }));
+    ui.fleetDetails.append(nav, ...workspace.views.values());
+
+    // Put automatic synchronization before deliberate full-backup restoration.
+    const dataPage = shadow.querySelector('[data-page="data"]');
+    dataPage.prepend(ui.driveContainer);
+    const density = el('div', undefined, 'workspace-density');
+    density.setAttribute('role', 'group'); density.setAttribute('aria-label', 'Densidad de la interfaz');
+    density.append(el('span', 'Densidad'));
+    for (const [value, label] of [['comfortable', 'Cómoda'], ['compact', 'Compacta']]) {
+      const button = el('button', label); button.type = 'button'; button.dataset.helperDensity = value;
+      button.addEventListener('click', () => { save({ density: value }); syncHelperWorkspace(); });
+      density.append(button);
+    }
+    ui.panelWidth.closest('.backup-card').insertBefore(density, ui.panelWidth.closest('.backup-card').querySelector('.panel-width-label'));
+    ui.driveShortcut.addEventListener('click', () => {
+      ui.tabs.find(tab => tab.dataset.settingsTab === 'data').click();
+      ui.scroll.scrollTop = 0;
+      ui.driveContainer.querySelector('button')?.focus({ preventScroll: true });
+    });
+    const observer = new MutationObserver(() => syncHelperWorkspace());
+    for (const { content } of workspace.lists.values()) observer.observe(content, { childList: true, subtree: true });
+    workspace.observer = observer;
+    syncHelperWorkspace();
+  }
+
+  function syncHelperWorkspace() {
+    const workspace = ui?.workspace;
+    if (!workspace) return;
+    const { state } = workspace;
+    ui.section.dataset.density = state.density;
+    for (const [id, page] of workspace.views) {
+      const selected = state.fleetView === id;
+      page.hidden = !selected;
+      const { button } = workspace.controls.get(id);
+      button.setAttribute('aria-selected', String(selected)); button.tabIndex = selected ? 0 : -1;
+    }
+    ui.eta.hidden = !['buildings', 'fleet'].includes(settings.activeTab)
+      || settings.activeTab === 'fleet' && state.fleetView !== 'minimums';
+    let totalAttention = 0;
+    for (const [id, list] of workspace.lists) {
+      const cards = [...list.content.querySelectorAll(list.selector)];
+      const records = cards.map(card => ({ status: card.dataset.operationStatus, attention: card.dataset.operationAttention === 'true' }));
+      const summary = helperOperationSummary(records, state[list.filterKey]);
+      totalAttention += summary.attention;
+      cards.forEach((card, index) => {
+        const hidingFocus = !summary.visible[index] && card.contains(card.getRootNode().activeElement);
+        card.hidden = !summary.visible[index];
+        if (hidingFocus) list.filters.querySelector(`[data-operation-filter="${state[list.filterKey]}"]`)?.focus({ preventScroll: true });
+      });
+      for (const button of list.filters.querySelectorAll('button')) {
+        const selected = button.dataset.operationFilter === state[list.filterKey];
+        button.setAttribute('aria-pressed', String(selected));
+        const n = button.dataset.operationFilter === 'all' ? summary.total : button.dataset.operationFilter === 'attention' ? summary.attention : summary.pending;
+        const label = button.dataset.operationFilter === 'all' ? 'Todas' : button.dataset.operationFilter === 'attention' ? 'Revisar' : 'Pendientes';
+        setText(button, `${label} ${n}`);
+      }
+      const shown = summary.visible.filter(Boolean).length;
+      setText(list.summary, `${shown} de ${summary.total}`);
+      list.empty.hidden = shown > 0;
+      const emptyTitle = summary.total === 0 ? (id === 'campaigns' ? 'Sin campañas todavía' : 'No hay misiones pendientes')
+        : state[list.filterKey] === 'attention' ? 'Nada que revisar' : 'Todo al día';
+      const emptyDescription = summary.total === 0
+        ? id === 'campaigns' ? 'Configura los reintentos. Las nuevas derrotas aparecerán aquí cuando generen una campaña.'
+          : 'Selecciona un destino y un preset. Si faltan naves, elige esperar o producirlas para añadir una misión.'
+        : state[list.filterKey] === 'attention' ? 'No hay elementos en pausa, sin confirmar o con una edición pendiente.'
+          : 'Las operaciones finalizadas siguen disponibles en Todas.';
+      setText(list.empty.querySelector('strong'), emptyTitle);
+      setText(list.empty.querySelector('p'), emptyDescription);
+      const control = workspace.controls.get(id);
+      setText(control.count, String(summary.pending)); control.count.hidden = summary.pending === 0;
+      control.count.dataset.tone = summary.attention ? 'warning' : '';
+      control.button.setAttribute('aria-label', `${control.label}: ${summary.pending} pendientes, ${summary.attention} para revisar`);
+    }
+    const fleetTab = ui.tabs.find(tab => tab.dataset.settingsTab === 'fleet');
+    fleetTab.dataset.attention = String(totalAttention > 0);
+    fleetTab.title = totalAttention ? `${totalAttention} elementos requieren revisión` : 'Mínimos, campañas y misiones';
+    for (const button of ui.section.querySelectorAll('[data-helper-density]')) button.setAttribute('aria-pressed', String(button.dataset.helperDensity === state.density));
+    const status = driveBackup?.getStatus?.() || null;
+    const drive = helperDriveIndicator(status);
+    setText(ui.driveShortcut, drive.text); ui.driveShortcut.dataset.tone = drive.tone;
+    ui.driveShortcut.title = `${status?.message || 'Google Drive no está disponible.'} Abrir ajustes de sincronización.`;
+    ui.driveShortcut.setAttribute('aria-label', ui.driveShortcut.title);
+    const system = text(document.querySelector('[data-field="nameplate-name"]'));
+    setText(ui.contextLabel, system || 'Selecciona un sistema');
+    ui.contextLabel.title = system || 'Selecciona un sistema del juego para ver sus datos';
+  }
+  // END HELPER WORKSPACE
+
   function mount() {
     if (host?.isConnected) return;
     if (!host) {
@@ -1742,11 +1946,68 @@
             .priority-row { grid-template-columns:20px 13px minmax(0,1fr) 64px; gap:4px; padding-left:4px; padding-right:4px; }
             .fleet-row { grid-template-columns:20px 13px minmax(0,1fr) 68px; padding-left:4px; padding-right:4px; gap:4px; }
             .fleet-row > input { width:68px; } .helper-footer { font-size:10px; } }
+
+          /* Workspace navigation and responsive presentation. */
+          .helper-header { padding:13px 12px 11px; background:linear-gradient(145deg,#162938 0%,var(--ol-bg) 80%); border-bottom:1px solid #263e5033; }
+          .helper-context { display:block; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:10.5px; color:var(--ol-muted); margin-top:3px; }
+          .helper-shell.minimized .helper-context { display:none; }
+          .helper-version { padding:2px 5px; border:1px solid var(--ol-border); border-radius:4px; font-size:10px; }
+          .settings-tabs { margin-top:7px; }
+          .settings-tabs button { position:relative; min-height:40px; font-size:12px; }
+          .settings-tabs button[data-attention="true"]::after { content:''; position:absolute; right:5px; top:5px; width:6px; height:6px; border-radius:50%; background:var(--ol-warning); }
+          .helper-scroll { scrollbar-gutter:stable; }
+          .settings-page[role="tabpanel"]:focus-visible, [data-fleet-view]:focus-visible { outline:2px solid var(--ol-focus); outline-offset:-2px; border-radius:8px; }
+          .fleet-workspace-tabs { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:4px; padding:4px; margin:0 0 14px; border:1px solid var(--ol-border); border-radius:9px; background:#080f17; }
+          .fleet-workspace-tabs button { display:flex; align-items:center; justify-content:center; gap:4px; min-width:0; min-height:38px; padding:6px 3px; font-size:11.5px; border-color:transparent; background:transparent; color:var(--ol-muted); }
+          .fleet-workspace-tabs button[aria-selected="true"] { color:var(--ol-text); background:var(--ol-surface-raised); border-color:var(--ol-border-strong); }
+          .workspace-count { font-size:10px; padding:1px 4px; border-radius:4px; font-variant-numeric:tabular-nums; background:var(--ol-accent-bg); color:var(--ol-accent); }
+          .workspace-count[data-tone="warning"] { background:#352d20; color:var(--ol-warning); }
+          .workspace-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px; }
+          .workspace-list-summary { font-size:11px; color:var(--ol-muted); font-variant-numeric:tabular-nums; }
+          .workspace-filters { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:5px; margin-bottom:12px; }
+          .workspace-filters button { min-width:0; min-height:35px; padding:6px 3px; font-size:11px; color:var(--ol-muted); background:transparent; border-color:var(--ol-border); }
+          .workspace-filters button[aria-pressed="true"], .workspace-density button[aria-pressed="true"] { color:var(--ol-accent); background:var(--ol-accent-bg); border-color:#356959; }
+          .workspace-empty { padding:24px 14px; margin-top:12px; border:1px dashed var(--ol-border-strong); border-radius:10px; text-align:center; background:var(--ol-surface); }
+          .workspace-empty strong { font-size:13px; font-weight:600; }
+          .workspace-empty p { color:var(--ol-muted); font-size:12px; line-height:1.6; }
+          .workspace-density { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin:12px 0; font-size:12px; }
+          .workspace-density > span { flex:1; }
+          .workspace-density button { font-size:11.5px; min-height:34px; padding:6px 8px; }
+          .helper-footer { align-items:center; min-height:39px; padding:4px 10px; gap:4px; color:var(--ol-muted); }
+          .helper-drive-shortcut { min-width:0; min-height:30px; max-width:60%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:4px 6px; border-color:transparent; background:transparent; color:var(--ol-muted); font-size:10.5px; }
+          .helper-drive-shortcut[data-tone="ready"] { color:var(--ol-accent); }
+          .helper-drive-shortcut[data-tone="working"] { color:var(--ol-focus); }
+          .helper-drive-shortcut[data-tone="warning"] { color:var(--ol-warning); border-color:#806b40; background:#352d20; }
+          .helper-resize { bottom:40px; }
+          .settings-page > [data-field="drive-backup"] { margin-top:0; margin-bottom:12px; }
+          [data-fleet-view="campaigns"] .oldlight-attack-retry { margin-top:0; padding:0; border:0; background:transparent; }
+          .oldlight-attack-retry .ar-settings { margin-top:0; background:var(--ol-surface); }
+          [data-fleet-view="missions"] .oldlight-fleet-wait { margin-top:0; }
+          .helper-shell[data-density="comfortable"] .priority-row { min-height:61px; }
+          .helper-shell[data-density="compact"] .priority-row { min-height:47px; padding-top:4px; padding-bottom:4px; }
+          .helper-shell[data-density="compact"] .fleet-row { padding-top:6px; padding-bottom:6px; }
+          .helper-shell[data-density="compact"] .choices { gap:4px; }
+          @container helper (max-width:330px) {
+            .helper-header { padding:10px 9px; gap:5px; }
+            .helper-grip { display:none; }
+            .page-heading { flex-wrap:wrap; }
+            .helper-scroll { padding-left:9px; padding-right:9px; }
+            .settings-tabs { margin-left:9px; margin-right:9px; }
+            .helper-context { max-width:150px; }
+          }
+          @media (pointer:coarse) {
+            button, .settings-tabs button, .fleet-workspace-tabs button, .workspace-filters button, .workspace-density button { min-height:44px; }
+            .priority-actions button { min-height:38px; }
+            .helper-minimize { width:38px; }
+            .helper-drive-shortcut { min-height:36px; }
+          }
+          @media (max-height:500px) { .helper-header { padding-top:7px; padding-bottom:7px; } .settings-tabs { margin-top:3px; margin-bottom:6px; } }
+
           @media (prefers-reduced-motion:reduce) { button { transition:none; } }
         </style>
         <section class="helper-shell" aria-label="Old Light Helper">
           <header class="helper-header" title="Arrastra la cabecera para mover el helper">
-            <div class="helper-title"><span class="helper-grip" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="5" stroke="currentColor" stroke-width="1.3"/><ellipse cx="12" cy="12" rx="11" ry="4" transform="rotate(-40 12 12)" stroke="currentColor" stroke-width="1.2"/><circle cx="19.3" cy="6" r="1.5" fill="currentColor"/></svg></span><div class="helper-title-copy"><div class="helper-title-line"><strong>Old Light</strong><span class="helper-version" data-field="script-version" title="Versión del helper">v${SCRIPT_VERSION}</span></div><span class="helper-eta-compact" data-field="upgrade-eta-compact"></span></div></div>
+            <div class="helper-title"><span class="helper-grip" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="5" stroke="currentColor" stroke-width="1.3"/><ellipse cx="12" cy="12" rx="11" ry="4" transform="rotate(-40 12 12)" stroke="currentColor" stroke-width="1.2"/><circle cx="19.3" cy="6" r="1.5" fill="currentColor"/></svg></span><div class="helper-title-copy"><div class="helper-title-line"><strong>Old Light</strong><span class="helper-version" data-field="script-version" title="Versión del helper">v${SCRIPT_VERSION}</span></div><span class="helper-context" data-field="helper-context">Selecciona un sistema</span><span class="helper-eta-compact" data-field="upgrade-eta-compact"></span></div></div>
             <button type="button" data-action="automation-toggle" aria-pressed="true"></button>
             <button type="button" class="helper-minimize" data-action="helper-minimize" aria-expanded="true" aria-label="Minimizar helper" title="Minimizar helper">−</button>
           </header>
@@ -1763,7 +2024,7 @@
               <small class="upgrade-eta-detail" data-field="upgrade-eta-detail"></small>
             </div>
             <p class="helper-alert" role="alert" hidden></p>
-            <details class="settings-page building-page" data-page="buildings" id="oldlight-settings-buildings" role="tabpanel" aria-labelledby="oldlight-tab-buildings" open><summary>Edificios</summary>
+            <details class="settings-page building-page" data-page="buildings" id="oldlight-settings-buildings" role="tabpanel" tabindex="0" aria-labelledby="oldlight-tab-buildings" open><summary>Edificios</summary>
               <div class="page-heading"><h3>Prioridades de mejora</h3><span class="count-badge" data-field="building-count"></span></div>
               <p class="page-intro">Se mejora el primer edificio disponible que tengas marcado.</p>
               <div class="choices" role="list" aria-label="Prioridad de edificios"></div>
@@ -1775,7 +2036,7 @@
               </details>
               <div data-field="level-targets"></div>
             </details>
-            <details class="settings-page fleet-details" data-page="fleet" id="oldlight-settings-fleet" role="tabpanel" aria-labelledby="oldlight-tab-fleet" open hidden><summary>Flota</summary>
+            <details class="settings-page fleet-details" data-page="fleet" id="oldlight-settings-fleet" role="tabpanel" tabindex="0" aria-labelledby="oldlight-tab-fleet" open hidden><summary>Flota</summary>
               <div class="page-heading"><h3>Flota mínima</h3><span class="count-badge">Prioridad sobre edificios</span></div>
               <p class="page-intro">Ordena las naves e indica cuántas mantener. 0 desactiva su reposición.</p>
               <div class="fleet-choices" role="list" aria-label="Mínimos y prioridad de naves"></div>
@@ -1787,8 +2048,8 @@
                 <p class="hint">Selecciona un preset junto al sector para enviarlo. Si faltan naves, puedes esperar o producirlas.</p>
               </div>
             </details>
-            <div class="settings-page" data-page="notifications" id="oldlight-settings-notifications" role="tabpanel" aria-labelledby="oldlight-tab-notifications" hidden></div>
-            <div class="settings-page" data-page="data" id="oldlight-settings-data" role="tabpanel" aria-labelledby="oldlight-tab-data" hidden>
+            <div class="settings-page" data-page="notifications" id="oldlight-settings-notifications" role="tabpanel" tabindex="0" aria-labelledby="oldlight-tab-notifications" hidden></div>
+            <div class="settings-page" data-page="data" id="oldlight-settings-data" role="tabpanel" tabindex="0" aria-labelledby="oldlight-tab-data" hidden>
               <div class="backup-card"><h3>Copias de seguridad</h3>
                 <p class="page-intro">Los cambios se guardan automáticamente en este navegador.</p>
                 <div class="backup-actions"><button type="button" data-action="export-settings">Exportar todo</button><button type="button" data-action="choose-import-settings">Importar copia</button></div>
@@ -1806,12 +2067,14 @@
             </div>
             <details class="helper-activity" data-ui-section="automationDetails"><summary>Actividad del helper</summary><p class="helper-status" role="status"></p><small class="helper-last"></small></details>
           </div>
-          <footer class="helper-footer"><span class="helper-save-state">Autoguardado local</span><span>Arrastra para mover</span></footer>
+          <footer class="helper-footer"><span class="helper-save-state">Autoguardado local</span><button type="button" class="helper-drive-shortcut" data-action="drive-shortcut">Conectar Drive</button></footer>
           <button type="button" class="helper-resize" data-action="helper-resize" role="separator" aria-orientation="vertical" aria-label="Ajustar ancho del helper" aria-valuemin="300" aria-valuemax="560" aria-valuenow="360" title="Arrastra hacia la izquierda para ampliar. Usa las flechas para ajustar; doble clic para restablecer."></button>
           <span class="sr-only" data-field="reorder-status" role="status" aria-live="polite"></span>
         </section>`;
       ui = {
         section: shadow.querySelector('section'),
+        contextLabel: shadow.querySelector('[data-field="helper-context"]'),
+        driveShortcut: shadow.querySelector('[data-action="drive-shortcut"]'),
         header: shadow.querySelector('header'),
         minimize: shadow.querySelector('[data-action="helper-minimize"]'),
         toggle: shadow.querySelector('[data-action="automation-toggle"]'),
@@ -2083,6 +2346,7 @@
       const notificationDetails = ui.notificationContainer.querySelector('.notifications-details');
       if (notificationDetails) notificationDetails.open = true;
       installPresentationPreferences(shadow);
+      installHelperWorkspace(shadow);
       syncSettingsTabs();
     }
     document.body.append(host);
@@ -2384,6 +2648,7 @@
     }
     if (ui.conditionsDetails.open !== settings.conditionsExpanded) ui.conditionsDetails.open = settings.conditionsExpanded;
     syncPresentationSections();
+    syncHelperWorkspace();
   }
 
   function presentationFailure(message) {
@@ -2772,7 +3037,7 @@
     if (!ui) return;
     setText(ui.toggle, settings.enabled ? 'Pausar' : 'Reanudar');
     ui.toggle.setAttribute('aria-pressed', String(settings.enabled));
-    ui.toggle.title = settings.enabled ? 'Pausar automatización' : 'Reanudar automatización';
+    ui.toggle.title = settings.enabled ? 'Pausar mejoras y reposición. No cancela misiones ni campañas.' : 'Reanudar mejoras y reposición';
     ui.toggle.setAttribute('aria-label', ui.toggle.title);
     setText(ui.status, message);
     setText(ui.last, lastClick ? `Última solicitud: ${lastClick}` : '');
@@ -5634,6 +5899,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         for (const { job, plan, editing } of jobs) {
           const article = el('article');
           article.dataset.fleetWaitJob = job.id;
+          article.dataset.operationStatus = job.status;
+          article.dataset.operationAttention = String(Boolean(job.needsReview || editing));
           const statuses = { paused: 'Pausada', sending: 'Enviando…', sent: 'Enviada',
             uncertain: 'Envío sin confirmar. Comprueba las misiones del juego.' };
           let state = statuses[job.status];
@@ -6898,6 +7165,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         awaiting_report: 'Esperando resultado', paused: 'En pausa', uncertain: 'Revisión necesaria', completed: 'Completada', cancelled: 'Cancelada', limit: 'Límite alcanzado' };
       const cards = value.campaigns.map(campaign => {
         const card = el('article'); card.dataset.attackRetryCampaign = campaign.id;
+        card.dataset.operationStatus = campaign.status;
+        card.dataset.operationAttention = String(Boolean(campaign.fleetEdit && fleetEditable(campaign)));
         const heading = el('div', undefined, 'ar-card-heading');
         const editing = Boolean(campaign.fleetEdit && fleetEditable(campaign));
         const badge = el('span', editing ? 'Edición pendiente' : labels[campaign.status], 'ar-badge');
@@ -6941,12 +7210,13 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       mounted = container; cardsKey = '';
       const doc = container.ownerDocument;
       const el = (tag, content, className) => { const result = doc.createElement(tag); if (content !== undefined) result.textContent = content; if (className) result.className = className; return result; };
-      const details = el('details', undefined, 'oldlight-attack-retry');
+      const wrapper = el('section', undefined, 'oldlight-attack-retry');
+      const details = el('details', undefined, 'ar-settings');
       details.dataset.attackRetry = '';
       const style = el('style');
       style.textContent = `
         .oldlight-attack-retry{font:inherit;color:var(--ol-text,#e5eef6);min-width:0;max-width:100%;margin:14px 0 0;padding:12px;border:1px solid var(--ol-border,#2b4053);border-radius:var(--ol-radius,10px);background:var(--ol-surface,#131f2b)}
-        .oldlight-attack-retry>summary{font-size:13px;font-weight:650;cursor:pointer;color:var(--ol-text,#e5eef6);line-height:1.5}
+        .oldlight-attack-retry .ar-settings>summary{font-size:13px;font-weight:650;cursor:pointer;color:var(--ol-text,#e5eef6);line-height:1.5}
         .oldlight-attack-retry .ar-mode,.oldlight-attack-retry .ar-badge{display:inline-block;font-size:11.5px;font-weight:500;line-height:1.35;border:1px solid var(--ol-border,#2b4053);border-radius:999px;padding:3px 7px;color:var(--ol-muted,#a2b5c6);background:var(--ol-surface-raised,#192939)}
         .oldlight-attack-retry .ar-mode{margin-left:7px}.oldlight-attack-retry .ar-mode[data-active=true]{background:var(--ol-accent-bg,#183c36);color:var(--ol-accent,#7de2c2);border-color:var(--ol-accent-bg,#183c36)}
         .oldlight-attack-retry .ar-count{display:inline-block;font-size:11.5px;font-weight:400;color:var(--ol-muted,#a2b5c6);margin-left:7px}
@@ -7010,11 +7280,12 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       status.setAttribute('role', 'status'); limitHint.setAttribute('role', 'status');
       options.append(limitHint, el('p', 'Se aplican a derrotas posteriores a su activación. Los mínimos usan el sistema seleccionado y respetan la prioridad de flota y la pausa del helper.', 'ar-muted'),
         el('p', 'Los reintentos conservan las demás naves y se detienen al ganar, capturar el sistema o necesitar revisión.', 'ar-muted'));
-      details.append(options, status, cards);
+      details.append(options);
+      wrapper.append(details, status, cards);
       details.addEventListener('toggle', () => {
         if (config && details.open !== config.expanded) try { setConfig({ expanded: details.open }); } catch (error) { showError(error); }
       });
-      ui = { details, mode, count, enable, minimums, minimumStatus, produce, limit, limitHint, status, cards }; mounted.replaceChildren(details); render();
+      ui = { details, mode, count, enable, minimums, minimumStatus, produce, limit, limitHint, status, cards }; mounted.replaceChildren(wrapper); render();
     }
     function destroy() { destroyed = true; epoch += 1; mounted?.replaceChildren(); mounted = null; ui = null; }
     refreshConfig();
@@ -10470,7 +10741,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     }
 
     window.addEventListener('message', onWindowMessage);
-    return { mount, notifyChanged, exportConfig, importConfig, validateConfig, destroy };
+    function getStatus() { return { code: statusCode, message: LABELS[statusCode], autoSync: config.autoSync !== false }; }
+    return { mount, notifyChanged, exportConfig, importConfig, validateConfig, getStatus, destroy };
   }
   // END DRIVE BACKUP
 
