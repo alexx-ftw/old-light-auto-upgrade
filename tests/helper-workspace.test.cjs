@@ -78,3 +78,7 @@ test('Release metadata agrees with the visible version', () => {
   assert.equal(source.match(/@version\s+([^\s]+)/)[1], version);
   assert.equal(meta.match(/@version\s+([^\s]+)/)[1], version);
 });
+
+test('Bridge recovery remains in progress instead of asking for a new Google authorization', () => {
+  assert.deepEqual(drive({ code: 'bridge_reconnecting' }), { text: 'Conectando Drive…', tone: 'working' });
+});

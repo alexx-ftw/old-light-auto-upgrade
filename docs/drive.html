@@ -8,17 +8,17 @@
   <title>Sincronización de Old Light</title>
   <link rel="stylesheet" href="./drive.css?v=1.11.0">
   <script src="./sync-core.js?v=1.11.0" defer></script>
-  <script src="./drive.js?v=1.11.0" defer></script>
+  <script src="./drive.js?v=1.13.1" defer></script>
 </head>
 <body>
   <main>
     <header>
       <p class="eyebrow">OLD LIGHT · AUTO UPGRADE</p>
       <h1>Tus ajustes en Google Drive</h1>
-      <p>Conecta Google una vez por sesión. Los ajustes se envían y reciben automáticamente mientras la conexión esté activa.</p>
+      <p>Conecta Google una vez. Con el helper actualizado, esta ventana se cierra al autorizar y Drive continúa dentro del userscript hasta que caduque el token.</p>
     </header>
     <section aria-labelledby="connection-heading">
-      <div class="section-heading"><h2 id="connection-heading">Google Drive</h2><span class="version">v1.11.0</span></div>
+      <div class="section-heading"><h2 id="connection-heading">Google Drive</h2><span class="version">v1.13.1</span></div>
       <p id="account" class="account">Sin sesión iniciada</p>
       <p id="session-status" class="connection-status" role="status" aria-live="polite">Conectando con el helper…</p>
       <p id="expiry" class="note"></p>
@@ -84,11 +84,11 @@
         <p>¿Retirar el permiso de esta aplicación? Para volver a usar las copias tendrás que autorizarla de nuevo.</p>
         <div class="actions"><button id="confirm-revoke" type="button">Retirar permiso</button><button id="cancel-revoke" type="button" class="secondary">Cancelar</button></div>
       </div>
-      <p class="note">El token de Google solo permanece en la memoria de esta ventana. Al caducar, vuelve a iniciar sesión. No se guarda en las copias.</p>
+      <p class="note">El token temporal se conserva en almacenamiento privado de Violentmonkey hasta caducar o desconectar. No se incluye en las exportaciones, copias, métricas ni sincronización del Helper. No está cifrado por el Helper y una exportación completa del gestor puede incluirlo; desconecta antes de compartirla. No se guarda un refresh token ni se renueva sin un clic.</p>
       <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener noreferrer">Ver permisos en tu cuenta de Google</a>
     </details>
     <footer>
-      <p>Las copias son privadas de esta aplicación. Mantén esta ventana abierta y autorizada para sincronizar automáticamente. La restauración de una copia completa continúa siendo una acción manual independiente.</p>
+      <p>Las copias son privadas de esta aplicación. El helper actualizado sincroniza sin mantener esta ventana abierta mientras la autorización esté vigente. La restauración de una copia completa continúa siendo una acción manual independiente.</p>
       <a href="https://github.com/alexx-ftw/old-light-auto-upgrade#copias-en-google-drive" target="_blank" rel="noopener noreferrer">Código e instrucciones</a>
     </footer>
   </main>

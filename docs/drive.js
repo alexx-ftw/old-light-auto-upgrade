@@ -1,5 +1,7 @@
-(() => {
+(function createDriveRuntime(runtimeOptions) {
   'use strict';
+  runtimeOptions = runtimeOptions || {};
+  const headless = runtimeOptions.headless === true;
 
   const PROTOCOL = 'old-light-drive-v1';
   const GAME_ORIGIN = 'https://oldlight.io';
@@ -26,7 +28,8 @@
     connecting: 'Esperando tu autorización de Google…',
     renewing: 'Renovando la conexión con Google Drive…',
     switching_account: 'Elige la cuenta de Google que quieres usar.',
-    connected: 'Conexión activa con Google Drive.',
+    verifying: 'Comprobando la cuenta de Google antes de recuperar Drive…',
+    connected: 'Conexión activa con Google Drive. Puedes cerrar esta ventana de gestión.',
     syncing: 'Sincronizando ajustes entre dispositivos…',
     synced: 'Ajustes sincronizados automáticamente.',
     sync_pending: 'Hay cambios pendientes de sincronizar.',
@@ -55,7 +58,8 @@
     library_loading: 'Cargando la conexión con Google…',
     library_error: 'No se pudo conectar con Google. Pulsa Reintentar conexión.',
     library_timeout: 'Google no terminó de cargar. Comprueba tu conexión y vuelve a intentarlo.',
-    bridge_lost: 'Se perdió el enlace con el helper. Abre una nueva ventana desde Old Light.',
+    bridge_lost: 'No hay enlace activo con Old Light. Mantén esta ventana abierta: se recuperará al volver al juego.',
+    bridge_reconnecting: 'Recuperando el enlace con Old Light; tu autorización vigente se conserva.',
     revoking: 'Retirando el permiso de Google…',
     revoked: 'Google confirmó que el permiso de esta aplicación ha sido retirado.',
     revoke_failed: 'No se pudo confirmar la retirada del permiso. Puedes revisarlo en tu cuenta de Google.',
@@ -81,15 +85,15 @@
     invalid_backup: 'La copia debe tener un formato compatible, superar la comprobación SHA-256 y no exceder 1 MiB.',
   };
   const CONNECTION_CODES = new Set(['waiting', 'bridge_ready', 'missing_client', 'disconnected', 'connecting',
-    'renewing', 'switching_account', 'connected', 'renew_soon', 'expired', 'denied', 'permission_missing',
+    'renewing', 'switching_account', 'verifying', 'connected', 'renew_soon', 'expired', 'denied', 'permission_missing',
     'popup_blocked', 'auth_closed', 'auth_cancelled', 'auth_timeout', 'auth_error', 'invalid_client', 'auth_origin',
-    'library_loading', 'library_error', 'library_timeout', 'bridge_lost', 'revoking', 'revoked', 'revoke_failed']);
+    'library_loading', 'library_error', 'library_timeout', 'bridge_lost', 'bridge_reconnecting', 'revoking', 'revoked', 'revoke_failed']);
   const ui = Object.fromEntries(['status', 'connect', 'disconnect', 'automatic', 'save', 'refresh', 'backups',
     'empty', 'restore', 'account', 'session-status', 'expiry', 'switch-account', 'cancel-auth', 'retry-library',
     'remember-account', 'auto-backup', 'auto-sync', 'sync-status', 'client-id', 'choose-client-file', 'import-client', 'clear-client',
     'copy-origin', 'setup', 'setup-status', 'technical-status', 'preferences-status', 'account-settings-status',
     'revoke', 'confirm-revoke', 'cancel-revoke', 'revoke-confirmation']
-    .map(id => [id, document.getElementById(id)]));
+    .map(id => [id, headless ? document.createElement('div') : document.getElementById(id)]));
   const pending = new Map();
   const requests = new Set();
   let port = null;
@@ -103,6 +107,9 @@
   let configSaveFailed = false;
   let clientDraftTimer = null;
   let token = null;
+  let restoredAuthorizationId = '';
+  let restoredAccountId = '';
+  let accountVerified = false;
   let expiresAt = 0;
   let expirationTimer = null;
   let account = null;
@@ -126,6 +133,7 @@
   let requestCounter = 0;
   let readyTimer = null;
   let bootstrapTimer = null;
+  let resumeAllowed = true;
   let closed = false;
   let libraryState = 'idle';
   let libraryAttempt = 0;
@@ -248,6 +256,8 @@
     if (!syncEnabled()) return;
     const expected = generation;
     assertCurrent(expected);
+    if (restoredAuthorizationId && !accountVerified) await verifyStoredAccount(expected);
+    assertCurrent(expected);
     const identity = accountKey();
     if (!identity) throw error('sync_account');
     const startedRevision = syncChangeRevision;
@@ -307,7 +317,7 @@
     render();
   }
 
-  function isAuthorized() { return Boolean(bridgeAlive && config.clientId && token && expiresAt > Date.now()); }
+  function isAuthorized() { return Boolean(bridgeAlive && configReady && config.clientId && token && expiresAt > Date.now()); }
   function gisAvailable() { return typeof window.google?.accounts?.oauth2?.initTokenClient === 'function'; }
   function accountKey(value = account) { return value?.id ? `id:${value.id}` : value?.email ? `email:${value.email.toLowerCase()}` : ''; }
 
@@ -319,7 +329,7 @@
   }
 
   function render() {
-    const authorized = isAuthorized();
+    const authorized = isAuthorized() && (!restoredAuthorizationId || accountVerified);
     const editable = bridgeAlive && configReady && capabilities.has('oauth-config');
     ui.connect.disabled = !bridgeAlive || !config.clientId || !gisAvailable() || authPending || busy || revoking || configWrites > 0;
     ui.connect.textContent = authorized ? 'Renovar conexión' : 'Iniciar sesión con Google';
@@ -328,7 +338,7 @@
     ui['switch-account'].hidden = !account && !config.accountHint;
     ui['cancel-auth'].hidden = !authPending;
     ui['retry-library'].hidden = !['error', 'timeout'].includes(libraryState);
-    ui.disconnect.disabled = !bridgeAlive || revoking || (!token && !authPending && !account);
+    ui.disconnect.disabled = revoking || (!token && !authPending && !account);
     ui.revoke.disabled = !authorized || authPending || busy || revoking || configWrites > 0 || typeof window.google?.accounts?.oauth2?.revoke !== 'function';
     ui['confirm-revoke'].disabled = ui.revoke.disabled;
     ui.save.disabled = !authorized || busy || authPending || revoking || configWrites > 0;
@@ -339,6 +349,7 @@
     ui['clear-client'].disabled = !editable || revoking || (!config.clientId && config.clientIdDraft === null);
     let connection = STATUS[connectionCode];
     if (authPending || revoking) connection = STATUS[connectionCode];
+    else if (isAuthorized() && restoredAuthorizationId && !accountVerified) connection = STATUS[statusCode === 'sync_account' ? 'sync_account' : 'verifying'];
     else if (authorized) {
       connection = expiresAt - Date.now() <= 300000 ? STATUS.renew_soon : STATUS.connected;
       if (['auth_closed', 'auth_cancelled', 'auth_timeout', 'denied', 'permission_missing', 'auth_error', 'popup_blocked',
@@ -359,7 +370,7 @@
       account ? 'La cuenta sigue identificada; necesitas renovar la autorización para usar Drive.' : '';
     ui.automatic.textContent = !config.autoBackup ? 'Copia automática desactivada.' :
       autoBlocked ? 'Copia automática detenida. Actualiza la lista para reanudarla.' :
-        authorized ? dirty ? 'Cambios pendientes. La copia se guardará al terminar de editar.' : 'Copia automática activada mientras esta ventana siga conectada.' :
+        authorized ? dirty ? 'Cambios pendientes. La copia se guardará al terminar de editar.' : 'Copia automática activada mientras el helper siga conectado.' :
           dirty ? 'Cambios pendientes guardados en local. Vuelve a conectar la misma cuenta para copiarlos a Drive.' :
             'Copia automática configurada. Requiere conexión y autorización vigentes.';
     syncConfigControls();
@@ -389,6 +400,7 @@
     authAttempt += 1;
     authPending = false;
     token = null;
+    restoredAuthorizationId = ''; restoredAccountId = ''; accountVerified = false;
     expiresAt = 0;
     clearTimeout(expirationTimer);
     clearTimeout(autoTimer);
@@ -405,6 +417,7 @@
   }
 
   function expireToken() {
+    post({ type: 'authorization-invalid', code: 'expired' });
     clearTimeout(syncTimer);
     token = null;
     expiresAt = 0;
@@ -418,20 +431,34 @@
     else render();
   }
 
-  function disconnectGoogle(code = 'disconnected') { clearAuth(); autoBlocked = false; status(code); }
+  function disconnectGoogle(code = 'disconnected') {
+    post({ type: 'authorization-invalid', code });
+    clearAuth(); autoBlocked = false; status(code);
+  }
 
-  function loseBridge() {
-    if (!bridgeAlive && !port) return;
+  function loseBridge({ forgetAuthorization = false } = {}) {
+    if (!bridgeAlive && !port && !forgetAuthorization) return;
     try { port?.postMessage({ protocol: PROTOCOL, type: 'bye', code: 'bridge_lost' }); } catch (_) { /* closed */ }
     bridgeAlive = false;
-    clearAuth();
+    configReady = false;
+    // A dead MessagePort is not an expired Google token. Abort in-flight work,
+    // keep the token in this window's memory, and rebind only to the original tab.
+    generation += 1;
+    authAttempt += 1;
+    authPending = false;
+    clearTimeout(authTimer); authTimer = null;
+    clearTimeout(autoTimer); clearTimeout(syncTimer);
+    if (revoking) clearAuth();
+    for (const controller of requests) controller.abort();
+    requests.clear();
     clearInterval(heartbeatTimer);
     clearTimeout(clientDraftTimer);
     for (const item of pending.values()) { clearTimeout(item.timeout); item.reject(error('bridge_lost')); }
     pending.clear();
     try { port?.close(); } catch (_) { /* already closed */ }
     port = null;
-    status('bridge_lost');
+    if (forgetAuthorization) { resumeAllowed = false; clearInterval(readyTimer); clearAuth(); }
+    status(forgetAuthorization ? 'bridge_lost' : 'bridge_reconnecting');
   }
 
   function rpc(type, fields = {}) {
@@ -479,16 +506,45 @@
     if (first) {
       if (!capabilities.has('oauth-config')) ui['setup-status'].textContent = 'Actualiza el userscript a la versión 1.4.0 para configurar los ajustes desde esta ventana.';
     }
-    if (clientChanged || first) status(config.clientId ? 'bridge_ready' : 'missing_client');
+    if (isAuthorized()) status('connected');
+    else if (clientChanged || first) status(!config.clientId ? 'missing_client' : account ? 'expired' : 'bridge_ready');
     else render();
+    scheduleAuto();
     scheduleSync(1000);
   }
 
   function onPortMessage(event) {
     const message = event.data;
     if (!bridgeAlive || !message || message.protocol !== PROTOCOL) return;
+    if (message.type === 'resume-pending-backup') {
+      if (config.autoBackup && isAuthorized() && message.account === accountKey()) {
+        dirty = true; dirtyOwner = message.account; scheduleAuto();
+      }
+      return;
+    }
+    if (message.type === 'restore-authorization') {
+      const auth = message.authorization;
+      if (!configReady || !auth || auth.clientId !== config.clientId || typeof auth.accessToken !== 'string'
+          || !/^[\x21-\x7e]{1,8192}$/.test(auth.accessToken) || !Number.isSafeInteger(auth.expiresAt)
+          || auth.expiresAt <= Date.now() || auth.expiresAt > Date.now() + 86400000
+          || (auth.accountId && !/^[A-Za-z0-9_-]{1,200}$/.test(auth.accountId))) return;
+      clearAuth();
+      token = auth.accessToken; expiresAt = auth.expiresAt; restoredAuthorizationId = auth.id;
+      restoredAccountId = auth.accountId || '';
+      account = auth.accountId ? { id: auth.accountId } : null;
+      expirationTimer = setTimeout(expireToken, expiresAt - Date.now());
+      status('verifying');
+      void operate(async () => {
+        const expected = generation;
+        await verifyStoredAccount(expected);
+        await listCopies();
+        if (syncEnabled()) await syncSettings();
+      });
+      return;
+    }
     if (message.type === 'pong') { lastPong = Date.now(); return; }
-    if (message.type === 'disconnect') { loseBridge(); return; }
+    if (message.type === 'disconnect') { loseBridge({ forgetAuthorization: true }); return; }
+    if (message.type === 'detach') { loseBridge(); return; }
     if (message.type === 'reply') {
       const item = pending.get(message.id);
       if (!item) return;
@@ -548,6 +604,7 @@
   }
 
   function scheduleAuto() {
+    post({ type: 'pending-backup', pending: dirty, account: dirtyOwner });
     clearTimeout(autoTimer);
     if (!dirty || !config.autoBackup || !isAuthorized() || autoBlocked || busy || authPending || revoking || configWrites) return;
     autoTimer = setTimeout(() => {
@@ -564,7 +621,7 @@
 
   function assertCurrent(expected) {
     if (!bridgeAlive) throw error('bridge_lost');
-    if (expected !== generation || !isAuthorized()) throw error('expired');
+    if (expected !== generation || !isAuthorized() || (runtimeOptions.isCurrent && !runtimeOptions.isCurrent())) throw error('expired');
   }
 
   async function readLimited(response) {
@@ -595,8 +652,16 @@
   async function api(path, { method = 'GET', params = {}, body, contentType } = {}) {
     const expected = generation;
     assertCurrent(expected);
+    if (restoredAuthorizationId && !headless) {
+      await rpc('check-authorization', { authorizationId: restoredAuthorizationId });
+      assertCurrent(expected);
+    }
     if (!/^\/(?:upload\/)?drive\/v3\/files(?:\/[A-Za-z0-9_-]+)?$/.test(path) &&
         !(path === '/drive/v3/about' && method === 'GET')) throw error('failed');
+    if (restoredAuthorizationId && path !== '/drive/v3/about' && !accountVerified) {
+      await verifyStoredAccount(expected);
+      assertCurrent(expected);
+    }
     const url = new URL(path, 'https://www.googleapis.com');
     for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
     const controller = new AbortController();
@@ -604,7 +669,7 @@
     let timedOut = false;
     const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 20000);
     try {
-      const response = await fetch(url.href, {
+      const response = await (runtimeOptions.fetch || fetch)(url.href, {
         method, credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer',
         headers: { Authorization: `Bearer ${token}`, ...(contentType ? { 'Content-Type': contentType } : {}) },
         body, signal: controller.signal,
@@ -790,7 +855,7 @@
   }
 
   function loadGoogleLibrary() {
-    if (closed || libraryState === 'loading') return;
+    if (headless || closed || libraryState === 'loading') return;
     if (gisAvailable()) { libraryState = 'ready'; status(config.clientId ? 'bridge_ready' : 'missing_client'); return; }
     const attempt = ++libraryAttempt;
     libraryState = 'loading';
@@ -842,6 +907,16 @@
     }
   }
 
+  async function verifyStoredAccount(expected) {
+    const identified = await identifyAccount(expected);
+    assertCurrent(expected);
+    // A network/identity lookup failure pauses work but does not revoke a valid token.
+    if (!identified?.id) throw error('sync_account');
+    if (restoredAccountId && identified.id !== restoredAccountId) { expireToken(); throw error('sync_account'); }
+    account = identified; accountVerified = true;
+    status('connected');
+  }
+
   async function initializeSession(expected, previousAccount) {
     const nextAccount = await identifyAccount(expected);
     assertCurrent(expected);
@@ -862,13 +937,28 @@
       }
     }
     assertCurrent(expected);
+    if (!headless && capabilities.has('local-authorization-v1')) {
+      // This credential travels only through the origin/source-bound private port.
+      // Wait for a confirmed userscript-storage write before closing the OAuth UI.
+      const saved = await rpc('store-authorization', { authorization: {
+        clientId: config.clientId, accessToken: token, expiresAt, accountId: account?.id || '',
+      } });
+      assertCurrent(expected);
+      if (saved.stored === true && post({ type: 'activate-local' })) {
+        clearTimeout(autoTimer); clearTimeout(syncTimer);
+        status('connected');
+        try { window.close(); } catch (_) { /* The helper also asks its own popup to close. */ }
+        return;
+      }
+      throw error('storage_error');
+    }
     status('connected');
     await listCopies();
     if (syncEnabled()) await syncSettings();
   }
 
   function connectGoogle(selectAccount = false) {
-    if (!bridgeAlive || !config.clientId || !gisAvailable() || authPending || busy || revoking || configWrites) return;
+    if (headless || !bridgeAlive || !config.clientId || !gisAvailable() || authPending || busy || revoking || configWrites) return;
     const expected = generation;
     const attempt = ++authAttempt;
     const previousAccount = account;
@@ -908,6 +998,7 @@
           requests.clear();
           clearCopies();
           clearTimeout(expirationTimer);
+          restoredAuthorizationId = '';
           token = response.access_token;
           expiresAt = Date.now() + seconds * 1000 - 30000;
           expirationTimer = setTimeout(expireToken, Math.min(expiresAt - Date.now(), 2147483647));
@@ -940,9 +1031,7 @@
       revokeTimer = null;
       revoking = false;
       if (successful) {
-        clearAuth();
-        autoBlocked = false;
-        status('revoked');
+        disconnectGoogle('revoked');
         if (capabilities.has('oauth-config')) void queueConfig({ accountHint: '' });
       } else { status('revoke_failed'); scheduleAuto(); }
     };
@@ -976,7 +1065,9 @@
   }
 
   function beginBootstrap() {
-    const nonce = new URLSearchParams(location.hash.slice(1)).get('bridge');
+    const fragment = new URLSearchParams(location.hash.slice(1));
+    const nonce = fragment.get('bridge');
+    const privateBridge = fragment.get('private') === '1';
     const opener = window.opener;
     if (location.origin !== HELPER_ORIGIN || location.pathname !== HELPER_PATH ||
         !opener || typeof nonce !== 'string' || !/^[0-9a-f]{64}$/.test(nonce)) {
@@ -985,23 +1076,26 @@
     }
     history.replaceState(null, '', `${location.pathname}${location.search}`);
     const ready = () => {
-      try { opener.postMessage({ protocol: PROTOCOL, type: 'ready', nonce }, GAME_ORIGIN); }
+      if (!resumeAllowed || closed) return;
+      try { opener.postMessage({ protocol: PROTOCOL, type: 'ready', ...(privateBridge ? { private: true } : { nonce }) }, GAME_ORIGIN); }
       catch (_) { status('bridge_lost'); }
     };
     function receivePort(event) {
       const message = event.data;
-      if (port || event.origin !== GAME_ORIGIN || event.source !== opener ||
-          !message || message.protocol !== PROTOCOL || message.type !== 'port' ||
-          message.nonce !== nonce || event.ports.length !== 1) return;
-      window.removeEventListener('message', receivePort);
-      clearInterval(readyTimer);
+      if (!resumeAllowed || closed || event.origin !== GAME_ORIGIN || event.source !== opener ||
+          !message || message.protocol !== PROTOCOL || message.nonce !== nonce) return;
+      if (message.type === 'disconnect') { loseBridge({ forgetAuthorization: true }); return; }
+      if (message.type !== 'port' || event.ports.length !== 1) return;
+      if (event.ports[0] === port) return;
+      if (port) loseBridge();
       clearTimeout(bootstrapTimer);
       port = event.ports[0];
       bridgeAlive = true;
       port.onmessage = onPortMessage;
-      port.onmessageerror = loseBridge;
+      port.onmessageerror = () => loseBridge();
       port.start();
       lastPong = Date.now();
+      clearInterval(heartbeatTimer);
       heartbeatTimer = setInterval(() => {
         if (Date.now() - lastPong > 45000) { loseBridge(); return; }
         post({ type: 'ping' });
@@ -1009,15 +1103,19 @@
       }, 10000);
       post({ type: 'port-ready' });
       try { window.opener = null; } catch (_) { /* browser may prohibit assignment */ }
-      status('bridge_ready');
-      loadGoogleLibrary();
+      status(isAuthorized() ? 'connected' : 'bridge_ready');
+      if (libraryState !== 'ready') loadGoogleLibrary();
+      else render();
+      scheduleAuto();
+      scheduleSync(1000);
     }
     window.addEventListener('message', receivePort);
     ready();
-    readyTimer = setInterval(ready, 500);
+    // Credential-enabled links never reveal their bootstrap secret to the game page.
+    // Only the content-script closure and trusted popup know the private nonce.
+    // Legacy non-credential links can still recover an existing window after reload.
+    readyTimer = setInterval(ready, 3000);
     bootstrapTimer = setTimeout(() => {
-      window.removeEventListener('message', receivePort);
-      clearInterval(readyTimer);
       if (!port) status('bridge_lost');
     }, 20000);
   }
@@ -1044,9 +1142,12 @@
   });
   ui['client-id'].addEventListener('blur', flushClientDraft);
   ui['auto-sync'].addEventListener('change', () => { void queueConfig({ autoSync: ui['auto-sync'].checked }); });
-  window.addEventListener('online', () => { syncFailures = 0; scheduleSync(0); });
-  window.addEventListener('focus', () => scheduleSync(500));
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) scheduleSync(500); });
+  const onOnline = () => { syncFailures = 0; scheduleSync(0); };
+  const onFocus = () => scheduleSync(500);
+  const onVisible = () => { if (!document.hidden) scheduleSync(500); };
+  window.addEventListener('online', onOnline);
+  window.addEventListener('focus', onFocus);
+  document.addEventListener('visibilitychange', onVisible);
   ui['auto-backup'].addEventListener('change', () => { void queueConfig({ autoBackup: ui['auto-backup'].checked }); });
   ui['remember-account'].addEventListener('change', () => { void queueConfig({ rememberAccount: ui['remember-account'].checked }); });
   ui['clear-client'].addEventListener('click', () => {
@@ -1066,7 +1167,8 @@
       ui['setup-status'].textContent = 'Origen seleccionado. Cópialo con el menú del navegador o el teclado.';
     }
   });
-  window.addEventListener('beforeunload', () => {
+  function shutdown() {
+    if (closed) return;
     post({ type: 'bye' });
     closed = true;
     clearAuth();
@@ -1078,7 +1180,19 @@
     for (const item of pending.values()) { clearTimeout(item.timeout); item.reject(error('bridge_lost')); }
     pending.clear();
     try { port?.close(); } catch (_) { /* already closed */ }
-  });
+    window.removeEventListener('online', onOnline);
+    window.removeEventListener('focus', onFocus);
+    window.removeEventListener('beforeunload', shutdown);
+    document.removeEventListener('visibilitychange', onVisible);
+  }
+  window.addEventListener('beforeunload', shutdown);
+  if (headless) {
+    port = { postMessage: message => runtimeOptions.onMessage(message), close() {} };
+    bridgeAlive = true;
+    post({ type: 'port-ready' });
+  } else {
   beginBootstrap();
+  }
   render();
+  return { receive: message => onPortMessage({ data: message }), destroy: shutdown };
 })();

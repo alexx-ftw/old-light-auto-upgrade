@@ -95,7 +95,7 @@ function harness(activeTab = 'buildings') {
 test('Changelog starts with the installed release and lists distinct versions newest first', () => {
   const h = harness(), entries = h.entries();
   assert.equal(entries[0].version, version);
-  assert.deepEqual(entries.map(entry => entry.version), ['1.13.0', '1.12.1', '1.12.0', '1.11.0']);
+  assert.deepEqual(entries.map(entry => entry.version), ['1.13.1', '1.13.0', '1.12.1', '1.12.0', '1.11.0']);
   assert.equal(new Set(entries.map(entry => entry.version)).size, entries.length);
   for (const entry of entries) {
     assert.ok(entry.title.length > 0);
@@ -107,9 +107,9 @@ test('Changelog starts with the installed release and lists distinct versions ne
 test('Historical notes are backed by versioned README sections and retain important limits', () => {
   const h = harness(), entries = h.entries();
   for (const entry of entries.slice(1)) assert.ok(readme.includes(`## ${entry.title} (${entry.version})`));
-  assert.match(entries[0].changes.join(' '), /desactivadas de inicio.*sin enviar información a servidores/);
-  assert.match(entries[3].changes.join(' '), /ventana está abierta y autorizada/);
-  assert.match(entries[3].changes.join(' '), /misiones y campañas en curso permanecen locales/);
+  assert.match(entries[1].changes.join(' '), /desactivadas de inicio.*sin enviar información a servidores/);
+  assert.match(entries[4].changes.join(' '), /ventana está abierta y autorizada/);
+  assert.match(entries[4].changes.join(' '), /misiones y campañas en curso permanecen locales/);
 });
 
 test('Mount is quiet, closed and does not alter focus, settings or storage', () => {
@@ -231,7 +231,7 @@ test('Repeated clicks and passive refreshes never duplicate or spontaneously reo
     assert.equal(h.panel.open, false);
   }
   assert.equal(h.nodes.filter(node => node.id === 'oldlight-changelog').length, 1);
-  assert.equal(h.nodes.filter(node => node.dataset.changelogVersion).length, 4);
+  assert.equal(h.nodes.filter(node => node.dataset.changelogVersion).length, 5);
 });
 
 test('Drive shortcut continues to show synchronization controls and focus its own button', () => {

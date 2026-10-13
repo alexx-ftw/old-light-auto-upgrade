@@ -1,10 +1,24 @@
 # Old Light Auto Upgrade
 
-Userscript para [Old Light](https://oldlight.io/play) que atiende primero el Resource Depot necesario y su Reactor, después da prioridad a la flota y reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.13.0**, con métricas locales opcionales de uso y errores y un changelog integrado. Mantiene la infraestructura necesaria antes que la flota. Retira automáticamente las misiones vinculadas al cancelar su campaña. Reintenta las interrupciones temporales, muestra su motivo concreto y funciona en las vistas estrechas Galaxy y Movements. Permite editar las flotas de misiones y campañas, con borradores guardados automáticamente. La versión cargada aparece en la cabecera del helper, también al minimizarlo.
+Userscript para [Old Light](https://oldlight.io/play) que atiende primero el Resource Depot necesario y su Reactor, después da prioridad a la flota y reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.13.1**, con Drive sin ventana permanente, métricas locales opcionales de uso y errores y un changelog integrado. Mantiene la infraestructura necesaria antes que la flota. Retira automáticamente las misiones vinculadas al cancelar su campaña. Reintenta las interrupciones temporales, muestra su motivo concreto y funciona en las vistas estrechas Galaxy y Movements. Permite editar las flotas de misiones y campañas, con borradores guardados automáticamente. La versión cargada aparece en la cabecera del helper, también al minimizarlo.
+
+## Drive sin ventana permanente (1.13.1)
+
+En Brave con Violentmonkey, **Conectar Google Drive** abre la autorización de Google. Tras autorizar y confirmar que Violentmonkey ha aceptado guardar el token temporal, esa ventana se cierra y el motor de Drive continúa dentro del userscript. Recargar Old Light recupera la autorización mientras siga vigente; **Gestionar Google Drive** permite volver a consultar/restaurar copias o cambiar de cuenta. Cerrar esa ventana devuelve el trabajo al motor interno, sin mantener dos motores activos en la misma pestaña.
+
+Se conserva únicamente un token de acceso temporal, su caducidad original, el Client ID y el identificador de cuenta necesario, en una clave privada separada del almacenamiento GM. **Desconectar**, retirar el permiso o cambiar el Client ID elimina la autorización local; una respuesta 401 o la caducidad también la invalida. Al recuperar una sesión se verifica la cuenta con Google antes de copiar o sincronizar. Si el navegador está cerrado o suspendido no puede ejecutar el borrado; al volver, rechaza y elimina el token vencido antes de utilizarlo. No se guarda un refresh token ni se obtiene una autorización nueva sin un clic.
+
+**Privacidad:** el token de Drive no se incluye en las exportaciones, copias, sincronización, métricas o registros del Helper. El almacenamiento GM no es cifrado por el Helper: una exportación completa o sincronización del propio gestor de userscripts puede incluirlo. Desconecta Drive antes de compartir datos del gestor. Esta protección no puede controlar las copias de Violentmonkey o del perfil del navegador.
+
+El userscript solicita ejecución aislada con `@inject-into content` y comprueba que Violentmonkey confirma ese contexto efectivo mediante `GM_info.injectInto`. Si el gestor no confirma el aislamiento o no ofrece `GM.setValue` asíncrono, conserva el modo de ventana/memoria y no activa el almacenamiento del token. La ventana de Google y el motor local reutilizan la misma implementación; las peticiones a Google omiten cookies y rechazan redirecciones. El secreto que enlaza la ventana permanece en la memoria aislada y en su fragmento inicial; nunca aparece en el almacenamiento/DOM del juego ni en el aviso público de conexión. Las credenciales solo pasan por el canal privado autenticado. No se añade un servidor ni un iframe de terceros.
+
+**Límite real:** la sesión termina cuando Google caduca o revoca el token. Entonces hay que pulsar Conectar y autorizar de nuevo. La nueva versión evita mantener una ventana abierta, pero no ofrece renovación desatendida. La opción Recordar mi cuenta sigue controlando solamente la pista de correo para la siguiente autorización.
+
+Para modificar el motor, edita `docs/drive.js` y ejecuta `node build-drive.cjs`; el bloque generado queda privado dentro del userscript. Verifica con `node --check docs/drive.js`, `node --check old-light-auto-upgrade.user.js` y `node --test tests/*.test.cjs`. Las pruebas usan ventanas, almacenamiento, relojes y respuestas de Google simulados; no acceden a Google ni al juego real. La candidata pasó **793 pruebas automatizadas**, incluidas **43 nuevas** para autorización local, y revisión independiente. La prueba real de Brave + Violentmonkey/OAuth sigue pendiente; no se presenta como validada en navegador.
 
 ## Changelog integrado (1.13.0)
 
-Pulsa **Changelog** en el pie del helper, disponible desde cualquiera de sus cuatro pestañas, para abrir **Datos → Changelog · novedades**. Muestra un resumen en español de las versiones 1.13.0, 1.12.1, 1.12.0 y 1.11.0, basado en las secciones de este README, e identifica la versión instalada. Las notas se incluyen en el userscript y no necesitan una conexión adicional.
+Pulsa **Changelog** en el pie del helper, disponible desde cualquiera de sus cuatro pestañas, para abrir **Datos → Changelog · novedades**. Muestra un resumen en español de las versiones 1.13.1, 1.13.0, 1.12.1, 1.12.0 y 1.11.0, basado en las secciones de este README, e identifica la versión instalada. Las notas se incluyen en el userscript y no necesitan una conexión adicional.
 
 Puedes cerrarlo con **Cerrar changelog**, **Escape**, su cabecera desplegable o pulsando otra vez el acceso del pie. Al cambiar a otra pestaña se cierra; al volver o recargar no se abre automáticamente. El cierre conserva un foco de teclado visible. Se desplaza dentro del helper y adapta sus textos al ancho disponible, sin ventanas emergentes ni avisos de actualización repetidos. El estado abierto/cerrado no se guarda, no viaja por Drive y no cambia la automatización ni las preferencias de métricas.
 
@@ -52,7 +66,7 @@ Se sincronizan prioridades y exclusiones de edificios, prioridades y mínimos de
 
 La primera conexión sin datos de sincronización puede recuperar los ajustes compartidos de la copia compatible más reciente, sin importar sus misiones. Las copias históricas sin identificador de perfil se tratan como preferencias generales de esa cuenta de Drive. No se borran copias ni réplicas automáticamente.
 
-**Límite de la conexión actual:** la ventana de Drive debe estar abierta y autorizada. El modelo OAuth del proyecto solo mantiene un token temporal en memoria; al cerrar o caducar hay que conectar/renovar. Esta versión elimina guardar/seleccionar/restaurar manualmente para sincronizar ajustes, pero no añade una sesión persistente con renovación desatendida. La interfaz distingue conexión, cambios pendientes, sincronización y reintentos.
+**Conexión actual:** desde 1.13.1 no hace falta mantener la ventana de Drive abierta. El token temporal se conserva en el almacenamiento GM hasta caducar o desconectar; no hay renovación desatendida. La interfaz distingue conexión, cambios pendientes, sincronización y reintentos.
 
 Pruebas: `node --test tests/*.test.cjs`. El núcleo compartido se incluye dentro del userscript, sin dependencias de red adicionales para ejecutarlo. Después de modificar `docs/sync-core.js`, ejecuta `node build-sync.cjs` y las pruebas.
 
@@ -331,9 +345,9 @@ La integración es **opcional** y viene configurada con la aplicación de Google
 
 ### Iniciar sesión
 
-1. En el helper, abre **Datos → Abrir Google Drive**.
+1. En el helper, abre **Datos → Conectar Google Drive**.
 2. Pulsa **Iniciar sesión con Google**, elige tu cuenta y autoriza el permiso de datos privados de esta aplicación.
-3. Usa **Guardar copia ahora**, restaura una copia o activa **Copia automática de los cambios locales**.
+3. La ventana se cierra y la sincronización continúa en el helper. Para guardar o restaurar una copia manual, pulsa **Gestionar Google Drive**; la copia automática también se activa desde Datos.
 
 No necesitas crear un proyecto, copiar identificadores ni importar un JSON de Google para usar la conexión integrada. Si ya habías configurado tu propio cliente OAuth, se conserva para que puedas seguir accediendo a sus copias. La configuración avanzada y las opciones de cuenta comienzan cerradas.
 
@@ -346,11 +360,11 @@ También puedes editarlo en **Datos → Google Drive → Conexión avanzada** de
 ### Cuenta y autorización
 
 - La pantalla muestra la cuenta autorizada, si Google proporciona su identidad, y el tiempo aproximado que queda de sesión.
-- En **Cuenta y permisos**, **Recordar mi cuenta** guarda únicamente el correo como pista para la siguiente conexión; puedes desactivarlo en cualquier momento. Nunca guarda el token de Google.
+- En **Cuenta y permisos**, **Recordar mi cuenta** guarda únicamente el correo como pista para la siguiente conexión; puedes desactivarlo en cualquier momento. Esta opción no controla el token temporal: su almacenamiento separado permite continuar sin ventana abierta.
 - **Renovar conexión** o **Volver a conectar** reutiliza esa pista de cuenta para evitar selecciones innecesarias. **Cambiar cuenta** abre expresamente el selector.
 - Cerrar, cancelar o denegar una renovación conserva la sesión anterior mientras siga siendo válida. La autorización tiene un límite de espera y descarta respuestas tardías de intentos cancelados.
 - Si Google no carga, aparece **Reintentar conexión**. La autorización siempre empieza con un clic; la reconexión no abre ventanas por su cuenta.
-- **Desconectar esta sesión** elimina el token de esta ventana. **Retirar permiso de Google** pide una confirmación dentro de la página y revoca el acceso de la aplicación; solo muestra éxito cuando Google lo confirma. También ofrece un enlace a los permisos de tu cuenta.
+- **Desconectar esta sesión** elimina el token local del Helper y detiene los clientes de este mismo gestor cuando observan el cambio. **Retirar permiso de Google** pide una confirmación dentro de la página y revoca el acceso de la aplicación; solo muestra éxito cuando Google lo confirma. También ofrece un enlace a los permisos de tu cuenta.
 
 La conexión utiliza el modelo de tokens de Google Identity Services para aplicaciones web, sin servidor propio. El identificador público de la aplicación ya está incluido; al caducar la sesión, vuelve a iniciar sesión desde la ventana de copias.
 
@@ -358,11 +372,11 @@ La conexión utiliza el modelo de tokens de Google Identity Services para aplica
 
 - **Guardar copia ahora** crea una copia nueva con fecha, sin reemplazar las anteriores.
 - **Actualizar lista** muestra las **30 copias más recientes**. Selecciona una y pulsa **Restaurar la copia seleccionada** para aplicarla al helper.
-- **Copia automática de los cambios locales** guarda los cambios después de **5 segundos** sin otros cambios, mientras la ventana auxiliar permanezca abierta y su autorización siga vigente. Evita copias automáticas idénticas. Conectar, recordar la cuenta y configurar el Client ID no generan una copia por sí solos; puedes crear la primera con **Guardar copia ahora**.
+- **Copia automática de los cambios locales** guarda los cambios después de **5 segundos** sin otros cambios, mientras el helper permanezca activo y su autorización siga vigente. Evita copias automáticas idénticas. Conectar, recordar la cuenta y configurar el Client ID no generan una copia por sí solos; puedes crear la primera con **Guardar copia ahora**.
 
 Es respaldo automático de los ajustes locales hacia Drive. La restauración desde Drive siempre se elige manualmente, para que otro navegador no sobrescriba tus cambios en curso.
 
-Solicita únicamente el permiso `drive.appdata`. Las copias se guardan en el espacio privado de la aplicación, que no aparece como archivos normales en Mi unidad; se consultan desde la ventana auxiliar usando el mismo proyecto OAuth y la misma cuenta. El token de Google se conserva solo en memoria en esa ventana y nunca se añade al JSON ni al almacenamiento del userscript. Si caduca, pulsa **Volver a conectar**. Los cambios locales recibidos durante la caducidad quedan pendientes en esta ventana y se copian tras reconectar la misma cuenta. Si cambias a otra cuenta, se descartan los envíos automáticos pendientes de la anterior; los ajustes permanecen guardados en local y puedes crear una copia manual o continuar editando.
+Solicita únicamente el permiso `drive.appdata`. Las copias se guardan en el espacio privado de la aplicación, que no aparece como archivos normales en Mi unidad; se consultan desde la ventana auxiliar usando el mismo proyecto OAuth y la misma cuenta. El token temporal de Google se conserva en almacenamiento GM separado y nunca se añade al JSON de exportación, a las copias ni a los documentos de sincronización del Helper. Si caduca, pulsa **Conectar Google Drive**. Los cambios de preferencias permanecen en el registro local y se sincronizan al reconectar la misma cuenta. Si cambias a otra cuenta, se descartan los envíos automáticos pendientes de la anterior; los ajustes permanecen guardados en local y puedes crear una copia manual o continuar editando.
 
 Las copias incluyen la misma configuración y credenciales de Telegram que la exportación local. Se transfieren al puente por un canal privado y a Google por HTTPS. Cada copia tiene un identificador y un hash para comprobar su integridad al restaurarla. No se almacenan copias ni tokens en GitHub.
 

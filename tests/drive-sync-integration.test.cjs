@@ -160,7 +160,7 @@ function companion(client, fetcher) {
     capabilities = new Set(['settings-sync-v1']); token = 'unit-test-only'; expiresAt = Date.now() + 600000;
     account = { id: 'test-account' }; port = { postMessage() {} };
     rpc = async (type, fields) => JSON.parse(await __rpc(type, JSON.stringify(fields)));
-    this.testing = {
+    globalThis.testing = {
       sync: () => syncSettings(),
       invalidate: () => { generation++; },
       state: () => ({ syncPending, syncLastAt, syncFailures, syncFileId, syncPublishedHash }),
