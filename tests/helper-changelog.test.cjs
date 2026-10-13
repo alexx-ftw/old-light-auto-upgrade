@@ -57,7 +57,7 @@ function harness(activeTab = 'buildings') {
   document.createElement = element;
   const settings = { activeTab, enabled: true, minimized: false, conditionsExpanded: true,
     shipMinimums: { marauder: 12 }, excluded: ['trade_hub'], depotFillPercent: 80 };
-  const pages = ['buildings', 'fleet', 'notifications', 'data'].map(id => {
+  const pages = ['empire', 'buildings', 'fleet', 'notifications', 'data'].map(id => {
     const page = element('div'); page.dataset.page = id; return page;
   });
   const tabs = pages.map(page => {
@@ -70,7 +70,7 @@ function harness(activeTab = 'buildings') {
     cancelPriorityDrag: () => effects.push('cancelPriorityDrag'),
     cancelResize: () => effects.push('cancelResize'), cancelPanelDrag: () => effects.push('cancelPanelDrag') };
   const shadow = { querySelector(selector) {
-    if (selector === '[data-page="data"]') return pages[3];
+    if (selector === '[data-page="data"]') return pages[4];
     if (selector === '[data-action="changelog-shortcut"]') return shortcut;
     throw new Error(`Unexpected selector: ${selector}`);
   } };
@@ -89,13 +89,13 @@ function harness(activeTab = 'buildings') {
   const close = nodes.find(node => node.dataset.action === 'changelog-close');
   return { nodes, writes, effects, document, ui, settings, shortcut, panel, summary, close, driveButton,
     entries: () => JSON.parse(JSON.stringify(context.entries())), sync: context.sync,
-    tab: id => tabs.find(tab => tab.dataset.settingsTab === id), dataPage: pages[3] };
+    tab: id => tabs.find(tab => tab.dataset.settingsTab === id), dataPage: pages[4] };
 }
 
 test('Changelog starts with the installed release and lists distinct versions newest first', () => {
   const h = harness(), entries = h.entries();
   assert.equal(entries[0].version, version);
-  assert.deepEqual(entries.map(entry => entry.version), ['1.13.1', '1.13.0', '1.12.1', '1.12.0', '1.11.0']);
+  assert.deepEqual(entries.map(entry => entry.version), ['1.14.0', '1.13.1', '1.13.0', '1.12.1', '1.12.0', '1.11.0']);
   assert.equal(new Set(entries.map(entry => entry.version)).size, entries.length);
   for (const entry of entries) {
     assert.ok(entry.title.length > 0);
@@ -107,9 +107,9 @@ test('Changelog starts with the installed release and lists distinct versions ne
 test('Historical notes are backed by versioned README sections and retain important limits', () => {
   const h = harness(), entries = h.entries();
   for (const entry of entries.slice(1)) assert.ok(readme.includes(`## ${entry.title} (${entry.version})`));
-  assert.match(entries[1].changes.join(' '), /desactivadas de inicio.*sin enviar información a servidores/);
-  assert.match(entries[4].changes.join(' '), /ventana está abierta y autorizada/);
-  assert.match(entries[4].changes.join(' '), /misiones y campañas en curso permanecen locales/);
+  assert.match(entries.find(entry => entry.version === '1.13.0').changes.join(' '), /desactivadas de inicio.*sin enviar información a servidores/);
+  assert.match(entries.find(entry => entry.version === '1.11.0').changes.join(' '), /ventana está abierta y autorizada/);
+  assert.match(entries.find(entry => entry.version === '1.11.0').changes.join(' '), /misiones y campañas en curso permanecen locales/);
 });
 
 test('Mount is quiet, closed and does not alter focus, settings or storage', () => {
@@ -191,7 +191,7 @@ test('Native summary toggles keep the permanent shortcut expansion state accurat
 });
 
 test('Leaving for any main tab closes notes, preserves its scroll and never steals focus', () => {
-  for (const destination of ['buildings', 'fleet', 'notifications']) {
+  for (const destination of ['empire', 'buildings', 'fleet', 'notifications']) {
     const h = harness(destination);
     h.ui.scroll.scrollTop = 147;
     h.shortcut.click();
@@ -214,12 +214,12 @@ test('Main-tab arrow keys, Home and End still select and focus the correct tab',
   assert.equal(h.document.activeElement, h.tab('notifications'));
   assert.equal(h.panel.open, false);
   h.tab('notifications').fire('keydown', { key: 'Home' });
-  assert.equal(h.settings.activeTab, 'buildings');
+  assert.equal(h.settings.activeTab, 'empire');
   h.tab('buildings').fire('keydown', { key: 'End' });
   assert.equal(h.settings.activeTab, 'data');
   assert.equal(h.panel.open, false);
   h.tab('data').fire('keydown', { key: 'ArrowRight' });
-  assert.equal(h.settings.activeTab, 'buildings');
+  assert.equal(h.settings.activeTab, 'empire');
 });
 
 test('Repeated clicks and passive refreshes never duplicate or spontaneously reopen notes', () => {
@@ -231,7 +231,7 @@ test('Repeated clicks and passive refreshes never duplicate or spontaneously reo
     assert.equal(h.panel.open, false);
   }
   assert.equal(h.nodes.filter(node => node.id === 'oldlight-changelog').length, 1);
-  assert.equal(h.nodes.filter(node => node.dataset.changelogVersion).length, 5);
+  assert.equal(h.nodes.filter(node => node.dataset.changelogVersion).length, h.entries().length);
 });
 
 test('Drive shortcut continues to show synchronization controls and focus its own button', () => {

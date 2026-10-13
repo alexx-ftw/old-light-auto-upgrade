@@ -22,6 +22,12 @@
       <p>El helper guarda en tu navegador los ajustes, borradores, prioridades, mínimos de naves, objetivos, filtros y posición del panel. Utiliza el almacenamiento del sitio y el almacenamiento GM del gestor de userscripts. También conserva estados locales para evitar avisos repetidos.</p>
       <p>Puedes exportar e importar la configuración como un archivo JSON. La copia incluye la configuración de las conexiones: el Client ID de Google, el correo recordado cuando corresponda y, si has configurado Telegram, el token del bot y el identificador del chat. El mismo contenido se incluye en las copias opcionales de Drive. Trata estos archivos como información privada.</p>
     </section>
+    <section aria-labelledby="empire-heading">
+      <h2 id="empire-heading">Gestión imperial</h2>
+      <p>Desde 1.14.0, Imperio puede coordinar los sistemas propios de la cuenta y galaxia seleccionadas. Guarda objetivos de flota, roles y sistemas habilitados localmente, separados por cuenta y galaxia. Esta política se incluye en las copias completas, pero no en la sincronización automática de preferencias; al restaurarla queda detenida.</p>
+      <p>Un observador mínimo lee los eventos de estado de la conexión nativa que el propio juego ya utiliza. Conserva en memoria campos necesarios de identidad de juego, propiedad, sistemas, recursos, colas y tránsitos; no guarda un historial de tramas, no abre otra conexión y no envía nada a través de ella. Descarta autenticación, cookies, tokens y mensajes de chat. Limita el tamaño de los datos y valida su estructura antes de utilizarlos.</p>
+      <p>Los datos seleccionados cruzan un puerto privado hacia el Helper aislado. El observador no puede acceder al almacenamiento GM ni al token de Google Drive, que nunca se entrega al código de la página. Las observaciones económicas no se incluyen en las copias ni en las métricas y no se transmiten a ningún servicio nuevo. Si no se puede verificar la identidad, propiedad o actualidad de los datos, se bloquean los pedidos imperiales.</p>
+    </section>
     <section aria-labelledby="google-heading">
       <h2 id="google-heading">Conexión con Google Drive</h2>
       <p>Google Drive es opcional. Al iniciar sesión, se solicita únicamente el permiso <code>drive.appdata</code> para crear, actualizar, listar y leer las copias y los ajustes sincronizados en <code>appDataFolder</code>, el espacio privado de datos de esta aplicación en tu cuenta.</p>
