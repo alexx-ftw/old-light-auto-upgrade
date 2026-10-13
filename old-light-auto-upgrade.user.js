@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.10.3
-// @description  Flota prioritaria con reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado y copias locales/Drive. Con actualización automática.
+// @version      1.11.0
+// @description  Flota prioritaria con reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
 // @supportURL   https://github.com/alexx-ftw/old-light-auto-upgrade/issues
@@ -16,6 +16,504 @@
 // @noframes
 // ==/UserScript==
 
+// BEGIN EMBEDDED SYNC CORE
+(function (root, factory) {
+  'use strict';
+  const api = factory();
+  if (typeof module === 'object' && module && module.exports) module.exports = api;
+  if (root) Object.defineProperty(root, 'OldLightSyncCore', {
+    configurable: true, enumerable: true, writable: true, value: api,
+  });
+})(typeof globalThis === 'object' ? globalThis : this, function () {
+  'use strict';
+
+  const FORMAT = 'old-light-settings-sync';
+  const SCHEMA_VERSION = 1;
+  const MAX_BYTES = 1024 * 1024;
+  const MAX_TIME = 8640000000000000;
+  const BUILDINGS = Object.freeze(['command_center', 'reactor', 'palladium_extractor', 'iridium_extractor',
+    'warehouse', 'shipyard', 'trade_hub']);
+  const SHIPS = Object.freeze(['probe', 'marauder', 'sentinel', 'vanguard']);
+  const EVENTS = Object.freeze([
+    'request.sent', 'building.queued', 'ships.queued', 'building.completed', 'fleet.changed', 'game.toast',
+    'game.reports', 'game.messages', 'game.level_target', 'attack.retry', 'request.failed', 'request.rejected',
+    'request.unconfirmed', 'automation.paused', 'settings.buildings', 'settings.minimum', 'settings.fleet_mode',
+    'settings.priority', 'settings.depot', 'settings.automation',
+  ]);
+  const PROTOTYPE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+  const ALLOWED = new Set([
+    'settings.enabled', 'settings.order', 'settings.excluded', 'settings.shipOrder',
+    ...SHIPS.map(id => `settings.shipMinimums.${id}`), 'settings.countAway', 'settings.shiftPresetShortcut',
+    'settings.depotFillPercent', 'settings.presetCatalog',
+    'notifications.browserEnabled', 'notifications.telegramEnabled', 'notifications.paused',
+    'notifications.browserPaused', 'notifications.telegramPaused', 'notifications.credentials',
+    ...EVENTS.map(type => `notifications.events.${type}`),
+    ...BUILDINGS.map(id => `levelTargets.targets.${id}`),
+    'attackRetries.enabled', 'attackRetries.autoMinimums', 'attackRetries.produceMissing', 'attackRetries.maxRetries',
+  ]);
+  const MISSING = Object.freeze({ missing: true });
+
+  function fail(message) { throw new TypeError(message); }
+  function own(value, key) { return Object.prototype.hasOwnProperty.call(value, key); }
+  function isRecord(value) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+    const proto = Object.getPrototypeOf(value);
+    return proto === Object.prototype || proto === null;
+  }
+  function define(target, key, value) {
+    Object.defineProperty(target, key, { configurable: true, enumerable: true, writable: true, value });
+  }
+
+  function cloneJson(value, seen = new Set()) {
+    if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value)) fail('JSON values must contain finite numbers.');
+      return value;
+    }
+    if (typeof value !== 'object') fail('Value is not JSON-compatible.');
+    if (seen.has(value)) fail('Circular values are not supported.');
+    if (!Array.isArray(value) && !isRecord(value)) fail('Only plain JSON objects are supported.');
+    if (Object.getOwnPropertySymbols(value).length) fail('Symbol keys are not supported.');
+    seen.add(value);
+    let result;
+    if (Array.isArray(value)) {
+      result = new Array(value.length);
+      for (let i = 0; i < value.length; i += 1) {
+        if (own(value, i)) result[i] = cloneJson(value[i], seen);
+      }
+      for (const key of Object.keys(value)) {
+        if (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length) fail('Arrays cannot have extra properties.');
+      }
+    } else {
+      result = {};
+      for (const key of Object.keys(value)) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (!descriptor || !own(descriptor, 'value') || !descriptor.enumerable) fail('Object accessors are not supported.');
+        define(result, key, cloneJson(descriptor.value, seen));
+      }
+    }
+    seen.delete(value);
+    return result;
+  }
+
+  function canonical(value) {
+    const seen = new Set();
+    function encode(item) {
+      if (item === null) return 'null';
+      if (typeof item === 'string' || typeof item === 'boolean') return JSON.stringify(item);
+      if (typeof item === 'number') {
+        if (!Number.isFinite(item)) fail('Canonical JSON requires finite numbers.');
+        return JSON.stringify(item);
+      }
+      if (typeof item !== 'object') fail('Canonical JSON requires JSON-compatible values.');
+      if (seen.has(item)) fail('Canonical JSON cannot encode circular values.');
+      if (!Array.isArray(item) && !isRecord(item)) fail('Canonical JSON requires plain objects.');
+      if (Object.getOwnPropertySymbols(item).length) fail('Canonical JSON does not allow symbol keys.');
+      seen.add(item);
+      let encoded;
+      if (Array.isArray(item)) {
+        const parts = [];
+        for (let i = 0; i < item.length; i += 1) {
+          if (!own(item, i)) fail('Canonical JSON does not allow sparse arrays.');
+          parts.push(encode(item[i]));
+        }
+        encoded = `[${parts.join(',')}]`;
+      } else {
+        const keys = Object.keys(item).sort();
+        const parts = keys.map(key => {
+          if (PROTOTYPE_KEYS.has(key)) fail('Prototype keys are not allowed.');
+          const descriptor = Object.getOwnPropertyDescriptor(item, key);
+          if (!descriptor || !own(descriptor, 'value') || !descriptor.enumerable) fail('Object accessors are not supported.');
+          return `${JSON.stringify(key)}:${encode(descriptor.value)}`;
+        });
+        encoded = `{${parts.join(',')}}`;
+      }
+      seen.delete(item);
+      return encoded;
+    }
+    return encode(value);
+  }
+
+  function byteLength(text) {
+    if (typeof TextEncoder === 'function') return new TextEncoder().encode(text).length;
+    return unescape(encodeURIComponent(text)).length;
+  }
+  function checkSize(value, message = 'Encoded JSON exceeds the 1 MiB limit.') {
+    const size = byteLength(JSON.stringify(value));
+    if (size > MAX_BYTES) fail(message);
+  }
+  function checkedCanonical(value) {
+    const encoded = canonical(value);
+    if (byteLength(encoded) > MAX_BYTES) fail('Encoded JSON exceeds the 1 MiB limit.');
+    return encoded;
+  }
+  function copy(value) { return cloneJson(value); }
+  function equal(a, b) { return canonical(a) === canonical(b); }
+
+  function actorValid(actor) { return typeof actor === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(actor); }
+  function scopeValid(scope) { return typeof scope === 'string' && /^[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{1,96}$/.test(scope); }
+  function validStamp(stamp) {
+    return Array.isArray(stamp) && stamp.length === 3 && Number.isSafeInteger(stamp[0]) && stamp[0] >= 0
+      && stamp[0] <= MAX_TIME && Number.isSafeInteger(stamp[1]) && stamp[1] >= 0 && actorValid(stamp[2]);
+  }
+  function compareStamp(a, b) {
+    for (let i = 0; i < 2; i += 1) if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+    return a[2] === b[2] ? 0 : a[2] < b[2] ? -1 : 1;
+  }
+  function exactKeys(value, expected, label) {
+    if (!isRecord(value)) fail(`${label} must be an object.`);
+    if (Object.getOwnPropertySymbols(value).length || Object.getOwnPropertyNames(value).length !== Object.keys(value).length) {
+      fail(`${label} contains non-JSON keys.`);
+    }
+    const allowed = new Set(expected);
+    for (const key of Object.keys(value)) {
+      if (PROTOTYPE_KEYS.has(key) || !allowed.has(key)) fail(`${label} contains an unknown or unsafe key.`);
+    }
+  }
+  function integer(value, min, max) { return Number.isSafeInteger(value) && value >= min && value <= max; }
+  function string(value, max) { return typeof value === 'string' && value.length <= max; }
+  function validCatalog(value) {
+    if (!isRecord(value)) return false;
+    try { exactKeys(value, ['scope', 'records'], 'Preset catalog'); } catch (_) { return false; }
+    if (typeof value.scope !== 'string' || (value.scope !== '' && !scopeValid(value.scope))
+        || !Array.isArray(value.records) || value.records.length > 64) return false;
+    const seen = new Set();
+    return value.records.every(record => {
+      if (!isRecord(record)) return false;
+      try { exactKeys(record, ['key', 'locked'], 'Preset record'); } catch (_) { return false; }
+      if (!string(record.key, 500) || !record.key || typeof record.locked !== 'boolean' || seen.has(record.key)) return false;
+      seen.add(record.key);
+      return true;
+    });
+  }
+  function validPair(value, first, second) {
+    if (!isRecord(value)) return false;
+    try { exactKeys(value, [first, second], 'Atomic preference'); } catch (_) { return false; }
+    return typeof value[first] === 'boolean' && integer(value[second], 0, MAX_TIME);
+  }
+  function validRegisterValue(key, value) {
+    if (!ALLOWED.has(key)) return false;
+    if (value === null) return true;
+    if (key === 'settings.enabled' || key === 'settings.countAway' || key === 'settings.shiftPresetShortcut'
+        || key === 'notifications.browserEnabled' || key === 'notifications.telegramEnabled'
+        || key === 'notifications.paused' || key === 'notifications.browserPaused'
+        || key === 'notifications.telegramPaused' || key.startsWith('notifications.events.')
+        || key === 'attackRetries.produceMissing') return typeof value === 'boolean';
+    if (key === 'settings.order' || key === 'settings.shipOrder' || key === 'settings.excluded') {
+      const known = key === 'settings.shipOrder' ? SHIPS : BUILDINGS;
+      return Array.isArray(value) && value.length <= known.length && value.every(item => typeof item === 'string' && known.includes(item))
+        && new Set(value).size === value.length
+        && (key === 'settings.excluded' || (value.length === known.length && known.every(id => value.includes(id))));
+    }
+    if (key.startsWith('settings.shipMinimums.')) return integer(value, 0, 1000000);
+    if (key === 'settings.depotFillPercent') return integer(value, 1, 100);
+    if (key === 'settings.presetCatalog') return validCatalog(value);
+    if (key === 'notifications.credentials') {
+      if (!isRecord(value)) return false;
+      try { exactKeys(value, ['botToken', 'chatId'], 'Notification credentials'); } catch (_) { return false; }
+      return string(value.botToken, 221) && string(value.chatId, 65);
+    }
+    if (key.startsWith('levelTargets.targets.')) return integer(value, 0, 1000000);
+    if (key === 'attackRetries.enabled') return validPair(value, 'enabled', 'enabledAt');
+    if (key === 'attackRetries.autoMinimums') return validPair(value, 'autoMinimums', 'minimumsEnabledAt');
+    if (key === 'attackRetries.maxRetries') return integer(value, 0, 100);
+    return false;
+  }
+  function validateFlat(value, label = 'Register values') {
+    exactKeys(value, [...ALLOWED], label);
+    const clean = {};
+    for (const key of Object.keys(value)) {
+      const item = copy(value[key]);
+      checkedCanonical(item);
+      if (!validRegisterValue(key, item)) fail(`${label} contains an invalid value for ${key}.`);
+      define(clean, key, item);
+    }
+    checkSize(clean);
+    return clean;
+  }
+  function validateDocument(document, scope) {
+    document = copy(document);
+    checkSize(document);
+    exactKeys(document, ['format', 'schemaVersion', 'scope', 'fields'], 'Sync document');
+    if (document.format !== FORMAT || document.schemaVersion !== SCHEMA_VERSION) fail('Unsupported sync document format or schema.');
+    if (!scopeValid(document.scope) || document.scope !== scope) fail('Sync document scope does not match.');
+    exactKeys(document.fields, Object.keys(document.fields), 'Sync fields');
+    const fields = {};
+    for (const key of Object.keys(document.fields)) {
+      if (PROTOTYPE_KEYS.has(key) || !ALLOWED.has(key)) fail('Sync document contains an unknown or unsafe field key.');
+      const entry = document.fields[key];
+      exactKeys(entry, ['stamp', 'value'], 'Sync field');
+      if (!validStamp(entry.stamp)) fail('Sync document contains an invalid stamp.');
+      const value = copy(entry.value);
+      if (!validRegisterValue(key, value)) fail(`Sync document contains an invalid value for ${key}.`);
+      checkedCanonical(value);
+      define(fields, key, { stamp: [...entry.stamp], value });
+    }
+    const clean = { format: FORMAT, schemaVersion: SCHEMA_VERSION, scope, fields };
+    checkSize(clean);
+    return clean;
+  }
+  function validateState(state, scope) {
+    if (state === null || state === undefined) return { document: null, observed: {} };
+    exactKeys(state, ['document', 'observed'], 'Sync state');
+    const document = validateDocument(state.document, scope);
+    const observed = validateFlat(state.observed, 'Observed values');
+    return { document, observed };
+  }
+
+  function pick(object, key) { return isRecord(object) && own(object, key) ? object[key] : null; }
+  function getAt(root, path) {
+    let value = root;
+    for (const part of path) {
+      if (!isRecord(value) || !own(value, part)) return MISSING;
+      value = value[part];
+    }
+    return value;
+  }
+  function setAt(root, path, value) {
+    let parent = root;
+    for (let i = 0; i < path.length - 1; i += 1) {
+      const key = path[i];
+      if (!own(parent, key) || !isRecord(parent[key])) define(parent, key, {});
+      parent = parent[key];
+    }
+    define(parent, path[path.length - 1], copy(value));
+  }
+  const SIMPLE_PATHS = Object.freeze({
+    'settings.enabled': ['settings', 'enabled'], 'settings.order': ['settings', 'order'],
+    'settings.excluded': ['settings', 'excluded'], 'settings.shipOrder': ['settings', 'shipOrder'],
+    'settings.countAway': ['settings', 'countAway'], 'settings.shiftPresetShortcut': ['settings', 'shiftPresetShortcut'],
+    'settings.depotFillPercent': ['settings', 'depotFillPercent'], 'settings.presetCatalog': ['settings', 'presetCatalog'],
+    'notifications.browserEnabled': ['notifications', 'browserEnabled'],
+    'notifications.telegramEnabled': ['notifications', 'telegramEnabled'], 'notifications.paused': ['notifications', 'paused'],
+    'notifications.browserPaused': ['notifications', 'browserPaused'],
+    'notifications.telegramPaused': ['notifications', 'telegramPaused'],
+    'attackRetries.produceMissing': ['attackRetries', 'produceMissing'],
+    'attackRetries.maxRetries': ['attackRetries', 'maxRetries'],
+  });
+
+  function project(backup) {
+    if (!isRecord(backup)) fail('Backup must be an object.');
+    const rawSettings = pick(backup, 'settings');
+    const rawNotifications = pick(backup, 'notifications');
+    const rawTargets = pick(backup, 'levelTargets');
+    const rawRetries = pick(backup, 'attackRetries');
+    const settings = isRecord(rawSettings) ? rawSettings : {};
+    const notifications = isRecord(rawNotifications) ? rawNotifications : {};
+    const targets = isRecord(rawTargets) && isRecord(pick(rawTargets, 'targets')) ? pick(rawTargets, 'targets') : {};
+    const retries = isRecord(rawRetries) ? rawRetries : {};
+    const result = {};
+    for (const [key, path] of Object.entries(SIMPLE_PATHS)) define(result, key, pick(path[0] === 'settings' ? settings : path[0] === 'notifications' ? notifications : retries, path[path.length - 1]));
+    define(result, 'settings.order', pick(settings, 'order'));
+    define(result, 'settings.excluded', pick(settings, 'excluded'));
+    define(result, 'settings.shipOrder', pick(settings, 'shipOrder'));
+    const minimums = pick(settings, 'shipMinimums');
+    for (const id of SHIPS) define(result, `settings.shipMinimums.${id}`, pick(isRecord(minimums) ? minimums : {}, id));
+    for (const [key, path] of [
+      ['settings.countAway', 'countAway'], ['settings.shiftPresetShortcut', 'shiftPresetShortcut'],
+      ['settings.depotFillPercent', 'depotFillPercent'], ['settings.presetCatalog', 'presetCatalog'],
+    ]) define(result, key, pick(settings, path));
+    for (const key of ['browserEnabled', 'telegramEnabled', 'paused', 'browserPaused', 'telegramPaused']) {
+      define(result, `notifications.${key}`, pick(notifications, key));
+    }
+    define(result, 'notifications.credentials', {
+      botToken: pick(notifications, 'botToken'), chatId: pick(notifications, 'chatId'),
+    });
+    const eventValues = pick(notifications, 'events');
+    for (const type of EVENTS) define(result, `notifications.events.${type}`, pick(isRecord(eventValues) ? eventValues : {}, type));
+    for (const id of BUILDINGS) define(result, `levelTargets.targets.${id}`, pick(targets, id));
+    define(result, 'attackRetries.enabled', { enabled: pick(retries, 'enabled'), enabledAt: pick(retries, 'enabledAt') });
+    define(result, 'attackRetries.autoMinimums', {
+      autoMinimums: pick(retries, 'autoMinimums'), minimumsEnabledAt: pick(retries, 'minimumsEnabledAt'),
+    });
+    define(result, 'attackRetries.produceMissing', pick(retries, 'produceMissing'));
+    define(result, 'attackRetries.maxRetries', pick(retries, 'maxRetries'));
+    return copy(result);
+  }
+
+  function overlay(backup, values) {
+    if (!isRecord(backup)) fail('Backup must be an object.');
+    const incoming = validateFlat(values);
+    const result = copy(backup);
+    for (const [key, value] of Object.entries(incoming)) {
+      let path = SIMPLE_PATHS[key];
+      if (key.startsWith('settings.shipMinimums.')) path = ['settings', 'shipMinimums', key.slice('settings.shipMinimums.'.length)];
+      else if (key.startsWith('notifications.events.')) path = ['notifications', 'events', key.slice('notifications.events.'.length)];
+      else if (key.startsWith('levelTargets.targets.')) path = ['levelTargets', 'targets', key.slice('levelTargets.targets.'.length)];
+      else if (key === 'notifications.credentials') {
+        const before = getAt(result, ['notifications', 'botToken']);
+        const beforeChat = getAt(result, ['notifications', 'chatId']);
+        const changed = before === MISSING || beforeChat === MISSING
+          || !equal({ botToken: before, chatId: beforeChat }, value);
+        setAt(result, ['notifications', 'botToken'], value === null ? '' : value.botToken);
+        setAt(result, ['notifications', 'chatId'], value === null ? '' : value.chatId);
+        if (changed) setAt(result, ['notifications', 'drafts'], {
+          botToken: '', chatId: '', // Active credentials never populate the unfinished editor.
+        });
+        continue;
+      } else if (key === 'attackRetries.enabled') {
+        if (value === null) {
+          setAt(result, ['attackRetries', 'enabled'], false); setAt(result, ['attackRetries', 'enabledAt'], 0);
+        } else {
+          setAt(result, ['attackRetries', 'enabled'], value.enabled); setAt(result, ['attackRetries', 'enabledAt'], value.enabledAt);
+        }
+        continue;
+      } else if (key === 'attackRetries.autoMinimums') {
+        if (value === null) {
+          setAt(result, ['attackRetries', 'autoMinimums'], false); setAt(result, ['attackRetries', 'minimumsEnabledAt'], 0);
+        } else {
+          setAt(result, ['attackRetries', 'autoMinimums'], value.autoMinimums);
+          setAt(result, ['attackRetries', 'minimumsEnabledAt'], value.minimumsEnabledAt);
+        }
+        continue;
+      }
+      if (!path) fail('Unknown register key.');
+      const before = getAt(result, path);
+      const changed = before === MISSING || !equal(before, value);
+      setAt(result, path, value);
+      if (!changed) continue;
+      if (key.startsWith('settings.shipMinimums.')) {
+        const id = key.slice('settings.shipMinimums.'.length);
+        setAt(result, ['settings', 'numericDrafts', 'ships', id], value === null ? '' : String(value));
+      } else if (key === 'settings.depotFillPercent') {
+        setAt(result, ['settings', 'numericDrafts', 'depot'], value === null ? '' : String(value));
+      } else if (key.startsWith('levelTargets.targets.')) {
+        const id = key.slice('levelTargets.targets.'.length);
+        setAt(result, ['levelTargets', 'drafts', id], value === null ? '' : String(value));
+      } else if (key === 'attackRetries.maxRetries') {
+        setAt(result, ['attackRetries', 'maxRetriesDraft'], value === null ? '' : String(value));
+      }
+    }
+    return result;
+  }
+
+  function create(options) {
+    if (!isRecord(options)) fail('create requires an options object.');
+    const actor = options.actor;
+    const scope = options.scope;
+    if (!actorValid(actor)) fail('Invalid sync actor.');
+    if (!scopeValid(scope)) fail('Invalid sync scope.');
+    const now = options.now === undefined ? () => Date.now() : options.now;
+    if (typeof now !== 'function') fail('now must be a function.');
+    const loaded = validateState(options.state === undefined ? null : options.state, scope);
+    let fields = loaded.document ? copy(loaded.document.fields) : {};
+    let observed = copy(loaded.observed);
+    let lastMs = -1;
+    let lastCounter = -1;
+    for (const entry of Object.values(fields)) {
+      const [ms, counter] = entry.stamp;
+      if (ms > lastMs || (ms === lastMs && counter > lastCounter)) { lastMs = ms; lastCounter = counter; }
+    }
+
+    function makeDocument(nextFields = fields) {
+      const cleanFields = {};
+      for (const key of Object.keys(nextFields).sort()) {
+        const entry = nextFields[key];
+        define(cleanFields, key, { stamp: [...entry.stamp], value: copy(entry.value) });
+      }
+      return { format: FORMAT, schemaVersion: SCHEMA_VERSION, scope, fields: cleanFields };
+    }
+    function nextStamp() {
+      const wall = now();
+      if (!Number.isSafeInteger(wall) || wall < 0 || wall > MAX_TIME) fail('now returned an invalid timestamp.');
+      if (wall > lastMs) { lastMs = wall; lastCounter = wall === 0 ? 1 : 0; }
+      else {
+        lastCounter = lastCounter < 0 ? 0 : lastCounter + 1;
+        if (!Number.isSafeInteger(lastCounter)) fail('Hybrid logical clock overflow.');
+      }
+      return [lastMs, lastCounter, actor];
+    }
+    function write(key, value, stamp = nextStamp()) {
+      define(fields, key, { stamp, value: copy(value) });
+      if (stamp[0] > lastMs || (stamp[0] === lastMs && stamp[1] > lastCounter)) {
+        lastMs = stamp[0]; lastCounter = stamp[1];
+      }
+    }
+    function capture(flatValues) {
+      const incoming = validateFlat(flatValues);
+      const allKeys = new Set([...Object.keys(incoming), ...Object.keys(observed)]);
+      for (const key of [...allKeys].sort()) {
+        const present = own(incoming, key);
+        if (!present && !own(observed, key)) continue;
+        const value = present ? incoming[key] : null;
+        const hasObserved = own(observed, key);
+        const sameObserved = hasObserved && equal(observed[key], value);
+        const current = fields[key];
+        const sameRegister = current && equal(current.value, value);
+        if (!current) {
+          write(key, value, !hasObserved || sameObserved ? [0, 0, actor] : nextStamp());
+          define(observed, key, copy(value));
+        } else if (!hasObserved) {
+          // A loaded remote register without an observation is authoritative until the caller
+          // accepts it; the current browser value may just be an old local default.
+          define(observed, key, copy(value));
+        } else if (sameRegister) {
+          define(observed, key, copy(value));
+        } else if (sameObserved) {
+          // A merge can replace the register before the caller applies it. Retain the observation
+          // until the projected backup matches the merged value.
+          continue;
+        } else {
+          write(key, value);
+          define(observed, key, copy(value));
+        }
+      }
+      checkSize(makeDocument());
+      return makeDocument();
+    }
+    function merge(documents) {
+      const list = Array.isArray(documents) ? documents : [documents];
+      if (list.length > 10000) fail('Too many sync documents.');
+      const cleanDocuments = list.map(document => validateDocument(document, scope));
+      checkSize(cleanDocuments);
+      const nextFields = copy(fields);
+      for (const document of cleanDocuments) {
+        for (const [key, entry] of Object.entries(document.fields)) {
+          const current = nextFields[key];
+          if (!current) { define(nextFields, key, copy(entry)); continue; }
+          const order = compareStamp(entry.stamp, current.stamp);
+          if (order === 0 && !equal(entry.value, current.value)) fail(`Conflicting payloads share the same stamp for ${key}.`);
+          if (order > 0) define(nextFields, key, copy(entry));
+        }
+      }
+      const candidate = makeDocument(nextFields);
+      checkSize(candidate);
+      fields = nextFields;
+      for (const entry of Object.values(fields)) {
+        const [ms, counter] = entry.stamp;
+        if (ms > lastMs || (ms === lastMs && counter > lastCounter)) { lastMs = ms; lastCounter = counter; }
+      }
+      return copy(candidate);
+    }
+    function accept(flatValues) {
+      observed = validateFlat(flatValues, 'Accepted values');
+      return copy(observed);
+    }
+    function promoteSeeds() {
+      for (const key of Object.keys(fields).sort()) {
+        if (fields[key].stamp[0] === 0 && fields[key].stamp[1] === 0) write(key, fields[key].value);
+      }
+      checkSize(makeDocument());
+      return makeDocument();
+    }
+    function document() { return copy(makeDocument()); }
+    function state() {
+      const result = { document: makeDocument(), observed: copy(observed) };
+      checkSize(result);
+      return copy(result);
+    }
+    function values() {
+      const result = {};
+      for (const [key, entry] of Object.entries(fields)) define(result, key, copy(entry.value));
+      return copy(result);
+    }
+    return { capture, merge, document, state, values, accept, promoteSeeds };
+  }
+
+  return Object.freeze({ project, overlay, create, canonical });
+});
+// END EMBEDDED SYNC CORE
+
 (() => {
   'use strict';
 
@@ -26,7 +524,7 @@
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.10.3';
+  const SCRIPT_VERSION = '1.11.0';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -81,6 +579,8 @@
     onReport: report => attackRetry?.observeReport(report),
     onRecoverReports: batch => attackRetry?.recoverReports(batch) });
   let driveBackup = null;
+  let preferenceSync = null;
+  let lastPreferenceEditAt = 0;
   let importingBackup = false;
   const notificationSession = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
   let eventSequence = 0;
@@ -324,7 +824,11 @@
   }
 
   function settingsChanged() {
-    if (!importingBackup) driveBackup?.notifyChanged?.();
+    if (!importingBackup) {
+      let sharedChanged = true;
+      try { sharedChanged = preferenceSync?.observe() !== false; } catch { /* Retry capture on the next cycle. */ }
+      driveBackup?.notifyChanged?.({ sharedChanged });
+    }
   }
 
   function saveSettings() {
@@ -1590,6 +2094,7 @@
       format: 'old-light-auto-upgrade-backup',
       schemaVersion: 1,
       scriptVersion: SCRIPT_VERSION,
+      profile: missionContext().scope,
       exportedAt: new Date().toISOString(),
       settings: normalizeSettings(settings),
       notifications: notifier.exportConfig(),
@@ -1709,6 +2214,129 @@
     settingsChanged();
     return true;
   }
+
+  // BEGIN SHARED PREFERENCES INTEGRATION
+  function applySyncedPreferences(value) {
+    const editor = host?.shadowRoot?.activeElement;
+    if (missionAdapter.isBusy() || attackRetry.isBusy() ||
+        (editor?.matches('input:not([type=checkbox]):not([type=radio]),textarea,[contenteditable="true"]')
+          && Date.now() - lastPreferenceEditAt < 1500) || host?.shadowRoot?.querySelector('.is-sorting')) {
+      const cause = new Error('La sincronización espera a que termine la edición o el envío actual.');
+      cause.code = 'busy'; throw cause;
+    }
+    const next = validateBackup(value);
+    const previous = { settings, raw: localStorage.getItem(KEY), notifications: notifier.exportConfig(),
+      targets: levelTargets.exportConfig(), retries: attackRetry.backupCheckpoint(), missions: fleetWait.backupCheckpoint() };
+    importingBackup = true;
+    try {
+      if (JSON.stringify(settings) !== JSON.stringify(next.settings)) {
+        localStorage.setItem(KEY, JSON.stringify(next.settings));
+        settings = next.settings;
+        cancelNumericDraftTimers();
+        restoreNumericInputs();
+      }
+      if (JSON.stringify(previous.notifications) !== JSON.stringify(next.notifications)) notifier.importConfig(next.notifications);
+      if (JSON.stringify(previous.targets) !== JSON.stringify(next.levelTargets)) levelTargets.importConfig(next.levelTargets);
+      attackRetry.importPreferences(next.attackRetries);
+      if (settings.enabled && !previous.settings.enabled) { error = ''; unconfirmed = 0; }
+      syncSettingsTabs();
+    } catch (caught) {
+      let restored = true;
+      try { if (previous.raw === null) localStorage.removeItem(KEY); else localStorage.setItem(KEY, previous.raw); } catch { restored = false; }
+      try { notifier.importConfig(previous.notifications); } catch { restored = false; }
+      try { levelTargets.importConfig(previous.targets); } catch { restored = false; }
+      try { fleetWait.restoreCheckpoint(previous.missions); } catch { restored = false; }
+      try { attackRetry.restoreCheckpoint(previous.retries); } catch { restored = false; }
+      settings = previous.settings;
+      if (!restored) { settings.enabled = false; error = 'Falló la recuperación de ajustes. Automatización pausada.'; }
+      restoreNumericInputs();
+      const cause = new Error('No se pudieron guardar los ajustes sincronizados. Se reintentará.');
+      cause.code = 'storage_error'; throw cause;
+    } finally {
+      importingBackup = false;
+      schedule();
+    }
+  }
+
+  function createPreferenceSync(options) {
+    const core = globalThis.OldLightSyncCore;
+    const { getBackup, applyPreferences, getScope, getClientId, gmGetValue: read, gmSetValue: write } = options;
+    const PREFIX = 'old-light-preferences-sync:v1:';
+    const ACCOUNT = /^(?:id:[A-Za-z0-9_-]{1,200}|email:[^\s]{1,254})$/;
+    const SCOPE = /^[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{1,96}$/;
+    let observing = false;
+    const actor = crypto.randomUUID(); // Unique writer even across simultaneous tabs/cloned profiles.
+    function fail(code) { const cause = new Error(code); cause.code = code; throw cause; }
+    function scopeNow() { const scope = getScope(); if (!SCOPE.test(scope || '')) fail('busy'); return scope; }
+    function keyFor(scope, account, client) { return PREFIX + JSON.stringify([scope, client, account]); }
+    function activeFor(scope) {
+      const active = read(PREFIX + 'active', null);
+      return active?.scope === scope && active.client === getClientId() && ACCOUNT.test(active.account || '') ? active : null;
+    }
+    function load(key, scope, fallback = null) {
+      const state = read(key, fallback);
+      if (state && typeof state.then === 'function') fail('storage_error');
+      return core.create({ state, scope, actor });
+    }
+    function save(key, engine) {
+      const result = write(key, engine.state());
+      if (result && typeof result.then === 'function') fail('storage_error');
+    }
+    function observe() {
+      if (observing) return false;
+      observing = true;
+      try {
+        const scope = scopeNow();
+        const active = activeFor(scope);
+        const key = active ? keyFor(scope, active.account, active.client) : keyFor(scope, '', '');
+        const engine = load(key, scope);
+        const before = core.canonical(engine.state());
+        engine.capture(core.project(getBackup()));
+        const changed = core.canonical(engine.state()) !== before;
+        if (changed) save(key, engine);
+        return changed;
+      } finally { observing = false; }
+    }
+    function open(account) {
+      if (!ACCOUNT.test(account || '')) fail('sync_account');
+      observe();
+      const scope = scopeNow(), client = getClientId();
+      const key = keyFor(scope, account, client);
+      const saved = read(key, null);
+      const fallback = !read(PREFIX + 'active', null) ? read(keyFor(scope, '', ''), null) : null;
+      const engine = load(key, scope, saved || fallback);
+      engine.capture(core.project(getBackup()));
+      save(key, engine);
+      write(PREFIX + 'active', { scope, client, account });
+      return { engine, key, scope };
+    }
+    function get(account) { return { document: open(account).engine.document() }; }
+    function merge({ account, scope, documents, legacy }) {
+      const current = open(account);
+      if (scope !== current.scope || !Array.isArray(documents) || documents.length > 1000) fail('invalid_sync');
+      const engine = current.engine;
+      if (!documents.length && legacy) {
+        if (legacy.backup?.profile && legacy.backup.profile !== scope) fail('invalid_sync');
+        const legacySafe = validateBackup(legacy.backup);
+        const seed = core.create({ scope, actor: '00000000-0000-4000-8000-000000000001',
+          now: () => Math.max(1, Math.min(Date.now(), Date.parse(legacy.createdAt) || 1)) });
+        seed.capture(core.project(legacySafe)); seed.promoteSeeds();
+        documents = [seed.document()];
+      }
+      engine.merge(documents);
+      save(current.key, engine);
+      const backup = getBackup();
+      const next = core.overlay(backup, engine.values());
+      const changed = core.canonical(core.project(backup)) !== core.canonical(core.project(next));
+      if (changed) applyPreferences(next);
+      engine.accept(core.project(getBackup()));
+      engine.promoteSeeds();
+      save(current.key, engine);
+      return { document: engine.document(), changed };
+    }
+    return { observe, get, merge };
+  }
+  // END SHARED PREFERENCES INTEGRATION
 
   function installLocalBackups() {
     ui.exportSettings.addEventListener('click', event => {
@@ -6185,6 +6813,17 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       return true;
     }
     function exportConfig() { ensureReady(); return copy(config); }
+    function importPreferences(value) {
+      ensureReady();
+      const next = validateConfig(value);
+      const patch = Object.fromEntries(['enabled', 'autoMinimums', 'produceMissing', 'maxRetries']
+        .filter(key => next[key] !== config[key]).map(key => [key, next[key]]));
+      if (Object.keys(patch).length) setConfig(patch);
+      if (config.enabledAt !== next.enabledAt || config.minimumsEnabledAt !== next.minimumsEnabledAt) {
+        commit({ ...config, enabledAt: next.enabledAt, minimumsEnabledAt: next.minimumsEnabledAt });
+      }
+      return exportConfig();
+    }
     function importConfig(value) {
       const next = validateConfig(value);
       let previous = [];
@@ -6382,7 +7021,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     cleanupCancelledJobs();
     return { observeReport, recoverReports, flushMinimums, tick, canRunJob, setConfig, pause, resume, cancel, remove, cleanupCancelledJobs, mount, exportConfig, validateConfig,
       beginFleetEdit, getFleetEdit, setFleetDraft, applyFleetEdit, cancelFleetEdit,
-      importConfig, backupCheckpoint, restoreCheckpoint, refreshConfig, destroy,
+      importConfig, importPreferences, backupCheckpoint, restoreCheckpoint, refreshConfig, destroy,
       isEnabled: () => !destroyed && refreshConfig() && config.enabled,
       getEnabledAt: () => !destroyed && refreshConfig() ? config.enabledAt : 0,
       isObservingReports: () => !destroyed && refreshConfig() && observationSince() !== null,
@@ -9283,10 +9922,17 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const OPEN_TIMEOUT = 20000;
     const CLIENT_ID = /^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$/;
     const ACCOUNT_EMAIL = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$/;
-    const CAPABILITIES = ['oauth-config', 'account-hint'];
+    const CAPABILITIES = ['oauth-config', 'account-hint', 'settings-sync-v1'];
     const encoder = new TextEncoder();
     const LABELS = {
-      disconnected: 'Google Drive desconectado.',
+      disconnected: 'Google Drive desconectado. Los cambios quedan guardados en local.',
+      syncing: 'Sincronizando ajustes entre dispositivos…',
+      synced: 'Ajustes sincronizados automáticamente.',
+      sync_pending: 'Cambios pendientes de sincronizar.',
+      sync_waiting: 'Sincronización pendiente. Abre Google Drive y conecta tu cuenta.',
+      sync_account: 'No se pudo identificar la cuenta para sincronizar con seguridad.',
+      invalid_sync: 'No se pudieron validar los datos de sincronización. No se ha sustituido tu configuración.',
+      sync_retry: 'Sincronización interrumpida. Se reintentará automáticamente.',
       missing_client: 'Añade tu Client ID de Google para habilitar las copias en Drive.',
       opening: 'Abriendo la página de copias…',
       bridge_ready: 'Ventana conectada. Autoriza Google Drive desde esa ventana.',
@@ -9381,10 +10027,11 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       }
       const clientId = value.clientId === undefined ? '' : value.clientId;
       const autoBackup = value.autoBackup === undefined ? false : value.autoBackup;
+      const autoSync = value.autoSync === undefined ? true : value.autoSync;
       const rememberAccount = value.rememberAccount === undefined ? true : value.rememberAccount;
       const accountHint = validateAccountHint(value.accountHint === undefined ? '' : value.accountHint);
       const clientIdDraft = value.clientIdDraft === undefined ? null : value.clientIdDraft;
-      if (typeof clientId !== 'string' || typeof autoBackup !== 'boolean' ||
+      if (typeof clientId !== 'string' || typeof autoBackup !== 'boolean' || typeof autoSync !== 'boolean' ||
           typeof rememberAccount !== 'boolean' ||
           (clientIdDraft !== null && (typeof clientIdDraft !== 'string' || clientIdDraft.length > 300))) {
         throw new TypeError('La configuración de Google Drive no tiene un formato válido.');
@@ -9393,7 +10040,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       if (trimmed && (trimmed.length > 300 || !CLIENT_ID.test(trimmed))) {
         throw new TypeError('El Client ID de Google no tiene un formato válido.');
       }
-      return { clientId: trimmed, autoBackup, rememberAccount,
+      return { clientId: trimmed, autoBackup, autoSync, rememberAccount,
         accountHint: rememberAccount ? accountHint : '', clientIdDraft };
     }
 
@@ -9416,6 +10063,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       if (!inputs) return;
       inputs.client.value = config.clientIdDraft === null ? config.clientId : config.clientIdDraft;
       inputs.auto.checked = config.autoBackup;
+      inputs.sync.checked = config.autoSync;
       inputs.remember.checked = config.rememberAccount;
       inputs.open.disabled = false;
       inputs.open.textContent = config.clientId || defaultClientId ? 'Abrir Google Drive' : 'Configurar Google Drive';
@@ -9504,7 +10152,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         if (typeof message.code === 'string' && Object.hasOwn(LABELS, message.code)) report(message.code);
         return;
       }
-      if (!['get-backup', 'apply-backup', 'set-config', 'remember-account'].includes(message.type)) return;
+      if (!['get-backup', 'apply-backup', 'get-sync', 'merge-sync', 'set-config', 'remember-account'].includes(message.type)) return;
       if (typeof message.id !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(message.id)) return;
       if (message.revision !== configRevision) {
         send(current, { type: 'reply', id: message.id, ok: false, error: 'expired' });
@@ -9557,7 +10205,11 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       }
       current.serving = true;
       try {
-        if (message.type === 'get-backup') {
+        if (message.type === 'get-sync' || message.type === 'merge-sync') {
+          if (!config.autoSync || !preferenceSync) throw Object.assign(new Error('busy'), { code: 'busy' });
+          const result = message.type === 'get-sync' ? preferenceSync.get(message.account) : preferenceSync.merge(message);
+          send(current, { type: 'reply', id: message.id, ok: true, ...result });
+        } else if (message.type === 'get-backup') {
           const value = await getBackup();
           if (message.revision !== configRevision) {
             send(current, { type: 'reply', id: message.id, ok: false, error: 'expired' });
@@ -9575,9 +10227,11 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
           send(current, { type: 'reply', id: message.id, ok: true });
           report('restored');
         }
-      } catch (_) {
-        send(current, { type: 'reply', id: message.id, ok: false, error: 'invalid_backup' });
-        report('invalid_backup');
+      } catch (cause) {
+        const syncRequest = ['get-sync', 'merge-sync'].includes(message.type);
+        const code = Object.hasOwn(LABELS, cause?.code) ? cause.code : syncRequest ? 'invalid_sync' : 'invalid_backup';
+        send(current, { type: 'reply', id: message.id, ok: false, error: code });
+        report(code);
       } finally {
         current.serving = false;
         applying = false;
@@ -9664,9 +10318,9 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       refreshControls();
     }
 
-    function notifyChanged() {
-      if (!destroyed && !applying && Date.now() >= suppressChangedUntil && config.autoBackup) {
-        send(session, { type: 'settings-changed' });
+    function notifyChanged({ sharedChanged = true, backupChange = true } = {}) {
+      if (!destroyed && !applying && Date.now() >= suppressChangedUntil && (config.autoBackup && backupChange || config.autoSync && sharedChanged)) {
+        send(session, { type: 'settings-changed', sharedChanged, backupChange });
       }
     }
 
@@ -9717,10 +10371,13 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       const autoLabel = element('label', undefined, { className: 'drive-toggle' });
       const auto = element('input', undefined, { type: 'checkbox' });
       autoLabel.append(auto, document.createTextNode(' Copia automática de cada cambio'));
+      const syncLabel = element('label', undefined, { className: 'drive-toggle' });
+      const sync = element('input', undefined, { type: 'checkbox' });
+      syncLabel.append(sync, document.createTextNode(' Sincronizar ajustes automáticamente entre dispositivos'));
       const rememberLabel = element('label', undefined, { className: 'drive-toggle' });
       const remember = element('input', undefined, { type: 'checkbox' });
       rememberLabel.append(remember, document.createTextNode(' Recordar mi cuenta'));
-      const note = element('p', 'Las copias automáticas necesitan la ventana de Drive abierta y conectada.');
+      const note = element('p', 'Los ajustes se envían y reciben automáticamente con Drive conectado. Las misiones en ejecución y la posición de esta ventana permanecen locales. La conexión actual necesita la ventana de Drive abierta y autorización vigente.');
       const advanced = element('details', undefined, { className: 'drive-advanced' });
       advanced.dataset.uiSection = 'driveAdvanced';
       advanced.open = config.clientIdDraft !== null;
@@ -9740,7 +10397,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       fieldStatus.setAttribute('role', 'status');
       fieldStatus.setAttribute('aria-live', 'polite');
       advanced.append(clientLabel, inputNote, active, setupNote, clear);
-      box.append(status, account, controls, autoLabel, rememberLabel, note, fieldStatus, advanced);
+      box.append(status, account, controls, syncLabel, autoLabel, rememberLabel, note, fieldStatus, advanced);
 
       function flushClientDraft() {
         clearTimeout(draftTimer);
@@ -9773,13 +10430,14 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       client.addEventListener('blur', flushClientDraft);
       function saveToggles() {
         try {
-          storeConfig({ ...exportConfig(), autoBackup: auto.checked, rememberAccount: remember.checked });
+          storeConfig({ ...exportConfig(), autoBackup: auto.checked, autoSync: sync.checked, rememberAccount: remember.checked });
           inputStatus('config_saved');
         } catch (_) {
           refreshControls();
           inputStatus('storage_error');
         }
       }
+      sync.addEventListener('change', saveToggles);
       auto.addEventListener('change', saveToggles);
       remember.addEventListener('change', saveToggles);
       clear.addEventListener('click', () => {
@@ -9792,7 +10450,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       });
       open.addEventListener('click', () => { flushClientDraft(); openCompanion(); });
       close.addEventListener('click', () => closeSession());
-      inputs = { client, auto, remember, open, close, clear, active, account, status, inputStatus: fieldStatus };
+      inputs = { client, auto, sync, remember, open, close, clear, active, account, status, inputStatus: fieldStatus };
       mountNode = box;
       container.append(box);
       refreshControls();
@@ -9906,6 +10564,10 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         gmGetValue: GM_getValue, gmSetValue: GM_setValue,
         // Public Google Web client registered for the companion's GitHub Pages origin.
         defaultClientId: '418130838768-qhd4o520fhi8hojd6t3g43luesr8v0n9.apps.googleusercontent.com' });
+      preferenceSync = createPreferenceSync({ getBackup: createBackup, applyPreferences: applySyncedPreferences,
+        getScope: () => missionContext().scope, getClientId: () => driveBackup.exportConfig().clientId,
+        gmGetValue: GM_getValue, gmSetValue: GM_setValue });
+      try { preferenceSync.observe(); } catch { /* Game identity may not be ready yet. */ }
     } catch { /* La copia local y la automatización funcionan aunque GM no esté disponible. */ }
   }
 
@@ -9941,10 +10603,18 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     layoutHelper();
     schedule();
   });
+  document.addEventListener('input', event => {
+    if (event.composedPath().includes(host)) lastPreferenceEditAt = Date.now();
+  }, true);
   document.addEventListener('visibilitychange', schedule);
   window.addEventListener('pageshow', schedule);
   window.addEventListener('focus', schedule);
   // Respaldo para carga tardía, plazos de respuesta y recuperación de pestañas.
-  setInterval(schedule, 1000);
+  setInterval(() => {
+    schedule();
+    if (!importingBackup) try {
+      if (preferenceSync?.observe()) driveBackup?.notifyChanged?.({ sharedChanged: true, backupChange: false });
+    } catch { /* Retry after game identity/storage recovers. */ }
+  }, 1000);
   schedule();
 })();

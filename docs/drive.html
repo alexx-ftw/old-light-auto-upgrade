@@ -5,19 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="strict-origin-when-cross-origin">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://accounts.google.com/gsi/client; connect-src https://accounts.google.com/gsi/ https://www.googleapis.com; frame-src https://accounts.google.com/gsi/; style-src 'self' https://accounts.google.com/gsi/style; img-src 'self' data:; base-uri 'none'; object-src 'none'; form-action 'none'">
-  <title>Copias de Old Light</title>
-  <link rel="stylesheet" href="./drive.css?v=1.4.0">
-  <script src="./drive.js?v=1.4.0" defer></script>
+  <title>Sincronización de Old Light</title>
+  <link rel="stylesheet" href="./drive.css?v=1.11.0">
+  <script src="./sync-core.js?v=1.11.0" defer></script>
+  <script src="./drive.js?v=1.11.0" defer></script>
 </head>
 <body>
   <main>
     <header>
       <p class="eyebrow">OLD LIGHT · AUTO UPGRADE</p>
       <h1>Tus ajustes en Google Drive</h1>
-      <p>Inicia sesión para guardar y recuperar la configuración de tu helper.</p>
+      <p>Conecta Google una vez por sesión. Los ajustes se envían y reciben automáticamente mientras la conexión esté activa.</p>
     </header>
     <section aria-labelledby="connection-heading">
-      <div class="section-heading"><h2 id="connection-heading">Google Drive</h2><span class="version">v1.4.0</span></div>
+      <div class="section-heading"><h2 id="connection-heading">Google Drive</h2><span class="version">v1.11.0</span></div>
       <p id="account" class="account">Sin sesión iniciada</p>
       <p id="session-status" class="connection-status" role="status" aria-live="polite">Conectando con el helper…</p>
       <p id="expiry" class="note"></p>
@@ -28,8 +29,11 @@
         <button id="retry-library" type="button" class="secondary" hidden>Reintentar conexión</button>
       </div>
       <div class="preferences">
+        <label class="check"><input id="auto-sync" type="checkbox" disabled>Sincronizar ajustes automáticamente entre dispositivos</label>
         <label class="check"><input id="auto-backup" type="checkbox" disabled>Copia automática de los cambios locales</label>
       </div>
+      <p id="sync-status" class="note" role="status" aria-live="polite">Sincronización pendiente de conexión.</p>
+      <p class="note">Comparte prioridades, mínimos de naves, objetivos, presets y ajustes de avisos/reintentos. Conserva en cada cliente la interfaz, los borradores y las misiones en ejecución. No es un bloqueo distribuido de flotas: usa un solo cliente para ejecutar campañas.</p>
       <p id="automatic" class="note">Copia automática desactivada.</p>
       <p id="preferences-status" class="autosave-hint" role="status" aria-live="polite">Los ajustes se guardan automáticamente.</p>
     </section>
@@ -84,7 +88,7 @@
       <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener noreferrer">Ver permisos en tu cuenta de Google</a>
     </details>
     <footer>
-      <p>Las copias son privadas de esta aplicación. Mantén esta ventana abierta para copiar automáticamente los cambios; las restauraciones siempre las eliges tú.</p>
+      <p>Las copias son privadas de esta aplicación. Mantén esta ventana abierta y autorizada para sincronizar automáticamente. La restauración de una copia completa continúa siendo una acción manual independiente.</p>
       <a href="https://github.com/alexx-ftw/old-light-auto-upgrade#copias-en-google-drive" target="_blank" rel="noopener noreferrer">Código e instrucciones</a>
     </footer>
   </main>

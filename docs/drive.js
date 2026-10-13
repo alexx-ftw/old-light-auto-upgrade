@@ -27,6 +27,13 @@
     renewing: 'Renovando la conexión con Google Drive…',
     switching_account: 'Elige la cuenta de Google que quieres usar.',
     connected: 'Conexión activa con Google Drive.',
+    syncing: 'Sincronizando ajustes entre dispositivos…',
+    synced: 'Ajustes sincronizados automáticamente.',
+    sync_pending: 'Hay cambios pendientes de sincronizar.',
+    sync_waiting: 'Conecta Google para sincronizar los ajustes.',
+    sync_account: 'No se pudo identificar la cuenta para sincronizar con seguridad.',
+    invalid_sync: 'No se pudieron validar los ajustes remotos. Se reintentará sin sustituir los datos locales.',
+    sync_retry: 'Conexión interrumpida. Se reintentará automáticamente.',
     renew_soon: 'La conexión caduca pronto. Pulsa Renovar conexión para continuar.',
     listing: 'Consultando las últimas copias…',
     listed: 'Lista de copias actualizada.',
@@ -79,7 +86,7 @@
     'library_loading', 'library_error', 'library_timeout', 'bridge_lost', 'revoking', 'revoked', 'revoke_failed']);
   const ui = Object.fromEntries(['status', 'connect', 'disconnect', 'automatic', 'save', 'refresh', 'backups',
     'empty', 'restore', 'account', 'session-status', 'expiry', 'switch-account', 'cancel-auth', 'retry-library',
-    'remember-account', 'auto-backup', 'client-id', 'choose-client-file', 'import-client', 'clear-client',
+    'remember-account', 'auto-backup', 'auto-sync', 'sync-status', 'client-id', 'choose-client-file', 'import-client', 'clear-client',
     'copy-origin', 'setup', 'setup-status', 'technical-status', 'preferences-status', 'account-settings-status',
     'revoke', 'confirm-revoke', 'cancel-revoke', 'revoke-confirmation']
     .map(id => [id, document.getElementById(id)]));
@@ -87,7 +94,7 @@
   const requests = new Set();
   let port = null;
   let bridgeAlive = false;
-  let config = { clientId: '', autoBackup: false, rememberAccount: true, accountHint: '', clientIdDraft: null };
+  let config = { clientId: '', autoBackup: false, autoSync: true, rememberAccount: true, accountHint: '', clientIdDraft: null };
   let configRevision = 0;
   let configReady = false;
   let capabilities = new Set();
@@ -123,6 +130,165 @@
   let libraryState = 'idle';
   let libraryAttempt = 0;
   let libraryTimer = null;
+
+  // BEGIN AUTOMATIC SETTINGS SYNC
+  const SYNC_ENVELOPE = 'old-light-settings-sync-envelope';
+  const SYNC_FIELDS = 'id,name,mimeType,modifiedTime,createdTime,size,version,appProperties';
+  const syncReplica = crypto.randomUUID();
+  let syncTimer = null;
+  let syncFailures = 0;
+  let syncPending = true;
+  let syncChangeRevision = 0;
+  let syncLastAt = 0;
+  let syncFileId = '';
+  let syncBinding = '';
+  let syncPublishedHash = '';
+  let syncCache = new Map();
+
+  function resetSync() {
+    clearTimeout(syncTimer); syncTimer = null;
+    syncFailures = 0; syncPending = true; syncLastAt = 0;
+    syncFileId = ''; syncBinding = ''; syncPublishedHash = ''; syncCache = new Map();
+  }
+  function syncEnabled() { return config.autoSync && capabilities.has('settings-sync-v1'); }
+  function renderSync() {
+    ui['auto-sync'].checked = config.autoSync;
+    ui['auto-sync'].disabled = !bridgeAlive || !capabilities.has('settings-sync-v1') || revoking || configWrites > 0;
+    ui['sync-status'].textContent = !capabilities.has('settings-sync-v1')
+      ? 'Actualiza el userscript a v1.11.0 para sincronizar automáticamente.'
+      : !config.autoSync ? 'Sincronización automática desactivada en este cliente.'
+      : !isAuthorized() ? 'Cambios conservados en local. La sincronización continuará al conectar Google.'
+      : syncFailures ? 'No se ha podido sincronizar. Reintentando automáticamente sin descartar cambios…'
+      : syncPending ? 'Comprobando y sincronizando cambios…'
+      : 'Sincronizado · ' + new Date(syncLastAt).toLocaleTimeString() + '. Comprobación automática cada 15 s.';
+  }
+  function scheduleSync(delay = 15000) {
+    clearTimeout(syncTimer); syncTimer = null;
+    if (!syncEnabled() || !isAuthorized() || closed || authPending || revoking || configWrites || busy) return;
+    const wait = syncFailures ? Math.min(120000, 3000 * 2 ** Math.min(syncFailures - 1, 6)) : delay;
+    syncTimer = setTimeout(() => {
+      syncTimer = null;
+      if (!syncEnabled() || !isAuthorized() || authPending || revoking || configWrites || busy) { scheduleSync(); return; }
+      void operate(async () => {
+        try { await syncSettings(); }
+        catch (caught) {
+          syncPending = true; syncFailures = caught?.code === 'busy' ? 0 : syncFailures + 1;
+          throw caught;
+        }
+      });
+    }, wait);
+  }
+  function validSyncFile(file, scopeHash) {
+    return file && FILE_ID.test(file.id || '') && file.mimeType === 'application/json'
+      && file.appProperties?.app === APP && file.appProperties?.syncFormat === '1'
+      && file.appProperties?.scopeHash === scopeHash && UUID.test(file.appProperties?.replica || '')
+      && HASH.test(file.appProperties?.sha256 || '') && /^\d+$/.test(String(file.version))
+      && /^\d+$/.test(String(file.size)) && Number(file.size) <= MAX_BYTES
+      && file.name === `${APP}-sync-${file.appProperties.replica}.json`;
+  }
+  async function syncFiles(scopeHash) {
+    const files = []; let pageToken = ''; const seenPages = new Set();
+    do {
+      const result = await api('/drive/v3/files', { params: {
+        spaces: 'appDataFolder', pageSize: '100', orderBy: 'createdTime',
+        q: `trashed = false and appProperties has { key='app' and value='${APP}' } and appProperties has { key='syncFormat' and value='1' } and appProperties has { key='scopeHash' and value='${scopeHash}' }`,
+        fields: `nextPageToken,incompleteSearch,files(${SYNC_FIELDS})`, ...(pageToken ? { pageToken } : {}),
+      } });
+      if (!Array.isArray(result.files) || result.incompleteSearch || result.files.some(file => !validSyncFile(file, scopeHash))) throw error('invalid_sync');
+      files.push(...result.files);
+      if (files.length > 1000) throw error('invalid_sync');
+      pageToken = result.nextPageToken || '';
+      if (typeof pageToken !== 'string' || pageToken.length > 4096 || (pageToken && seenPages.has(pageToken))) throw error('invalid_sync');
+      seenPages.add(pageToken);
+    } while (pageToken);
+    return files;
+  }
+  async function readSyncFile(file, scope) {
+    const cached = syncCache.get(file.id);
+    if (cached?.version === String(file.version)) return cached.document;
+    const envelope = await api(`/drive/v3/files/${file.id}`, { params: { alt: 'media' } });
+    if (envelope?.format !== SYNC_ENVELOPE || envelope.schemaVersion !== 1 || !HASH.test(envelope.sha256 || '')
+        || envelope.document?.scope !== scope || envelope.document?.format !== 'old-light-settings-sync'
+        || envelope.document?.schemaVersion !== 1) throw error('invalid_sync');
+    const digest = await hashBackup(envelope.document);
+    // A concurrent writer may have updated after the metadata listing. Retry that race.
+    if (digest !== envelope.sha256 || envelope.sha256 !== file.appProperties.sha256) throw error('invalid_sync');
+    syncCache.set(file.id, { version: String(file.version), document: envelope.document });
+    return envelope.document;
+  }
+  async function legacyPreferences(scope) {
+    const selected = copies.values().next().value;
+    if (!selected) return undefined;
+    const envelope = await api(`/drive/v3/files/${selected.id}`, { params: { alt: 'media' } });
+    if (envelope?.format !== COPY_FORMAT || envelope.schemaVersion !== 1
+        || envelope.backupId !== selected.appProperties.backupId || envelope.sha256 !== selected.appProperties.sha256) throw error('invalid_backup');
+    const backup = parseRoot(JSON.stringify(envelope.backup));
+    if (await hashBackup(backup) !== envelope.sha256) throw error('invalid_backup');
+    if (backup.profile && backup.profile !== scope) return undefined;
+    return { backup, createdAt: selected.createdTime };
+  }
+  async function publishSync(document, scopeHash, digest) {
+    const envelope = { format: SYNC_ENVELOPE, schemaVersion: 1, sha256: digest, document };
+    const json = JSON.stringify(envelope);
+    if (encoder.encode(json).byteLength > MAX_BYTES) throw error('invalid_sync');
+    const metadata = { name: `${APP}-sync-${syncReplica}.json`, mimeType: 'application/json',
+      ...(!syncFileId ? { parents: ['appDataFolder'] } : {}),
+      appProperties: { app: APP, syncFormat: '1', scopeHash, replica: syncReplica, sha256: digest } };
+    const boundary = `oldlight_sync_${crypto.randomUUID().replaceAll('-', '')}`;
+    const contentType = `multipart/related; boundary=${boundary}`;
+    const body = new Blob([`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n`,
+      JSON.stringify(metadata), `\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n`, json, `\r\n--${boundary}--\r\n`], { type: contentType });
+    const file = await api('/upload/drive/v3/files' + (syncFileId ? `/${syncFileId}` : ''), {
+      method: syncFileId ? 'PATCH' : 'POST', params: { uploadType: 'multipart', fields: SYNC_FIELDS }, contentType, body });
+    if (!validSyncFile(file, scopeHash) || file.appProperties.sha256 !== digest || file.appProperties.replica !== syncReplica) throw error('upload_uncertain');
+    syncFileId = file.id; syncPublishedHash = digest;
+    syncCache.set(file.id, { version: String(file.version), document });
+  }
+  async function syncSettings() {
+    if (!syncEnabled()) return;
+    const expected = generation;
+    assertCurrent(expected);
+    const identity = accountKey();
+    if (!identity) throw error('sync_account');
+    const startedRevision = syncChangeRevision;
+    status('syncing');
+    const local = await rpc('get-sync', { account: identity });
+    assertCurrent(expected);
+    const scope = local.document?.scope;
+    if (typeof scope !== 'string' || !/^[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{1,96}$/.test(scope)) throw error('invalid_sync');
+    const binding = JSON.stringify([config.clientId, identity, scope]);
+    if (syncBinding !== binding) { resetSync(); syncBinding = binding; }
+    const scopeHash = await hashBackup(scope);
+    const files = await syncFiles(scopeHash);
+    assertCurrent(expected);
+    const own = files.find(file => file.appProperties.replica === syncReplica);
+    syncFileId = own?.id || '';
+    if (own) syncPublishedHash = own.appProperties.sha256;
+    else syncPublishedHash = '';
+    const aggregate = globalThis.OldLightSyncCore.create({ scope, actor: syncReplica });
+    for (let i = 0; i < files.length; i += 4) {
+      const batch = await Promise.all(files.slice(i, i + 4).map(file => readSyncFile(file, scope)));
+      for (const document of batch) aggregate.merge([document]);
+      assertCurrent(expected);
+    }
+    const visible = new Set(files.map(file => file.id));
+    for (const id of syncCache.keys()) if (!visible.has(id)) syncCache.delete(id);
+    const documents = files.length ? [aggregate.document()] : [];
+    const legacy = files.length ? undefined : await legacyPreferences(scope);
+    assertCurrent(expected);
+    // The helper captures again immediately before merging, protecting edits made during downloads.
+    const merged = await rpc('merge-sync', { account: identity, scope, documents, ...(legacy ? { legacy } : {}) });
+    assertCurrent(expected);
+    if (!syncEnabled()) return;
+    const digest = await hashBackup(merged.document);
+    assertCurrent(expected);
+    if (digest !== syncPublishedHash) await publishSync(merged.document, scopeHash, digest);
+    assertCurrent(expected);
+    // A later edit is picked up by the journal even when this cycle's upload was in flight.
+    syncPending = startedRevision !== syncChangeRevision; syncFailures = 0; syncLastAt = Date.now();
+    status('synced');
+  }
+  // END AUTOMATIC SETTINGS SYNC
 
   function error(code) { const value = new Error(code); value.code = code; return value; }
 
@@ -197,6 +363,7 @@
           dirty ? 'Cambios pendientes guardados en local. Vuelve a conectar la misma cuenta para copiarlos a Drive.' :
             'Copia automática configurada. Requiere conexión y autorización vigentes.';
     syncConfigControls();
+    renderSync();
   }
 
   function clearCopies() {
@@ -217,6 +384,7 @@
   }
 
   function clearAuth({ keepAccount = false, keepDirty = false } = {}) {
+    resetSync();
     generation += 1;
     authAttempt += 1;
     authPending = false;
@@ -237,6 +405,7 @@
   }
 
   function expireToken() {
+    clearTimeout(syncTimer);
     token = null;
     expiresAt = 0;
     clearTimeout(expirationTimer);
@@ -281,12 +450,14 @@
     if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.clientId !== 'string' ||
         typeof value.autoBackup !== 'boolean' || value.clientId.length > 300 ||
         (value.clientId && !CLIENT_ID.test(value.clientId))) throw error('invalid_config');
+    const autoSync = value.autoSync === undefined ? true : value.autoSync;
+    if (typeof autoSync !== 'boolean') throw error('invalid_config');
     const rememberAccount = value.rememberAccount === undefined ? true : value.rememberAccount;
     const hint = value.accountHint === undefined ? '' : value.accountHint;
     const draft = value.clientIdDraft === undefined ? null : value.clientIdDraft;
     if (typeof rememberAccount !== 'boolean' || typeof hint !== 'string' || hint.length > 254 ||
         (hint && !EMAIL.test(hint)) || (draft !== null && (typeof draft !== 'string' || draft.length > 300))) throw error('invalid_config');
-    return { clientId: value.clientId, autoBackup: value.autoBackup, rememberAccount,
+    return { clientId: value.clientId, autoBackup: value.autoBackup, autoSync, rememberAccount,
       accountHint: rememberAccount ? hint : '', clientIdDraft: draft };
   }
 
@@ -310,6 +481,7 @@
     }
     if (clientChanged || first) status(config.clientId ? 'bridge_ready' : 'missing_client');
     else render();
+    scheduleSync(1000);
   }
 
   function onPortMessage(event) {
@@ -329,7 +501,10 @@
       try { receiveConfig(message); } catch (_) { disconnectGoogle('invalid_config'); }
       return;
     }
-    if (message.type === 'settings-changed' && config.autoBackup) {
+    if (message.type === 'settings-changed' && syncEnabled() && message.sharedChanged !== false) {
+      syncChangeRevision += 1; syncPending = true; scheduleSync(1500); render();
+    }
+    if (message.type === 'settings-changed' && config.autoBackup && message.backupChange !== false) {
       dirty = true;
       dirtyOwner = accountKey();
       scheduleAuto();
@@ -339,7 +514,7 @@
 
   function queueConfig(patch, message = 'Guardado automáticamente.') {
     if (!bridgeAlive || !capabilities.has('oauth-config')) return Promise.resolve(false);
-    const feedback = Object.hasOwn(patch, 'autoBackup') ? ui['preferences-status'] :
+    const feedback = (Object.hasOwn(patch, 'autoBackup') || Object.hasOwn(patch, 'autoSync')) ? ui['preferences-status'] :
       Object.hasOwn(patch, 'rememberAccount') ? ui['account-settings-status'] : ui['setup-status'];
     configWrites += 1;
     feedback.textContent = 'Guardando en el helper…';
@@ -358,7 +533,7 @@
       feedback.textContent = STATUS[caught?.code] || STATUS.storage_error;
       feedback.classList.add('save-error');
       return false;
-    }).finally(() => { configWrites -= 1; render(); scheduleAuto(); });
+    }).finally(() => { configWrites -= 1; render(); scheduleAuto(); scheduleSync(1000); });
     configQueue = task;
     return task;
   }
@@ -610,6 +785,7 @@
       busy = false;
       render();
       scheduleAuto();
+      scheduleSync(syncPending ? 1500 : 15000);
     }
   }
 
@@ -688,6 +864,7 @@
     assertCurrent(expected);
     status('connected');
     await listCopies();
+    if (syncEnabled()) await syncSettings();
   }
 
   function connectGoogle(selectAccount = false) {
@@ -866,6 +1043,10 @@
     }, 400);
   });
   ui['client-id'].addEventListener('blur', flushClientDraft);
+  ui['auto-sync'].addEventListener('change', () => { void queueConfig({ autoSync: ui['auto-sync'].checked }); });
+  window.addEventListener('online', () => { syncFailures = 0; scheduleSync(0); });
+  window.addEventListener('focus', () => scheduleSync(500));
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) scheduleSync(500); });
   ui['auto-backup'].addEventListener('change', () => { void queueConfig({ autoBackup: ui['auto-backup'].checked }); });
   ui['remember-account'].addEventListener('change', () => { void queueConfig({ rememberAccount: ui['remember-account'].checked }); });
   ui['clear-client'].addEventListener('click', () => {
