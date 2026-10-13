@@ -35,6 +35,11 @@
       <p>El helper utiliza los datos visibles y los reportes de Old Light para las funciones que configuras. Los avisos pueden incluir nombres de sistemas o jugadores, coordenadas, flotas, recursos y resultados de acciones.</p>
       <p>Si activas Telegram, los avisos seleccionados se envían directamente a la API de Telegram para el bot y chat que has configurado. Las notificaciones del navegador dependen de tu permiso y de los filtros elegidos. Puedes desactivar cada canal o tipo de aviso desde el helper.</p>
     </section>
+    <section aria-labelledby="metrics-heading">
+      <h2 id="metrics-heading">Métricas locales opcionales</h2>
+      <p>En Datos → Métricas locales puedes activar contadores de funciones usadas y categorías fijas de errores. Están desactivados inicialmente y se guardan únicamente en el almacenamiento de este navegador, agrupados por día UTC. El informe muestra los últimos 30 días; los días anteriores se eliminan del almacenamiento al registrar un nuevo evento. La limpieza no puede ejecutarse mientras el navegador está cerrado. No contienen cuentas, nombres de jugadores, coordenadas, mensajes, credenciales, direcciones web, trazas de error ni identificadores personales.</p>
+      <p>No se envían a un servidor, no se sincronizan con Google Drive y no se incluyen en las copias de configuración. Puedes revisar el informe JSON y descargarlo para compartirlo manualmente. Desactivar la medición borra sus contadores; el botón Borrar y desactivar también los elimina y detiene la medición, sin cambiar la configuración del helper. Si el navegador impide guardar o borrar, el helper informa del fallo y detiene la medición.</p>
+    </section>
     <section aria-labelledby="services-heading">
       <h2 id="services-heading">Servicios que intervienen</h2>
       <p>El proyecto no opera un servidor propio que reciba tus ajustes o copias. Los intercambios con Google Drive y Telegram se realizan desde tu navegador hacia esos servicios. GitHub aloja el código y estas páginas, y sirve las descargas y actualizaciones del userscript.</p>

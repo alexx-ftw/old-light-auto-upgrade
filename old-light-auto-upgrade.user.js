@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.12.1
-// @description  Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive. Con actualización automática.
+// @version      1.13.0
+// @description  Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
 // @supportURL   https://github.com/alexx-ftw/old-light-auto-upgrade/issues
@@ -15,6 +15,383 @@
 // @connect      api.telegram.org
 // @noframes
 // ==/UserScript==
+
+// BEGIN EMBEDDED METRICS CORE
+(function (root, factory) {
+  'use strict';
+  const api = factory();
+  if (typeof module === 'object' && module && module.exports) module.exports = api;
+  if (root) Object.defineProperty(root, 'OldLightMetricsCore', {
+    configurable: true, enumerable: true, writable: true, value: api,
+  });
+})(typeof globalThis === 'object' ? globalThis : this, function () {
+  'use strict';
+
+  const SCHEMA = 1;
+  const RETENTION_DAYS = 30;
+  const MAX_COUNT = 1000000;
+  const DAY_MS = 86400000;
+  const EVENTS = Object.freeze([
+    'helper.loaded', 'ui.tab.buildings', 'ui.tab.fleet', 'ui.tab.notifications', 'ui.tab.data',
+    'ui.fleet.minimums', 'ui.fleet.campaigns', 'ui.fleet.missions', 'settings.changed',
+    'backup.exported', 'backup.imported', 'backup.failed', 'automation.sent', 'automation.confirmed',
+    'automation.unconfirmed', 'automation.failed', 'automation.rejected', 'automation.paused',
+    'mission.sent', 'mission.uncertain', 'drive.connected', 'drive.synced', 'drive.retry', 'drive.error',
+    'error.runtime', 'error.storage',
+  ]);
+  const EVENT_SET = new Set(EVENTS);
+  const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+
+  function plain(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === null || prototype === Object.prototype;
+  }
+
+  // Never evaluate accessors, toJSON, or object-to-string conversions from storage.
+  function valueOf(object, key) {
+    const descriptor = Object.getOwnPropertyDescriptor(object, key);
+    return descriptor && own(descriptor, 'value') ? descriptor.value : undefined;
+  }
+
+  function safeVersion(version) {
+    return typeof version === 'string' && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(version) ? version : 'unknown';
+  }
+
+  function dateNumber(value) {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+    const stamp = Date.parse(value + 'T00:00:00.000Z');
+    if (!Number.isFinite(stamp) || new Date(stamp).toISOString().slice(0, 10) !== value) return null;
+    return Math.floor(stamp / DAY_MS);
+  }
+
+  function asyncResult(result) {
+    if (!result || (typeof result !== 'object' && typeof result !== 'function')) return false;
+    // Native rejected promises from an accidentally async adapter must not leak
+    // unhandled rejections into the host app. No async result is ever accepted.
+    try { Promise.prototype.then.call(result, () => {}, () => {}); return true; } catch (_) { /* Not a native promise. */ }
+    return typeof valueOf(result, 'then') === 'function';
+  }
+
+  const GENERATION = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const OFF_GENERATION = '00000000-0000-4000-8000-000000000000';
+
+  function empty(version, generation) {
+    return { schema: SCHEMA, version, generation, days: [] };
+  }
+
+  function sanitize(raw, version, generation, today) {
+    const state = empty(version, generation);
+    if (raw === null || raw === undefined) return { valid: true, state };
+    if (!plain(raw) || valueOf(raw, 'schema') !== SCHEMA) return { valid: false, state };
+    // Rotating consent isolates every session. A delayed write from a revoked
+    // generation is ignored even after the user opts back in.
+    if (valueOf(raw, 'generation') !== generation || valueOf(raw, 'version') !== version) return { valid: true, state };
+    const rows = valueOf(raw, 'days');
+    if (!Array.isArray(rows) || rows.length > 1000) return { valid: false, state };
+    const grouped = new Map();
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = valueOf(rows, String(index));
+      if (!plain(row)) continue;
+      const date = valueOf(row, 'date');
+      const day = dateNumber(date);
+      const counts = valueOf(row, 'counts');
+      if (day === null || day > today || day < today - RETENTION_DAYS + 1 || !plain(counts)) continue;
+      const aggregate = grouped.get(date) || {};
+      for (const event of EVENTS) {
+        const count = valueOf(counts, event);
+        if (!Number.isSafeInteger(count) || count <= 0) continue;
+        aggregate[event] = Math.min(MAX_COUNT, (aggregate[event] || 0) + Math.min(MAX_COUNT, count));
+      }
+      if (Object.keys(aggregate).length) grouped.set(date, aggregate);
+    }
+    state.days = [...grouped.keys()].sort().map(date => ({ date, counts: grouped.get(date) }));
+    return { valid: true, state };
+  }
+
+  // Verification is deliberately stricter than import sanitization. A no-op write
+  // must not be mistaken for deletion when the old value contains unknown data.
+  function matches(raw, expected) {
+    if (!plain(raw) || Object.getOwnPropertySymbols(raw).length) return false;
+    const keys = Object.keys(raw).sort();
+    if (keys.join('|') !== 'days|generation|schema|version') return false;
+    if (valueOf(raw, 'schema') !== expected.schema || valueOf(raw, 'generation') !== expected.generation ||
+        valueOf(raw, 'version') !== expected.version) return false;
+    const rows = valueOf(raw, 'days');
+    if (!Array.isArray(rows) || rows.length !== expected.days.length ||
+        Object.keys(rows).length !== rows.length || Object.getOwnPropertySymbols(rows).length) return false;
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = valueOf(rows, String(i));
+      const wanted = expected.days[i];
+      if (!plain(row) || Object.getOwnPropertySymbols(row).length || Object.keys(row).sort().join('|') !== 'counts|date' ||
+          valueOf(row, 'date') !== wanted.date) return false;
+      const counts = valueOf(row, 'counts');
+      if (!plain(counts) || Object.getOwnPropertySymbols(counts).length) return false;
+      const events = Object.keys(counts).sort();
+      if (events.join('|') !== Object.keys(wanted.counts).sort().join('|')) return false;
+      for (const event of events) if (valueOf(counts, event) !== wanted.counts[event]) return false;
+    }
+    return true;
+  }
+
+  function strictState(raw, today) {
+    if (!plain(raw)) return null;
+    const version = valueOf(raw, 'version');
+    const generation = valueOf(raw, 'generation');
+    if (typeof version !== 'string' || safeVersion(version) !== version ||
+        typeof generation !== 'string' || !GENERATION.test(generation)) return null;
+    const parsed = sanitize(raw, version, generation, today);
+    return parsed.valid && matches(raw, parsed.state) ? parsed.state : null;
+  }
+
+  function dominates(actual, expected) {
+    if (actual.schema !== expected.schema || actual.version !== expected.version || actual.generation !== expected.generation) return false;
+    for (const wanted of expected.days) {
+      const row = actual.days.find(item => item.date === wanted.date);
+      if (!row) return false;
+      for (const event of Object.keys(wanted.counts)) {
+        if (!own(row.counts, event) || row.counts[event] < wanted.counts[event]) return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Synchronous LOCAL adapters; consent and counters MUST use separate storage
+   * keys. read/write/remove operate on counters only. readConsent/writeConsent
+   * operate only on {enabled, generation}. No adapter may merge the two keys.
+   * The optional newGeneration callback must return a fresh cryptographic UUID;
+   * Opt-in uses crypto.randomUUID by default, with no insecure fallback. Opt-out
+   * never requires randomness: it retains a valid token, or uses a fixed off-only
+   * marker. The next opt-in must generate a different cryptographic token.
+   *
+   * Generations are revocation tokens used only locally, never included in
+   * snapshots. record() NEVER writes consent. A stale counter writer cannot
+   * reactivate opt-out or restore counters from a previous consent generation.
+   * Simultaneous counter writes can still lose increments without storage CAS.
+   * No payloads, arbitrary dimensions, network, or precise times are collected.
+   */
+  function create(options) {
+    const config = options && typeof options === 'object' ? options : {};
+    const version = safeVersion(config.version);
+    const clock = typeof config.now === 'function' ? config.now : Date.now;
+    let forcedOff = false;
+    let storageError = false;
+    let errorCode = null;
+    let deletionPending = false;
+
+    function fail(code) {
+      forcedOff = true;
+      storageError = code !== 'invalid-clock' && code !== 'consent-changed' && code !== 'generation-unavailable';
+      errorCode = code;
+    }
+
+    function reset() {
+      forcedOff = false;
+      storageError = false;
+      errorCode = null;
+      deletionPending = false;
+    }
+
+    function dayNow() {
+      try {
+        const stamp = clock();
+        if (typeof stamp === 'number' && Number.isFinite(stamp) && stamp >= 0 && stamp <= 253402300799999) {
+          return Math.floor(stamp / DAY_MS);
+        }
+      } catch (_) { /* Clock failures must not affect the helper. */ }
+      fail('invalid-clock');
+      return null;
+    }
+
+    function readRaw(callback, code) {
+      try {
+        if (typeof config[callback] !== 'function') { fail(code); return { ok: false }; }
+        const raw = config[callback]();
+        if (asyncResult(raw)) { fail(code); return { ok: false }; }
+        return { ok: true, raw };
+      } catch (_) { fail(code); return { ok: false }; }
+    }
+
+    function consent() {
+      const result = readRaw('readConsent', 'consent-read-failed');
+      if (!result.ok) return { ok: false, enabled: false };
+      if (result.raw === undefined || result.raw === null) return { ok: true, enabled: false, generation: null };
+      try {
+        const enabled = valueOf(result.raw, 'enabled');
+        const generation = valueOf(result.raw, 'generation');
+        if (!plain(result.raw) || typeof enabled !== 'boolean' || typeof generation !== 'string' || !GENERATION.test(generation)) {
+          fail('invalid-consent'); return { ok: false, enabled: false };
+        }
+        return { ok: true, enabled, generation };
+      } catch (_) { fail('invalid-consent'); return { ok: false, enabled: false }; }
+    }
+
+    function sameConsent(first, second) {
+      return first.ok && second.ok && first.enabled === second.enabled && first.generation === second.generation;
+    }
+
+    function readState() {
+      const permission = consent();
+      const today = dayNow();
+      const state = empty(version, permission.generation || null);
+      if (!permission.ok || today === null) return { ok: false, state, permission };
+      if (!permission.enabled) return { ok: true, state, permission, today };
+      const result = readRaw('read', 'read-failed');
+      if (!result.ok) return { ok: false, state, permission };
+      try {
+        const parsed = sanitize(result.raw, version, permission.generation, today);
+        if (!parsed.valid) { fail('invalid-state'); return { ok: false, state, permission }; }
+        const latest = consent();
+        if (!sameConsent(permission, latest)) return { ok: false, state, permission: latest };
+        return { ok: true, state: parsed.state, permission, today };
+      } catch (_) { fail('invalid-state'); return { ok: false, state, permission }; }
+    }
+
+    function writeVerified(state, recordDay, beforeState) {
+      let failed = false;
+      try {
+        if (typeof config.write !== 'function') { fail('write-failed'); return false; }
+        const result = config.write(JSON.parse(JSON.stringify(state)));
+        if (asyncResult(result)) { fail('write-failed'); return false; }
+        failed = result === false;
+      } catch (_) { failed = true; }
+      const persisted = readRaw('read', 'read-failed');
+      try {
+        if (recordDay !== undefined) {
+          if (failed) { fail('write-failed'); return false; }
+          if (persisted.ok) {
+            // Verification may run after another writer crosses UTC midnight.
+            // Either boundary is valid: our own write may retain a day that
+            // expires during the write; a newer writer may add the new UTC day.
+            const verificationDay = dayNow();
+            if (verificationDay === null) return false;
+            const actual = strictState(persisted.raw, recordDay) || strictState(persisted.raw, verificationDay);
+            if (actual) {
+              // A concurrent writer may legitimately add counts before this
+              // verification. Dominance confirms our aggregate survived. Other
+              // valid snapshots mean contention, not broken storage: do not
+              // permanently stop this instance over an approximate lost count.
+              if (dominates(actual, state)) return true;
+              if (actual.generation === state.generation && actual.version === state.version && beforeState && matches(actual, beforeState)) {
+                fail('write-unverified');
+              }
+              return false;
+            }
+          }
+        } else if (persisted.ok && matches(persisted.raw, state)) return true;
+      } catch (_) { /* Untrusted storage. */ }
+      fail(failed ? 'write-failed' : (persisted.ok ? 'write-unverified' : 'read-failed'));
+      return false;
+    }
+
+    function nextGeneration() {
+      try {
+        const generation = typeof config.newGeneration === 'function' ? config.newGeneration() : globalThis.crypto.randomUUID();
+        if (typeof generation === 'string' && GENERATION.test(generation)) return generation;
+      } catch (_) { /* Fail closed without cryptographic randomness. */ }
+      fail('generation-unavailable');
+      return null;
+    }
+
+    function writePermission(enabled, previous) {
+      const generation = enabled ? nextGeneration() : (previous && previous.ok && previous.generation ? previous.generation : OFF_GENERATION);
+      if (!generation) return null;
+      if (enabled && previous && previous.generation === generation) { fail('generation-unavailable'); return null; }
+      const permission = { enabled, generation };
+      try {
+        if (typeof config.writeConsent !== 'function') { fail('consent-write-failed'); return null; }
+        const result = config.writeConsent({ ...permission });
+        if (asyncResult(result)) { fail('consent-write-failed'); return null; }
+        const check = consent();
+        if (sameConsent({ ok: true, ...permission }, check)) return check;
+      } catch (_) { /* Verified below as failure without disclosing error text. */ }
+      fail('consent-write-failed');
+      return null;
+    }
+
+    function erase(generation) {
+      deletionPending = true;
+      if (writeVerified(empty(version, generation))) { deletionPending = false; return true; }
+      try {
+        if (typeof config.remove === 'function') {
+          if (asyncResult(config.remove())) { fail('remove-failed'); return false; }
+          const check = readRaw('read', 'read-failed');
+          if (check.ok && (check.raw === null || check.raw === undefined)) { deletionPending = false; return true; }
+        }
+      } catch (_) { fail('remove-failed'); }
+      return false;
+    }
+
+    function changePermission(enabled, previous) {
+      forcedOff = true;
+      const permission = writePermission(enabled, previous);
+      if (!permission) return false;
+      const erased = erase(permission.generation);
+      const latest = consent();
+      if (!sameConsent(permission, latest)) { fail('consent-changed'); return false; }
+      if (!erased) return false;
+      reset();
+      return true;
+    }
+
+    function setEnabled(enabled) {
+      if (typeof enabled !== 'boolean') return false;
+      return changePermission(enabled, consent());
+    }
+
+    function record(name) {
+      if (typeof name !== 'string' || !EVENT_SET.has(name) || forcedOff) return false;
+      const current = readState();
+      if (!current.ok || !current.permission.enabled || forcedOff) return false;
+      const beforeState = JSON.parse(JSON.stringify(current.state));
+      const date = new Date(current.today * DAY_MS).toISOString().slice(0, 10);
+      let row = current.state.days.find(item => item.date === date);
+      if (!row) { row = { date, counts: {} }; current.state.days.push(row); }
+      row.counts[name] = Math.min(MAX_COUNT, (row.counts[name] || 0) + 1);
+      if (!sameConsent(current.permission, consent())) return false;
+      if (!writeVerified(current.state, current.today, beforeState)) return false;
+      const latest = consent();
+      if (!sameConsent(current.permission, latest)) {
+        // A write that raced with opt-out is already invalidated by its old
+        // generation. Also remove its bytes best-effort while consent is off.
+        if (latest.ok && !latest.enabled) erase(latest.generation);
+        return false;
+      }
+      reset();
+      return true;
+    }
+
+    function snapshot() {
+      const current = readState();
+      return { schema: SCHEMA, version, days: !forcedOff && current.ok && current.permission.enabled ? current.state.days : [] };
+    }
+
+    function isEnabled() {
+      const current = readState();
+      return !forcedOff && current.ok && current.permission.enabled === true;
+    }
+
+    function clear() {
+      // Only an explicit setEnabled(true) may write enabled:true. Clear always
+      // turns collection off, so it cannot race with and reverse an opt-out.
+      return setEnabled(false);
+    }
+
+    function getStatus() {
+      const current = readState();
+      const enabled = !forcedOff && current.ok && current.permission.enabled === true;
+      const days = enabled ? current.state.days : [];
+      const total = days.reduce((sum, row) => sum + Object.values(row.counts).reduce((subtotal, count) => subtotal + count, 0), 0);
+      return { enabled, storageError, days: days.length, total, deletionPending, errorCode };
+    }
+
+    return Object.freeze({ setEnabled, isEnabled, record, snapshot, clear, getStatus });
+  }
+
+  return Object.freeze({ create, EVENTS, SCHEMA, RETENTION_DAYS, MAX_COUNT });
+});
+// END EMBEDDED METRICS CORE
 
 // BEGIN EMBEDDED SYNC CORE
 (function (root, factory) {
@@ -524,7 +901,7 @@
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.12.1';
+  const SCRIPT_VERSION = '1.13.0';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -561,6 +938,8 @@
 
   if (window.top !== window.self || document.getElementById(HOST_ID)) return;
 
+  const metrics = createLocalMetrics();
+  metrics.record('helper.loaded');
   let settings = readSettings();
   let missionAdapter = null;
   let fleetWait = null;
@@ -623,6 +1002,8 @@
       .find(value => value.queueJobId === id)?.fleetEdit),
     dispatch: async job => {
       const result = await missionAdapter.dispatch(job);
+      if (result.status === 'sent') metrics.record('mission.sent');
+      else if (result.status === 'uncertain') metrics.record('mission.uncertain');
       if (result.status === 'sent' && !job.id.startsWith('retry:')) emitEvent('request.sent',
         `Misión enviada: ${job.originName} → ${job.target.label}. ` + SHIPS.filter(([id]) => job.quantities[id] > 0)
           .map(([id, name]) => `${job.quantities[id]} ${name}`).join(' · '), `mission:${job.id}`, job.originName);
@@ -661,9 +1042,156 @@
   });
 
   function emitEvent(type, message, id, systemName = text(document.querySelector('[data-field="nameplate-name"]'))) {
+    metrics.observeHelperEvent(type, id);
     notifier.emit({ type, id: id || `${notificationSession}:${++eventSequence}`,
       title: 'Old Light', systemName, message });
   }
+
+  // BEGIN LOCAL METRICS INTEGRATION
+  function createLocalMetrics() {
+    const key = 'old-light-auto-upgrade:metrics:v1';
+    const consentKey = 'old-light-auto-upgrade:metrics-consent:v1';
+    const core = globalThis.OldLightMetricsCore.create({ version: SCRIPT_VERSION,
+      readConsent: () => {
+        const raw = localStorage.getItem(consentKey);
+        if (raw !== null && raw.length > 1024) throw new Error('Metrics consent exceeds its limit');
+        return JSON.parse(raw || 'null');
+      },
+      writeConsent: value => localStorage.setItem(consentKey, JSON.stringify(value)),
+      read: () => {
+        const raw = localStorage.getItem(key);
+        if (raw === null) return null;
+        if (raw.length > 65536) throw new Error('Metrics storage exceeds its limit');
+        return JSON.parse(raw);
+      },
+      write: value => localStorage.setItem(key, JSON.stringify(value)),
+      remove: () => localStorage.removeItem(key),
+    });
+    let lastDriveCode = '';
+    let onChange = null;
+    function record(name) {
+      const result = core.record(name);
+      try { onChange?.(); } catch (_) { /* Metrics UI cannot affect the helper. */ }
+      return result;
+    }
+    function observeHelperEvent(type, id) {
+      // Notification payloads can contain private game data. Only these fixed names
+      // are counted; neither their message, title, identifiers nor quantities enter metrics.
+      const names = {
+        'request.sent': 'automation.sent', 'building.queued': 'automation.confirmed',
+        'ships.queued': 'automation.confirmed', 'request.failed': 'automation.failed',
+        'request.rejected': 'automation.rejected', 'request.unconfirmed': 'automation.unconfirmed',
+        'automation.paused': 'automation.paused',
+      };
+      if (typeof id === 'string' && /^(mission:|mission-uncertain:)/.test(id)) return;
+      const name = Object.hasOwn(names, type) ? names[type]
+        : typeof type === 'string' && type.startsWith('settings.') ? 'settings.changed' : null;
+      if (name) record(name);
+    }
+    function observeDriveStatus(code) {
+      if (code === lastDriveCode) return;
+      lastDriveCode = code;
+      const names = { connected: 'drive.connected', synced: 'drive.synced', sync_retry: 'drive.retry',
+        storage_error: 'error.storage' };
+      const failures = ['sync_account', 'invalid_sync', 'expired', 'denied', 'popup_blocked', 'auth_error',
+        'library_error', 'library_timeout', 'auth_timeout', 'permission_missing', 'invalid_client',
+        'auth_origin', 'revoke_failed', 'bridge_lost', 'timeout', 'rate_limit', 'api_denied',
+        'upload_uncertain', 'invalid_backup', 'failed', 'invalid_config'];
+      if (Object.hasOwn(names, code)) record(names[code]);
+      else if (failures.includes(code)) record('drive.error');
+    }
+    return { ...core, record, observeHelperEvent, observeDriveStatus,
+      onChange: listener => { onChange = typeof listener === 'function' ? listener : null; } };
+  }
+
+  function installMetricsPanel(shadow) {
+    const el = (tag, text, className) => {
+      const node = document.createElement(tag);
+      if (text !== undefined) node.textContent = text;
+      if (className) node.className = className;
+      return node;
+    };
+    const box = el('section', undefined, 'backup-card');
+    box.dataset.field = 'local-metrics';
+    box.setAttribute('aria-labelledby', 'oldlight-metrics-heading');
+    const heading = el('h3', 'Métricas locales'); heading.id = 'oldlight-metrics-heading';
+    const label = el('label', undefined, 'count-away');
+    const toggle = el('input'); toggle.type = 'checkbox'; toggle.dataset.action = 'metrics-toggle';
+    label.append(toggle, el('span', 'Medir uso y errores en este navegador'));
+    const explanation = el('p', 'Opcional y desactivado inicialmente. Muestra contadores de funciones y tipos de error de los últimos 30 días. No guarda mensajes, credenciales, jugadores, coordenadas ni direcciones web. No envía datos a ningún servidor.', 'hint');
+    const status = el('p', '', 'backup-status'); status.dataset.field = 'metrics-status';
+    status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+    const actions = el('div', undefined, 'backup-actions');
+    const previewButton = el('button', 'Ver informe'); previewButton.type = 'button'; previewButton.dataset.action = 'metrics-preview';
+    const exportButton = el('button', 'Exportar métricas'); exportButton.type = 'button'; exportButton.dataset.action = 'metrics-export';
+    const clearButton = el('button', 'Borrar y desactivar'); clearButton.type = 'button'; clearButton.dataset.action = 'metrics-clear';
+    actions.append(previewButton, exportButton, clearButton);
+    const preview = el('textarea'); preview.readOnly = true; preview.hidden = true; preview.rows = 8;
+    preview.id = 'oldlight-metrics-report'; preview.setAttribute('aria-label', 'Informe local de métricas en JSON');
+    preview.style.cssText = 'width:100%;max-width:100%;box-sizing:border-box;resize:vertical';
+    previewButton.setAttribute('aria-controls', preview.id); previewButton.setAttribute('aria-expanded', 'false');
+    const note = el('p', 'Puedes revisar el informe antes de compartirlo manualmente. No se incluye en las copias ni se sincroniza por Drive. Desactivar también borra los contadores locales. Los días antiguos se descartan al registrar nuevos eventos.', 'hint');
+    box.append(heading, label, explanation, actions, status, preview, note);
+    shadow.querySelector('[data-page="data"]').append(box);
+    function refresh(message = '') {
+      const state = metrics.getStatus();
+      toggle.checked = state.enabled;
+      const issues = {
+        'generation-unavailable': 'Este navegador no permite activar las métricas con seguridad. Actualízalo o deja la medición desactivada.',
+        'invalid-clock': 'El reloj del dispositivo no es válido. La medición está detenida; revisa la fecha antes de activarla.',
+        'consent-changed': 'La elección de métricas cambió en otra pestaña. Revisa el interruptor antes de volver a activarlas.',
+      };
+      setText(status, state.storageError
+        ? 'No se pudo acceder al almacenamiento de métricas. La medición está detenida en esta pestaña; no se puede confirmar el guardado o el borrado.'
+        : Object.hasOwn(issues, state.errorCode) ? issues[state.errorCode]
+          : message || (state.enabled ? `Activadas. ${state.total} eventos en ${state.days} días; solo en este navegador.` : 'Desactivadas. No se registran eventos.'));
+      if (!preview.hidden) preview.value = JSON.stringify(metrics.snapshot(), null, 2);
+    }
+    toggle.addEventListener('change', event => {
+      if (!event.isTrusted) { refresh(); return; }
+      const enabled = toggle.checked;
+      metrics.setEnabled(enabled);
+      refresh();
+    });
+    previewButton.addEventListener('click', () => {
+      preview.hidden = !preview.hidden;
+      previewButton.setAttribute('aria-expanded', String(!preview.hidden));
+      previewButton.textContent = preview.hidden ? 'Ver informe' : 'Ocultar informe';
+      refresh();
+    });
+    exportButton.addEventListener('click', event => {
+      if (!event.isTrusted) return;
+      let url;
+      try {
+        const report = metrics.snapshot();
+        if (metrics.getStatus().storageError) { refresh(); return; }
+        url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2) + '\n'], { type: 'application/json' }));
+        const link = document.createElement('a');
+        link.href = url; link.download = 'old-light-metrics-' + new Date().toISOString().slice(0, 10) + '.json';
+        link.click();
+        refresh('Informe descargado. No se ha enviado a ningún servidor.');
+      } catch { refresh('No se pudo exportar el informe. Puedes revisarlo con «Ver informe».'); }
+      finally { if (url) setTimeout(() => URL.revokeObjectURL(url), 2000); }
+    });
+    clearButton.addEventListener('click', event => {
+      if (!event.isTrusted) return;
+      const cleared = metrics.clear();
+      refresh(cleared ? 'Contadores borrados y medición desactivada en este navegador.' : 'No se pudo confirmar el borrado.');
+    });
+    // Explicit feature names only. No general click/input capture or game DOM data.
+    shadow.addEventListener('click', event => {
+      const control = event.composedPath().find(node => node?.matches?.('[data-settings-tab], [data-fleet-view-tab]'));
+      if (control?.dataset.settingsTab) metrics.record('ui.tab.' + control.dataset.settingsTab);
+      else if (control?.dataset.fleetViewTab) metrics.record('ui.fleet.' + control.dataset.fleetViewTab);
+      if (control) refresh();
+    });
+    window.addEventListener('storage', event => {
+      if (['old-light-auto-upgrade:metrics:v1', 'old-light-auto-upgrade:metrics-consent:v1', null].includes(event.key)) refresh();
+    });
+    metrics.onChange(refresh);
+    refresh();
+  }
+  // END LOCAL METRICS INTEGRATION
 
   function normalizeOrder(order, defaults = DEFAULT_ORDER) {
     const known = Array.isArray(order) ? order.filter(id => defaults.includes(id)) : [];
@@ -1780,6 +2308,91 @@
   }
   // END HELPER WORKSPACE
 
+  // BEGIN HELPER CHANGELOG: concise release notes from the versioned README.
+  // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
+  function helperChangelogEntries() {
+    return [
+      { version: '1.13.0', title: 'Métricas locales y changelog', changes: [
+        'Métricas opcionales de uso y errores en Datos, desactivadas de inicio y sin enviar información a servidores.',
+        'Informe local de los últimos 30 días, con vista previa, exportación y borrado. No viaja en copias ni por Drive.',
+        'Changelog integrado para consultar las novedades de cada versión sin salir del helper.',
+      ] },
+      { version: '1.12.1', title: 'Depot necesario antes que la flota', changes: [
+        'El Resource Depot necesario y su Reactor tienen prioridad sobre los mínimos de naves, reservando sus recursos.',
+        'Usan la cola de edificios, sin duplicar pedidos ni quedar bloqueados por una cola de naves ocupada.',
+      ] },
+      { version: '1.12.0', title: 'Interfaz por tareas', changes: [
+        'Flota se organiza en Mínimos, Campañas y Misiones, con filtros Pendientes, Revisar y Todas.',
+        'Densidad cómoda o compacta, navegación con teclado y estado de Drive siempre accesible.',
+      ] },
+      { version: '1.11.0', title: 'Sincronización automática de ajustes', changes: [
+        'Drive sincroniza preferencias entre dispositivos mientras su ventana está abierta y autorizada.',
+        'Las misiones y campañas en curso permanecen locales. Los cambios sin conexión se conservan y reintentan.',
+      ] },
+    ];
+  }
+
+  function installHelperChangelog(shadow) {
+    const el = (tag, label, className) => {
+      const node = document.createElement(tag);
+      if (label !== undefined) node.textContent = label;
+      if (className) node.className = className;
+      return node;
+    };
+    const panel = el('details', undefined, 'helper-changelog');
+    panel.id = 'oldlight-changelog';
+    const summary = el('summary', 'Changelog · novedades');
+    const intro = el('p', `Últimas versiones del helper. Versión instalada: v${SCRIPT_VERSION}.`, 'hint');
+    const closeButton = el('button', 'Cerrar changelog', 'changelog-close');
+    closeButton.type = 'button';
+    closeButton.dataset.action = 'changelog-close';
+    panel.append(summary, intro, closeButton);
+    for (const entry of helperChangelogEntries()) {
+      const release = el('section', undefined, 'changelog-release');
+      release.dataset.changelogVersion = entry.version;
+      const heading = el('h3', `v${entry.version} · ${entry.title}`);
+      if (entry.version === SCRIPT_VERSION) heading.append(el('span', 'Instalada', 'changelog-current'));
+      const list = el('ul');
+      for (const change of entry.changes) list.append(el('li', change));
+      release.append(heading, list);
+      panel.append(release);
+    }
+    shadow.querySelector('[data-page="data"]').append(panel);
+    const shortcut = shadow.querySelector('[data-action="changelog-shortcut"]');
+    const sync = () => {
+      if (settings.activeTab !== 'data') panel.open = false;
+      shortcut.setAttribute('aria-expanded', String(panel.open));
+      shortcut.title = panel.open ? 'Cerrar changelog' : 'Ver las novedades del helper';
+    };
+    const close = target => {
+      panel.open = false;
+      sync();
+      target.focus({ preventScroll: true });
+      if (target === summary) summary.scrollIntoView({ block: 'nearest' });
+    };
+    shortcut.addEventListener('click', () => {
+      if (settings.activeTab === 'data' && panel.open) { close(shortcut); return; }
+      ui.tabs.find(tab => tab.dataset.settingsTab === 'data').click();
+      panel.open = true;
+      sync();
+      summary.focus({ preventScroll: true });
+      panel.scrollIntoView({ block: 'start' });
+    });
+    closeButton.addEventListener('click', () => close(summary));
+    panel.addEventListener('keydown', event => {
+      if (event.key !== 'Escape' || !panel.open) return;
+      event.preventDefault();
+      event.stopPropagation();
+      close(summary);
+    });
+    panel.addEventListener('toggle', sync);
+    // This is transient presentation state: no automatic opening, saved flag,
+    // game action, new metric, backup field or Drive synchronization.
+    ui.changelog = { sync };
+    sync();
+  }
+  // END HELPER CHANGELOG
+
   function mount() {
     if (host?.isConnected) return;
     if (!host) {
@@ -1982,12 +2595,23 @@
           .workspace-density { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin:12px 0; font-size:12px; }
           .workspace-density > span { flex:1; }
           .workspace-density button { font-size:11.5px; min-height:34px; padding:6px 8px; }
-          .helper-footer { align-items:center; min-height:39px; padding:4px 10px; gap:4px; color:var(--ol-muted); }
+          .helper-footer { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; min-height:39px; padding:4px 10px; gap:0 8px; color:var(--ol-muted); }
+          .helper-save-state { grid-column:1; overflow-wrap:anywhere; }
+          .helper-changelog-shortcut { grid-column:1; justify-self:start; min-height:30px; padding:4px 0; border-color:transparent; background:transparent; color:var(--ol-accent); font-size:11px; }
+          .helper-footer .helper-drive-shortcut { grid-column:2; grid-row:1 / span 2; max-width:min(180px,45cqw); }
+          .helper-changelog { scroll-margin-top:4px; }
+          .helper-changelog summary { min-height:32px; padding:4px 0; }
+          .changelog-close { margin-top:10px; font-size:11.5px; }
+          .changelog-release { margin-top:16px; padding-top:14px; border-top:1px solid var(--ol-border); }
+          .changelog-release h3 { overflow-wrap:anywhere; }
+          .changelog-current { display:inline-block; margin-left:6px; padding:2px 5px; border-radius:4px; background:var(--ol-accent-bg); color:var(--ol-accent); font-size:10px; font-weight:500; }
+          .changelog-release ul { margin:8px 0 0; padding-left:18px; color:var(--ol-muted); font-size:12px; }
+          .changelog-release li { margin-top:6px; overflow-wrap:anywhere; }
           .helper-drive-shortcut { min-width:0; min-height:30px; max-width:60%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:4px 6px; border-color:transparent; background:transparent; color:var(--ol-muted); font-size:10.5px; }
           .helper-drive-shortcut[data-tone="ready"] { color:var(--ol-accent); }
           .helper-drive-shortcut[data-tone="working"] { color:var(--ol-focus); }
           .helper-drive-shortcut[data-tone="warning"] { color:var(--ol-warning); border-color:#806b40; background:#352d20; }
-          .helper-resize { bottom:40px; }
+          .helper-resize { bottom:62px; }
           .settings-page > [data-field="drive-backup"] { margin-top:0; margin-bottom:12px; }
           [data-fleet-view="campaigns"] .oldlight-attack-retry { margin-top:0; padding:0; border:0; background:transparent; }
           .oldlight-attack-retry .ar-settings { margin-top:0; background:var(--ol-surface); }
@@ -2009,6 +2633,7 @@
             .priority-actions button { min-height:38px; }
             .helper-minimize { width:38px; }
             .helper-drive-shortcut { min-height:36px; }
+            .helper-changelog-shortcut, .helper-changelog summary { min-height:44px; }
           }
           @media (max-height:500px) { .helper-header { padding-top:7px; padding-bottom:7px; } .settings-tabs { margin-top:3px; margin-bottom:6px; } }
 
@@ -2076,7 +2701,7 @@
             </div>
             <details class="helper-activity" data-ui-section="automationDetails"><summary>Actividad del helper</summary><p class="helper-status" role="status"></p><small class="helper-last"></small></details>
           </div>
-          <footer class="helper-footer"><span class="helper-save-state">Autoguardado local</span><button type="button" class="helper-drive-shortcut" data-action="drive-shortcut">Conectar Drive</button></footer>
+          <footer class="helper-footer"><span class="helper-save-state">Autoguardado local</span><button type="button" class="helper-changelog-shortcut" data-action="changelog-shortcut" aria-controls="oldlight-changelog" aria-expanded="false" title="Ver las novedades del helper">Changelog</button><button type="button" class="helper-drive-shortcut" data-action="drive-shortcut">Conectar Drive</button></footer>
           <button type="button" class="helper-resize" data-action="helper-resize" role="separator" aria-orientation="vertical" aria-label="Ajustar ancho del helper" aria-valuemin="300" aria-valuemax="560" aria-valuenow="360" title="Arrastra hacia la izquierda para ampliar. Usa las flechas para ajustar; doble clic para restablecer."></button>
           <span class="sr-only" data-field="reorder-status" role="status" aria-live="polite"></span>
         </section>`;
@@ -2301,6 +2926,7 @@
       installHelperResizing();
       installPriorityDragging();
       installLocalBackups();
+      installMetricsPanel(shadow);
       ui.conditionsDetails.addEventListener('toggle', () => {
         if (settings.conditionsExpanded === ui.conditionsDetails.open) return;
         settings.conditionsExpanded = ui.conditionsDetails.open;
@@ -2356,6 +2982,7 @@
       if (notificationDetails) notificationDetails.open = true;
       installPresentationPreferences(shadow);
       installHelperWorkspace(shadow);
+      installHelperChangelog(shadow);
       syncSettingsTabs();
     }
     document.body.append(host);
@@ -2622,8 +3249,9 @@
         link.download = 'old-light-backup-' + new Date().toISOString().slice(0, 10) + '.json';
         link.click();
         setTimeout(() => URL.revokeObjectURL(url), 2000);
+        metrics.record('backup.exported');
         setText(ui.backupStatus, 'Copia exportada. Incluye toda la configuración guardada.');
-      } catch { setText(ui.backupStatus, 'No se pudo exportar la configuración.'); }
+      } catch { metrics.record('backup.failed'); setText(ui.backupStatus, 'No se pudo exportar la configuración.'); }
     });
     ui.chooseImport.addEventListener('click', event => {
       if (event.isTrusted) ui.importSettings.click();
@@ -2637,8 +3265,10 @@
         try { value = JSON.parse(await file.text()); }
         catch { throw backupError('El archivo no contiene JSON válido.'); }
         applyBackup(value);
+        metrics.record('backup.imported');
         setText(ui.backupStatus, 'Copia importada. Preferencias y credenciales restauradas.');
       } catch (cause) {
+        metrics.record('backup.failed');
         setText(ui.backupStatus, cause?.name === 'BackupError' ? cause.message : 'No se pudo importar la copia.');
       } finally { ui.importSettings.value = ''; }
     });
@@ -2658,6 +3288,7 @@
     if (ui.conditionsDetails.open !== settings.conditionsExpanded) ui.conditionsDetails.open = settings.conditionsExpanded;
     syncPresentationSections();
     syncHelperWorkspace();
+    ui.changelog?.sync();
   }
 
   function presentationFailure(message) {
@@ -3093,7 +3724,10 @@
     if (scheduled) return;
     scheduled = true;
     // No depende de requestAnimationFrame para comprobar respuestas y plazos.
-    queueMicrotask(() => { scheduled = false; step(); });
+    queueMicrotask(() => {
+      scheduled = false;
+      try { step(); } catch (cause) { metrics.record('error.runtime'); throw cause; }
+    });
   }
 
   function wakeAt(time) {
@@ -10490,6 +11124,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
 
     function inputStatus(code) {
       if (inputs) inputs.inputStatus.textContent = LABELS[code] || LABELS.invalid_config;
+      // Report only the fixed status code; edited credentials never leave this component.
+      try { onStatus?.({ code: Object.hasOwn(LABELS, code) ? code : 'invalid_config' }); } catch (_) { /* caller UI */ }
     }
 
     function parseBackup(json) {
@@ -10930,6 +11566,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   if (typeof GM_getValue === 'function' && typeof GM_setValue === 'function') {
     try {
       driveBackup = createDriveBackup({ getBackup: createBackup, applyBackup,
+        onStatus: status => metrics.observeDriveStatus(status.code),
         gmGetValue: GM_getValue, gmSetValue: GM_setValue,
         // Public Google Web client registered for the companion's GitHub Pages origin.
         defaultClientId: '418130838768-qhd4o520fhi8hojd6t3g43luesr8v0n9.apps.googleusercontent.com' });
