@@ -193,7 +193,7 @@ test('reactor stays idle without power demand and zero remaining power is suffic
   expectEta(snapshot({ energy: 1, buildings: [
     building('reactor', { energy: 10 }), building('command_center', { energy: -1 }),
   ] }), 'command_center', 10 * minute);
-  const result = estimate(snapshot({ energy: -5, buildings: [building('reactor', { energy: 10 })] }));
+  const result = estimate(snapshot({ energy: 0, buildings: [building('reactor', { energy: 10 })] }));
   assert.equal(result.state, 'idle');
   assert.equal(result.reason, 'demand');
 });

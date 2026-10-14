@@ -118,7 +118,10 @@ test('missing verified native selector fails closed', async () => {
 });
 test('navigation only visits an ID in the fresh exhaustive owned roster', async () => {
   const h = harness({ ids: [A, B] }); enable(h); h.tick(); await settle();
-  assert.deepEqual(h.requested, [{ id: B, opts: { scope: S } }]); assert.equal(h.context.systemId, B);
+  assert.equal(h.requested.length, 1); assert.equal(h.requested[0].id, B);
+  assert.equal(h.requested[0].opts.scope, S); assert.equal(typeof h.requested[0].opts.isCurrent, 'function');
+  assert.equal(h.context.systemId, B);
+  assert.equal(h.requested[0].opts.isCurrent(), false, 'Completed operation tokens cannot be reused');
 });
 test('disable before selection microtask prevents the action', async () => {
   const h = harness({ ids: [A, B] }); enable(h); h.tick(); h.app.setConfig({ enabled: false }); await settle();

@@ -71,7 +71,8 @@ test('independent review: a valid deferred navigation preflight takes one additi
   const h = fixture(); assert.equal(h.tick().ready, true); assert.equal(h.reads, 1);
   h.advance(5000); assert.equal(h.tick().moving, true); assert.equal(h.reads, 2);
   await settle(); assert.equal(h.reads, 3);
-  assert.deepEqual(h.requested, [[B, { scope: S }]]);
+  assert.equal(h.requested.length, 1); assert.equal(h.requested[0][0], B);
+  assert.equal(h.requested[0][1].scope, S); assert.equal(typeof h.requested[0][1].isCurrent, 'function');
   assert.equal(h.app.canAct(h.context), false);
 });
 

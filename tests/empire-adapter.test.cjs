@@ -348,3 +348,22 @@ test('computed-style reader is injectable and unavailable/throwing styles fail c
   const missing = harness(); delete missing.doc.defaultView;
   assert.equal(await missing.finish(missing.app.selectSystem(B, { scope: S })), false); assert.equal(missing.clicks, 0);
 });
+
+for (const failure of ['false', 'throw']) {
+  test(`integrated navigation continuation ${failure} blocks the first native click`, async () => {
+    const h = harness();
+    const isCurrent = () => { if (failure === 'throw') throw new Error('Synthetic cancellation failure'); return false; };
+    assert.equal(await h.finish(h.app.selectSystem(B, { scope: S, isCurrent })), false);
+    assert.equal(h.clicks, 0);
+  });
+  test(`integrated navigation continuation ${failure} after one hop blocks every remaining click`, async () => {
+    const h = harness({ ids: [A, B, C] });
+    const isCurrent = () => {
+      if (h.clicks === 0) return true;
+      if (failure === 'throw') throw new Error('Synthetic cancellation failure');
+      return false;
+    };
+    assert.equal(await h.finish(h.app.selectSystem(C, { scope: S, isCurrent })), false);
+    assert.equal(h.clicks, 1); assert.equal(h.id, B);
+  });
+}

@@ -78,6 +78,7 @@ function harness({ ids = [A, B], capable = true, shadow = false, visible = true 
       expectedIds: data.roster.systems.map(row => row.id), transitCensus: data.transitCensus }) }),
     setConfig: value => {
       writes++;
+      if (typeof failure === 'function') return failure(value, app);
       if (failure === 'sync') throw new Error('No se pudo guardar.');
       if (failure === 'async') return Promise.resolve();
       data.config = core.normalizeConfig(value);
@@ -269,7 +270,9 @@ test('reported ship totals explain covered imperial goals despite unmet local mi
   assert.equal(h.writes, 0);
   for (const ship of ['Probe', 'Marauder', 'Sentinel', 'Vanguard']) {
     const describedBy = h.goal(ship).getAttribute('aria-describedby');
-    assert.ok(describedBy && all(h.container).some(node => node.id === describedBy));
+    assert.ok(describedBy && describedBy.split(' ').every(id => all(h.container).some(node => node.id === id)));
+    assert.equal(describedBy.split(' ').length, 2);
+    assert.match(describedBy.split(' ').at(-1), /empire-edit/);
   }
 });
 
@@ -375,7 +378,7 @@ test('goal feedback preserves focused drafts and saved goals across conflicts an
     assert.equal(withClass(h.container, 'empire-goal-status')[1].textContent, '8 en el imperio · objetivo 30 · faltan 22');
     assert.match(h.error.textContent, failure === 'sync' ? /No se pudo guardar/ : /guardado síncrono/);
     h.app.render(); assert.notEqual(h.error.textContent, '');
-    h.root.activeElement = null; h.app.render(); assert.equal(goal.value, '30');
+    h.root.activeElement = null; h.app.render(); assert.equal(goal.value, '40');
     h.failure = ''; goal.focus(); goal.value = '40'; goal.dispatch('change');
     assert.equal(h.error.textContent, ''); assert.equal(h.data.config.fleetTargets.marauder, 40);
     assert.equal(withClass(h.container, 'empire-goal-status')[1].textContent, '8 en el imperio · objetivo 40 · faltan 32');
@@ -396,5 +399,222 @@ test('production feedback respects disabled and conflicting producers without cl
     h.data.config.fleetTargets.marauder = 8; h.app.render();
     assert.ok(h.paragraphs().includes('Objetivos de flota cubiertos: no se necesitan naves nuevas.'));
     assert.ok(h.paragraphs().includes(h.data.status)); assert.equal(h.writes, 0);
+  }
+});
+
+// UI/UX regression matrix: real production handlers, simulated DOM only.
+test('invalid imperial drafts survive blur and passive refresh until corrected', () => {
+  const h = harness({ shadow: true }), goal = h.goal('Marauder');
+  goal.focus(); goal.value = '-1'; goal.dispatch('input'); goal.dispatch('change');
+  h.root.activeElement = null;
+  for (let i = 0; i < 3; i++) h.app.render();
+  assert.equal(goal.value, '-1'); assert.equal(goal.getAttribute('aria-invalid'), 'true');
+  assert.equal(h.writes, 0); assert.equal(h.data.config.fleetTargets.marauder, 20);
+  const feedback = withClass(h.container, 'empire-edit-status').find(node => node.id === goal.getAttribute('aria-describedby').split(' ').at(-1));
+  assert.match(feedback.textContent, /entero/);
+  goal.value = '0'; goal.dispatch('input'); goal.dispatch('change'); h.app.render();
+  assert.equal(h.data.config.fleetTargets.marauder, 0); assert.equal(goal.getAttribute('aria-invalid'), null);
+  assert.match(feedback.textContent, /Guardado/);
+});
+
+test('failed imperial goal saves retain the attempted value with local failure feedback', () => {
+  for (const failure of ['sync', 'async']) {
+    const h = harness(), goal = h.goal('Marauder'); h.failure = failure;
+    goal.value = '43'; goal.dispatch('input'); goal.dispatch('change'); h.app.render();
+    assert.equal(goal.value, '43'); assert.equal(h.data.config.fleetTargets.marauder, 20);
+    assert.match(withClass(h.container, 'empire-edit-status').map(node => node.textContent).join(' '), /Guardado sin confirmar/);
+    h.failure = ''; goal.dispatch('change'); h.app.render();
+    assert.equal(h.data.config.fleetTargets.marauder, 43);
+  }
+});
+
+test('goal draft and validation are discarded when account or galaxy scope changes', () => {
+  for (const nextScope of ['beta/player', 'alpha/other-player', '']) {
+    const h = harness({ shadow: true }), goal = h.goal('Marauder');
+    goal.focus(); goal.value = '-7'; goal.dispatch('input'); goal.dispatch('change');
+    h.data.scope = nextScope; h.data.config.fleetTargets.marauder = 64; h.app.render();
+    assert.equal(goal.value, '64'); assert.equal(goal.getAttribute('aria-invalid'), null);
+    assert.ok(withClass(h.container, 'empire-edit-status').every(node => node.textContent === ''));
+    assert.equal(h.writes, 0);
+  }
+});
+
+test('late change events cannot commit a draft into a new imperial scope', () => {
+  const h = harness(), goal = h.goal('Marauder');
+  goal.focus(); goal.value = '80'; goal.dispatch('input');
+  h.data.scope = 'beta/other-player'; h.data.config.fleetTargets.marauder = 6;
+  goal.dispatch('change');
+  assert.equal(h.writes, 0); assert.equal(goal.value, '6'); assert.equal(h.data.config.fleetTargets.marauder, 6);
+});
+
+test('Drive-like updates preserve a local draft and merge the eventual edit into latest policy', () => {
+  const h = harness(), goal = h.goal('Marauder');
+  goal.focus(); goal.value = '48'; goal.dispatch('input');
+  h.data.config.fleetTargets.marauder = 31; h.data.config.fleetTargets.probe = 9;
+  h.data.config.systems[A] = { role: 'industry', enabled: false };
+  h.app.render(); assert.equal(goal.value, '48'); assert.equal(h.writes, 0);
+  goal.dispatch('change');
+  assert.equal(h.data.config.fleetTargets.marauder, 48); assert.equal(h.data.config.fleetTargets.probe, 9);
+  assert.equal(h.data.config.systems[A].role, 'industry'); assert.equal(h.data.config.systems[A].enabled, false);
+  h.root.activeElement = null; h.data.config.fleetTargets.marauder = 67; h.app.render();
+  assert.equal(goal.value, '67');
+  assert.ok(withClass(h.container, 'empire-edit-status').every(node => node.textContent === ''));
+});
+
+test('imperial goal feedback covers empty, integer bounds and invalid numeric formats', () => {
+  const invalid = ['', ' ', '-1', '0.5', String(core.MAX_TARGET + 1), 'NaN', 'Infinity', 'abc', '1,5'];
+  for (const value of invalid) {
+    const h = harness(), goal = h.goal('Probe'); goal.value = value; goal.dispatch('input'); goal.dispatch('change');
+    h.app.render(); assert.equal(goal.value, value); assert.equal(goal.getAttribute('aria-invalid'), 'true'); assert.equal(h.writes, 0);
+  }
+  for (const value of ['0', '1', String(core.MAX_TARGET)]) {
+    const h = harness(), goal = h.goal('Probe'); goal.value = value; goal.dispatch('input'); goal.dispatch('change');
+    assert.equal(h.data.config.fleetTargets.probe, Number(value)); assert.equal(h.writes, 1);
+  }
+});
+
+test('imperial long-form help is closed by default while scope and counting remain visible', () => {
+  const h = harness(), disclosure = withClass(h.container, 'empire-help')[0];
+  assert.ok(disclosure); assert.notEqual(disclosure.open, true);
+  assert.equal(disclosure.children[0].tagName, 'SUMMARY');
+  assert.match(disclosure.textContent, /Drive/); assert.match(disclosure.textContent, /Atender/);
+  const summary = withClass(h.container, 'empire-scope-help')[0];
+  assert.ok(summary); assert.equal(summary.parentNode.className, 'oldlight-empire');
+  assert.match(summary.textContent, /misiones/);
+  assert.equal(h.writes, 0);
+});
+
+test('returning a goal to its starting value clears an uncommitted no-op on blur', () => {
+  for (const remoteDuringEdit of [false, true]) {
+    const h = harness(), goal = h.goal('Marauder');
+    goal.focus(); goal.value = '40'; goal.dispatch('input');
+    if (remoteDuringEdit) h.data.config.fleetTargets.marauder = 67;
+    goal.value = '20'; goal.dispatch('input'); h.root.activeElement = null; goal.dispatch('blur');
+    h.app.render(); assert.equal(h.writes, 0);
+    assert.ok(withClass(h.container, 'empire-edit-status').every(node => node.textContent === ''));
+    h.data.config.fleetTargets.marauder = 67; h.app.render(); assert.equal(goal.value, '67');
+  }
+});
+
+test('cheap hidden-scope observation invalidates round-trip drafts without reading a census', () => {
+  const h = harness(), goal = h.goal('Marauder');
+  goal.value = '-8'; goal.dispatch('input'); goal.dispatch('change'); h.visible = false;
+  const reads = h.reads;
+  h.data.scope = 'beta/other-player'; h.app.observeScope(h.data.scope); h.app.render();
+  h.data.scope = SCOPE; h.app.observeScope(h.data.scope); h.app.render();
+  assert.equal(h.reads, reads);
+  h.visible = true; h.app.render();
+  assert.equal(goal.value, '20'); assert.equal(goal.getAttribute('aria-invalid'), null); assert.equal(h.writes, 0);
+});
+
+test('re-editing the same failed goal retries on blur when native change is absent', () => {
+  const h = harness(), goal = h.goal('Marauder'); h.failure = 'sync';
+  goal.value = '43'; goal.dispatch('input'); goal.dispatch('change');
+  assert.equal(h.writes, 1); assert.equal(h.data.config.fleetTargets.marauder, 20);
+  h.failure = ''; goal.value = '44'; goal.dispatch('input'); goal.value = '43'; goal.dispatch('input');
+  h.root.activeElement = null; goal.dispatch('blur');
+  assert.equal(h.writes, 2); assert.equal(h.data.config.fleetTargets.marauder, 43);
+  goal.dispatch('blur'); assert.equal(h.writes, 2);
+});
+
+test('blur commit followed by a late repeated change does not save a goal twice', () => {
+  const h = harness(), goal = h.goal('Marauder');
+  goal.value = '44'; goal.dispatch('input'); h.root.activeElement = null; goal.dispatch('blur');
+  assert.equal(h.writes, 1); goal.dispatch('change'); goal.dispatch('blur');
+  assert.equal(h.writes, 1); assert.equal(h.data.config.fleetTargets.marauder, 44);
+});
+
+test('reentrant save completion cannot overwrite a newer imperial draft or nested save', () => {
+  for (const mode of ['draft', 'same-value-draft', 'nested-save', 'draft-error']) {
+    const h = harness(), goal = h.goal('Marauder'); goal.value = '40'; goal.dispatch('input');
+    h.failure = value => {
+      h.failure = ''; h.data.config = core.normalizeConfig(value);
+      goal.value = '55'; goal.dispatch('input');
+      if (mode === 'same-value-draft') { goal.value = '40'; goal.dispatch('input'); }
+      if (mode === 'nested-save') goal.dispatch('change');
+      if (mode === 'draft-error') throw Error('Obsolete operation');
+    };
+    goal.dispatch('change'); h.app.render();
+    assert.equal(goal.value, mode === 'same-value-draft' ? '40' : '55');
+    const feedback = withClass(h.container, 'empire-edit-status')[1];
+    assert.equal(feedback.dataset.state, mode === 'nested-save' ? 'saved' : 'draft');
+    assert.equal(h.error.textContent, '');
+    assert.equal(h.writes, mode === 'nested-save' ? 2 : 1);
+  }
+});
+
+test('scope generation prevents reentrant errors or success leaking across A to B to A', () => {
+  for (const roundTrip of [false, true]) for (const fail of [false, true]) {
+    const h = harness(), goal = h.goal('Marauder'); goal.value = '40'; goal.dispatch('input');
+    h.failure = () => {
+      h.data.scope = 'beta/other'; h.app.observeScope?.(h.data.scope); h.app.render();
+      if (roundTrip) { h.data.scope = SCOPE; h.app.observeScope?.(h.data.scope); }
+      h.data.config.fleetTargets.marauder = 73; h.app.render();
+      if (fail) throw Error('Old-scope failure');
+    };
+    goal.dispatch('change'); h.app.render();
+    assert.equal(goal.value, '73'); assert.equal(h.error.textContent, '');
+    assert.ok(withClass(h.container, 'empire-edit-status').every(node => node.textContent === ''));
+    assert.equal(h.writes, 1);
+  }
+});
+
+test('destroy during an imperial save leaves no detached feedback writes or exception', () => {
+  const h = harness(), goal = h.goal('Marauder'); goal.value = '40'; goal.dispatch('input');
+  h.failure = () => h.app.destroy();
+  assert.doesNotThrow(() => goal.dispatch('change'));
+  const writes = h.document.textWrites;
+  goal.dispatch('input'); goal.dispatch('blur'); goal.dispatch('change'); h.app.render();
+  assert.equal(h.document.textWrites, writes); assert.equal(h.container.children.length, 0); assert.equal(h.writes, 1);
+});
+
+test('rejected async goal saves are consumed and never reported as confirmed local saves', async () => {
+  const h = harness(), goal = h.goal('Marauder'); goal.value = '40'; goal.dispatch('input');
+  h.failure = () => Promise.reject(Error('Synthetic async storage failure'));
+  goal.dispatch('change'); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(goal.value, '40'); assert.equal(h.data.config.fleetTargets.marauder, 20);
+  assert.match(h.error.textContent, /síncrono/);
+  assert.equal(withClass(h.container, 'empire-edit-status')[1].dataset.state, 'error');
+  h.data.scope = 'beta/other'; h.app.render();
+  assert.equal(h.error.textContent, '');
+});
+
+test('resetting policy releases saved feedback but preserves a pending draft until scope changes', () => {
+  const h = harness(), goal = h.goal('Marauder'); goal.value = '40'; goal.dispatch('input'); goal.dispatch('change');
+  h.data.config = core.normalizeConfig({}); h.app.render();
+  assert.equal(goal.value, '0'); assert.equal(withClass(h.container, 'empire-edit-status')[1].textContent, '');
+  goal.value = '-4'; goal.dispatch('input'); goal.dispatch('blur'); h.data.config = core.normalizeConfig({fleetTargets:{marauder:21}}); h.app.render();
+  assert.equal(goal.value, '-4'); assert.equal(goal.getAttribute('aria-invalid'), 'true');
+  h.data.scope = ''; h.app.render(); goal.value = '50'; goal.dispatch('input'); goal.dispatch('change');
+  assert.equal(h.writes, 1); assert.equal(h.data.config.fleetTargets.marauder, 21);
+});
+
+test('stable renders preserve invalid feedback and closed role help without rewriting text', () => {
+  const h = harness(), goal = h.goal('Marauder'); goal.value = '-2'; goal.dispatch('input'); goal.dispatch('change');
+  const writes = h.document.textWrites;
+  for (let i = 0; i < 50; i++) h.app.render();
+  assert.equal(h.document.textWrites, writes);
+  assert.equal(withClass(h.container, 'empire-role-details').length, 2);
+  assert.ok(withClass(h.container, 'empire-role-details').every(node => node.open !== true));
+  assert.equal(withClass(h.container, 'empire-goal-status').length, 4);
+});
+
+
+test('nested saves of different goals finish independently without clearing the newer error', () => {
+  for (const fails of [false, true]) {
+    const h = harness(), marauder = h.goal('Marauder'), probe = h.goal('Probe');
+    marauder.value = '40'; marauder.dispatch('input');
+    h.failure = value => {
+      h.data.config = core.normalizeConfig(value); h.failure = fails ? 'sync' : '';
+      probe.value = '9'; probe.dispatch('input'); probe.dispatch('change');
+    };
+    marauder.dispatch('change'); h.app.render();
+    const messages = withClass(h.container, 'empire-edit-status');
+    assert.equal(messages[1].dataset.state, 'saved'); assert.equal(marauder.value, '40');
+    assert.equal(messages[0].dataset.state, fails ? 'error' : 'saved'); assert.equal(probe.value, '9');
+    assert.equal(h.data.config.fleetTargets.marauder, 40); assert.equal(h.data.config.fleetTargets.probe, fails ? 0 : 9);
+    assert.equal(h.writes, 2);
+    if (fails) assert.match(h.error.textContent, /No se pudo guardar/); else assert.equal(h.error.textContent, '');
+    assert.ok(messages.every(node => node.textContent !== 'Guardando…'));
   }
 });

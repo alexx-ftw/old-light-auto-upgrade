@@ -24,6 +24,13 @@ function section(begin, end, from = 0) {
   assert.ok(a >= 0 && b > a, `Missing production section: ${begin}`);
   return source.slice(a, b);
 }
+// Installation now closes over the production work-aware planner. Execute its
+// real dependencies too so a swallowed installation exception cannot silently
+// turn this interaction fixture into a partial integration.
+const plannerCode = ['UPGRADE ETA ESTIMATOR', 'FLEET PRIORITY PLANNER',
+  'INFRASTRUCTURE PRIORITY PLANNER', 'EMPIRE NAVIGATION PLANNER']
+  .map(marker => section('// BEGIN ' + marker, '// END ' + marker)).join('\n')
+  + section('  const upgradeEta = createUpgradeEtaEstimator();', '\n  if (window.top !== window.self');
 const integrationStart = source.indexOf('// BEGIN EMPIRE INTEGRATION');
 const installCode = section('  try {\n    const core = globalThis.OldLightEmpireCore;', '  observeEmpireStartup();', integrationStart);
 const policyCode = section('  function empireMissionPermission()', '\n  function observeEmpireStartup(')
@@ -67,8 +74,11 @@ function harness(t, { ids = [A], dwellMs = 5000, adapterOptions = {} } = {}) {
     removeEventListener(type, fn) { listeners.set(type, (listeners.get(type) || []).filter(value => value !== fn)); } };
   const host = { shadowRoot: { activeElement: null, querySelector: () => null } }, game = {};
   const later = (fn, ms, interval = 0) => { const id = ++timerId; timers.set(id, { fn, at: clock + ms, interval }); return id; };
-  const ctx = { document, host, settings: { enabled: true }, leader: true, pending: null, importingBackup: false,
-    reports: { isRecovering: () => false }, missionAdapter: { isBusy: () => false }, attackRetry: { isBusy: () => false },
+  const ctx = { document, host, settings: { enabled: true,
+    order: ['command_center', 'reactor', 'palladium_extractor', 'iridium_extractor', 'warehouse', 'shipyard', 'trade_hub'],
+    excluded: [], shipOrder: core.DEFAULT_SHIPS, depotFillPercent: 90 }, leader: true, pending: null, importingBackup: false,
+    reports: { isRecovering: () => false }, missionAdapter: { isBusy: () => false },
+    fleetWait: { list: () => [] }, attackRetry: { isBusy: () => false, exportConfig: () => ({ enabled: false, campaigns: [] }) },
     PANEL: '#structures', FLEET_PANEL: '#shipyard', SHIPS: core.DEFAULT_SHIPS.map(id => [id, id]),
     JSON, Date: { now: () => clock }, setTimeout: (fn, ms) => later(fn, ms), clearTimeout: id => timers.delete(id),
     setInterval: (fn, ms) => later(fn, ms, ms), queueMicrotask,
@@ -88,7 +98,7 @@ function harness(t, { ids = [A], dwellMs = 5000, adapterOptions = {} } = {}) {
     OldLightEmpireRuntime: { create: options => runtime.create({ ...options, now: () => clock, dwellMs }) },
   };
   ctx.step = () => { if (++steps > 10000) throw new Error('Scheduler did not yield'); ctx.updateEmpireState(); };
-  vm.createContext(ctx); vm.runInContext(policyCode + schedulerCode + installCode + fallbackCode, ctx);
+  vm.createContext(ctx); vm.runInContext(plannerCode + policyCode + schedulerCode + installCode + fallbackCode, ctx);
   assert.ok(ctx.empireAdapter && ctx.empireController, 'The actual integration must install both coordinators');
   const adapter = ctx.empireAdapter, controller = ctx.empireController;
   const tick = () => { ctx.updateEmpireState(); return controller.state(); };
@@ -96,7 +106,7 @@ function harness(t, { ids = [A], dwellMs = 5000, adapterOptions = {} } = {}) {
   assert.equal(controller.canAct(adapter.readActive()?.context), true, 'Every fixture starts with actual action authority');
   t.after(() => adapter.dispose());
   const microtasks = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
-  return { ctx, document, host, game, adapter, controller, listeners, timers, tick, microtasks,
+  return { ctx, document, host, game, adapter, controller, listeners, timers, storage, tick, microtasks,
     get clock() { return clock; }, get clicks() { return clicks; }, get renders() { return renders; },
     get delivered() { return copy(delivered); }, get active() { return active; },
     set selectorWorks(value) { selectorWorks = value; }, set mismatch(value) { mismatch = value; },
@@ -359,3 +369,33 @@ test('busy dialog exemption retains synthetic/Helper filtering and cannot bypass
   h.controller.suspend(2147483647); assert.equal(h.ctx.empireMissionPermission(), false);
   h.event('touchstart'); h.jump(15001); assert.equal(h.ctx.empireMissionPermission(), false);
 });
+
+for (const change of ['disable', 'disable-enable', 'exclude', 'role', 'targets', 'remote-disable', 'storage-error', 'suspend']) {
+  test(`integrated mid-hop ${change} revokes remaining native clicks without undoing the first`, async t => {
+    const middle = uuid(12), h = harness(t, { ids: [A, middle, B] });
+    await h.advance(5001); assert.equal(h.clicks, 1); assert.equal(h.active, middle);
+    assert.equal(h.controller.state().moving, true); assert.equal(canAct(h), false);
+    const config = h.controller.exportConfig();
+    if (change === 'disable' || change === 'disable-enable') {
+      h.controller.setConfig({ ...config, enabled: false });
+      if (change === 'disable-enable') h.controller.setConfig(config);
+    } else if (change === 'exclude') h.controller.setConfig({ ...config, systems: { [B]: { enabled: false } } });
+    else if (change === 'role') h.controller.setConfig({ ...config, systems: { [B]: { role: 'industry' } } });
+    else if (change === 'targets') h.controller.setConfig({ ...config, fleetTargets: { probe: 50 } });
+    else if (change === 'remote-disable') {
+      h.storage.set('old-light-empire:v1:' + h.controller.state().scope, JSON.stringify({ ...config, enabled: false }));
+    } else if (change === 'storage-error') h.ctx.localStorage.getItem = () => { throw new Error('Synthetic denied storage'); };
+    else h.controller.suspend(15000);
+    if (!['remote-disable', 'storage-error'].includes(change)) assert.equal(canAct(h), false, 'Local edits revoke authority synchronously');
+    await h.advance(500);
+    assert.equal(h.clicks, 1); assert.equal(h.active, middle, 'The first completed hop is not undone');
+    assert.equal(h.controller.state().moving, false); assert.equal(h.controller.state().manualHold, false);
+    if (['disable', 'remote-disable', 'storage-error', 'suspend'].includes(change)) assert.equal(canAct(h), false);
+    // Enabled policy edits may gain NEW authority after a fresh scheduled update
+    // at the settled intermediate system; the old traversal still cannot continue.
+    if (change === 'storage-error') assert.equal(h.controller.state().storageError, true);
+    if (change === 'disable') {
+      await h.advance(1000); assert.equal(h.clicks, 1); assert.equal(h.controller.isEnabled(), false);
+    }
+  });
+}

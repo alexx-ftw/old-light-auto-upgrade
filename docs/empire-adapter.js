@@ -11,6 +11,7 @@
   'use strict';
   const SHIPS = Object.freeze(['probe', 'marauder', 'sentinel', 'vanguard']);
   const RESOURCES = Object.freeze(['palladium', 'iridium']);
+  const BUILDINGS = Object.freeze(['command_center', 'reactor', 'palladium_extractor', 'iridium_extractor', 'warehouse', 'shipyard', 'trade_hub']);
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const SCOPE = /^[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{1,96}$/;
   const own = (x, key) => Object.prototype.hasOwnProperty.call(x, key);
@@ -182,6 +183,29 @@
     }
     return out;
   }
+  // Advisory scheduling data only. Missing fields remain unknown and therefore
+  // cannot suppress a visit. This never grants action authority or reads tokens.
+  function navigationFacts(system) {
+    const buildingRows = get(system, 'buildings'), economy = get(system, 'economy'), yard = get(system, 'shipyard');
+    const buildings = array(buildingRows, 64) ? buildingRows.map(row => {
+      const next = get(row, 'nextUpgrade'), requirement = get(row, 'unlockRequirement');
+      return { id: BUILDINGS.includes(get(row, 'type')) ? get(row, 'type') : null, level: count(get(row, 'level')),
+        upgrade: next === null ? null : next === undefined ? undefined : {
+          palladium: number(get(next, 'paCost')), iridium: number(get(next, 'irCost')),
+          energy: number(get(next, 'energyDelta'), true) },
+        requirementMet: requirement === undefined || requirement === null ? true : typeof get(requirement, 'met') === 'boolean' ? get(requirement, 'met') : null };
+    }) : null;
+    const buildingQueue = get(economy, 'queue'), shipQueue = get(yard, 'queue'), types = get(yard, 'types');
+    return { systemId: id(get(system, 'id')), buildings,
+      buildingSlots: count(get(economy, 'queueSlots')),
+      buildingQueue: array(buildingQueue, 128) ? buildingQueue.map(job => ({ type: BUILDINGS.includes(get(job, 'type')) ? get(job, 'type') : null,
+        targetLevel: count(get(job, 'targetLevel')), completesAt: stamp(get(job, 'completesAt')) })) : null,
+      shipSlots: count(get(yard, 'queueSlots')),
+      shipQueue: array(shipQueue, 128) ? shipQueue.map(job => ({
+        nextCompletesAt: stamp(get(job, 'nextCompletesAt')), paused: typeof get(job, 'heldReason') === 'string' && !!get(job, 'heldReason') })) : null,
+      shipTypes: array(types, SHIPS.length) ? types.map(type => ({ id: SHIPS.includes(get(type, 'type')) ? get(type, 'type') : null, unlocked: typeof get(type, 'unlocked') === 'boolean' ? get(type, 'unlocked') : null,
+        palladium: number(get(get(type, 'stats'), 'paCost')), iridium: number(get(get(type, 'stats'), 'irCost')) })) : null };
+  }
   /**
    * @typedef {{phase:'attempted'|'unavailable',
    * readyState:'loading'|'interactive'|'complete'|'unknown',
@@ -259,13 +283,15 @@
           worldIssue = 'out-of-order-observation'; return null;
         }
         const identity = `${scope}:${generation}:${epoch}`, key = `${identity}:${revision}`;
-        const fingerprint = JSON.stringify({ complete, observedAt, roster, snapshots, transits });
+        const work = { scope, censusId, observedAt, systems: systems.map(navigationFacts),
+          treasuryBlocked: typeof get(get(source, 'credits'), 'inDeficit') === 'boolean' ? get(get(source, 'credits'), 'inDeficit') : null };
+        const fingerprint = JSON.stringify({ complete, observedAt, roster, snapshots, transits, work });
         if (key === poisonedKey) { worldIssue = 'contradictory-observation'; return null; }
         if (lastKey === key && lastFingerprint !== fingerprint) { poisonedKey = key; worldIssue = 'contradictory-observation'; return null; }
         lastKey = key; lastFingerprint = fingerprint;
         lastVersion = { scope, generation, epoch, revision, observedAt };
         worldIssue = '';
-        return { scope, identity, censusId, observedAt, roster, rawById, snapshots, complete,
+        return { scope, identity, censusId, observedAt, roster, rawById, snapshots, complete, work,
           transit: transits && Object.values(ships).every(x => x !== null) ? { scope, censusId, observedAt, ships } : null };
       } catch { worldIssue = 'invalid-observation'; return null; }
     }
@@ -356,6 +382,7 @@
       return copy({
         roster: { scope: current.scope, complete: current.complete, observedAt: current.observedAt, systems: current.roster },
         snapshots: current.snapshots,
+        work: current.work,
         transitCensus: current.complete ? current.transit : null,
         active: active(current),
       });
@@ -401,6 +428,7 @@
     const rosterKey = current => current.roster.map(x => x.id).sort().join(',');
     function safeWorld(operation) {
       if (moving !== operation || operation.cancelled || !gates()) return null;
+      try { if (operation.isCurrent && operation.isCurrent() !== true) return null; } catch { return null; }
       const current = world();
       return current?.complete && current.identity === operation.identity && current.scope === operation.scope
         && rosterKey(current) === operation.roster && current.roster.some(x => x.id === operation.target) ? current : null;
@@ -427,13 +455,14 @@
       }
       return null;
     }
-    async function selectSystem(uuid, { scope } = {}) {
+    async function selectSystem(uuid, { scope, isCurrent } = {}) {
       const target = id(uuid);
-      if (!target || !SCOPE.test(scope || '') || moving || !gates()) return false;
+      if (!target || !SCOPE.test(scope || '') || moving || !gates()
+          || isCurrent !== undefined && typeof isCurrent !== 'function') return false;
       const initial = world(), before = active(initial);
       if (!initial?.complete || initial.scope !== scope || !before?.context.settled || !initial.roster.some(x => x.id === target)) return false;
       if (before.context.systemId === target) return true;
-      const operation = { target, scope, identity: initial.identity, roster: rosterKey(initial), seen: new Set([before.context.systemId]), cancelled: false };
+      const operation = { target, scope, identity: initial.identity, roster: rosterKey(initial), seen: new Set([before.context.systemId]), cancelled: false, isCurrent };
       moving = operation; status = 'Confirmando la selección nativa del sistema.';
       let currentId = before.context.systemId;
       try {

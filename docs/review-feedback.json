@@ -624,6 +624,948 @@
         "Revisar las pruebas y los gaps de integración real antes de publicar; el gate completo del commit final no sustituye una revisión independiente.",
         "Reproducir la secuencia real setConfig → render → update: el runtime conserva plan pero revoca ready. La UI debe ocultar ese reparto sin ocultar stock verificado y recuperarlo al recalcular; no basta con el harness que rehace plan en cada lectura."
       ]
+    },
+    {
+      "id": "compact-ui-density-and-safe-goal-editing",
+      "feedback": "La interfaz tenía demasiado texto persistente; las subpestañas de Flota se cortaban al desplazar y los borradores inválidos desaparecían tras perder foco. Integrar claridad sin perder cifras y guardas de 1.16.2.",
+      "beforeFail": {
+        "revision": "1fc791c96a6ab8087b15a01d93c8b117336cfa91",
+        "command": "env -u NODE_PATH node --test tests/empire-panel.test.cjs tests/helper-navigation.test.cjs tests/helper-ui-density.test.cjs tests/helper-keyboard-boundary.test.cjs tests/empire-fleet-feedback.test.cjs tests/empire-order-pipeline.test.cjs",
+        "observedFailure": "Los mismos seis tests finales sobre el árbol inmutable de 1.16.2: 104 casos, 81 aprobados y 23 fallidos, exit 1. Ayuda visible: Imperio 145 palabras, Flota 42. El integrado: 104/104 y 41/17 palabras. La matriz distingue fallos conductuales de nuevas expectativas de interfaz.",
+        "evidence": "docs/ui-ux-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "invalid imperial drafts survive blur and passive refresh until corrected"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "failed imperial goal saves retain the attempted value with local failure feedback"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "goal draft and validation are discarded when account or galaxy scope changes"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "late change events cannot commit a draft into a new imperial scope"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "Drive-like updates preserve a local draft and merge the eventual edit into latest policy"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "imperial goal feedback covers empty, integer bounds and invalid numeric formats"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "imperial long-form help is closed by default while scope and counting remain visible"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "returning a goal to its starting value clears an uncommitted no-op on blur"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "cheap hidden-scope observation invalidates round-trip drafts without reading a census"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "re-editing the same failed goal retries on blur when native change is absent"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "blur commit followed by a late repeated change does not save a goal twice"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "resetting policy releases saved feedback but preserves a pending draft until scope changes"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "stable renders preserve invalid feedback and closed role help without rewriting text"
+        },
+        {
+          "file": "tests/helper-navigation.test.cjs",
+          "name": "fleet task navigation remains outside scrolling content and follows main-tab visibility"
+        },
+        {
+          "file": "tests/helper-navigation.test.cjs",
+          "name": "fleet keyboard navigation preserves subview scroll and exactly one keyboard tab stop"
+        },
+        {
+          "file": "tests/helper-navigation.test.cjs",
+          "name": "passive workspace refresh keeps focused editing, navigation identity and operational settings"
+        },
+        {
+          "file": "tests/helper-navigation.test.cjs",
+          "name": "navigation CSS uses normal flow and container-aware narrow controls"
+        },
+        {
+          "file": "tests/helper-navigation.test.cjs",
+          "name": "the runtime forwards its current identity before rendering even when the dashboard is hidden"
+        },
+        {
+          "file": "tests/helper-navigation.test.cjs",
+          "name": "mounted fleet navigation and goal shortcut preserve keyboard isolation, defaults and policy"
+        },
+        {
+          "file": "tests/helper-ui-density.test.cjs",
+          "name": "imperial default help stays concise while full explanations and critical state remain reachable"
+        },
+        {
+          "file": "tests/helper-ui-density.test.cjs",
+          "name": "fleet default help is brief without collapsing controls or the active imperial notice"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Objetivo negativo, blur y refrescos pasivos, seguido de corrección a cero.",
+          "expected": "Se conserva el valor inválido sin guardar; la corrección se confirma y retira aria-invalid.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "invalid imperial drafts survive blur and passive refresh until corrected"
+          }
+        },
+        {
+          "scenario": "Callback de guardado falla síncronamente o devuelve promesa.",
+          "expected": "No se afirma éxito y el valor intentado permanece disponible para reintentar.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "failed imperial goal saves retain the attempted value with local failure feedback"
+          }
+        },
+        {
+          "scenario": "Cambia cuenta, galaxia o identidad vacía mientras hay error y foco.",
+          "expected": "Se restaura la política del nuevo ámbito y se retiran mensajes de la edición anterior.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "goal draft and validation are discarded when account or galaxy scope changes"
+          }
+        },
+        {
+          "scenario": "Llega change después de cambiar el ámbito antes de render.",
+          "expected": "No guarda el borrador anterior en el nuevo ámbito.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "late change events cannot commit a draft into a new imperial scope"
+          }
+        },
+        {
+          "scenario": "Una actualización remota cambia objetivo, otro tipo de nave y roles durante la edición.",
+          "expected": "Conserva borrador; al guardar fusiona el objetivo con la política más reciente; retira éxitos obsoletos.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "Drive-like updates preserve a local draft and merge the eventual edit into latest policy"
+          }
+        },
+        {
+          "scenario": "Vacío, espacios, negativo, fracción, texto y fuera de rango; cero, uno y máximo.",
+          "expected": "Inválidos no guardan; enteros válidos se confirman.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "imperial goal feedback covers empty, integer bounds and invalid numeric formats"
+          }
+        },
+        {
+          "scenario": "Montaje sin interacción.",
+          "expected": "Ayuda cerrada, resumen de recuento visible, sin escrituras.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "imperial long-form help is closed by default while scope and counting remain visible"
+          }
+        },
+        {
+          "scenario": "20→40→20 sin change, con o sin cambio remoto.",
+          "expected": "Blur libera el borrador y revela la política vigente sin guardar.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "returning a goal to its starting value clears an uncommitted no-op on blur"
+          }
+        },
+        {
+          "scenario": "A→B→A con Imperio oculto.",
+          "expected": "El hook barato invalida borradores sin leer el censo oculto.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "cheap hidden-scope observation invalidates round-trip drafts without reading a census"
+          }
+        },
+        {
+          "scenario": "Tras fallo se edita y vuelve al mismo valor antes del blur.",
+          "expected": "Reintenta una vez; blur repetido no duplica.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "re-editing the same failed goal retries on blur when native change is absent"
+          }
+        },
+        {
+          "scenario": "Blur confirma antes de change tardío y repetido.",
+          "expected": "Solo una escritura de política.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "blur commit followed by a late repeated change does not save a goal twice"
+          }
+        },
+        {
+          "scenario": "Reset de política tras guardado y durante borrador inválido; luego scope vacío.",
+          "expected": "El éxito obsoleto desaparece; el borrador pendiente persiste solo en su ámbito y no se guarda sin identidad.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "resetting policy releases saved feedback but preserves a pending draft until scope changes"
+          }
+        },
+        {
+          "scenario": "50 renders estables con borrador inválido.",
+          "expected": "Cero escrituras de texto adicionales; ayuda de rol cerrada y progreso conservado.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "stable renders preserve invalid feedback and closed role help without rewriting text"
+          }
+        },
+        {
+          "scenario": "Scroll y alternancia por las cinco pestañas principales.",
+          "expected": "Subnav fuera del scroll; solo visible en Flota y scroll restaurado.",
+          "regression": {
+            "file": "tests/helper-navigation.test.cjs",
+            "name": "fleet task navigation remains outside scrolling content and follows main-tab visibility"
+          }
+        },
+        {
+          "scenario": "Flechas, Home y End entre subpestañas con posiciones distintas.",
+          "expected": "Foco local, una parada de Tab y scroll independiente.",
+          "regression": {
+            "file": "tests/helper-navigation.test.cjs",
+            "name": "fleet keyboard navigation preserves subview scroll and exactly one keyboard tab stop"
+          }
+        },
+        {
+          "scenario": "20 refrescos mientras se edita.",
+          "expected": "Mantiene foco y una sola navegación, sin escrituras ni cambios operativos.",
+          "regression": {
+            "file": "tests/helper-navigation.test.cjs",
+            "name": "passive workspace refresh keeps focused editing, navigation identity and operational settings"
+          }
+        },
+        {
+          "scenario": "Inspección de CSS de subnav, foco y contenedor estrecho.",
+          "expected": "Sin offset sticky; media/container queries y focos presentes. No prueba geometría real.",
+          "regression": {
+            "file": "tests/helper-navigation.test.cjs",
+            "name": "navigation CSS uses normal flow and container-aware narrow controls"
+          }
+        },
+        {
+          "scenario": "updateEmpireState con documento oculto.",
+          "expected": "Entrega identidad ya leída antes de render sin cambiar la actualización del runtime.",
+          "regression": {
+            "file": "tests/helper-navigation.test.cjs",
+            "name": "the runtime forwards its current identity before rendering even when the dashboard is hidden"
+          }
+        },
+        {
+          "scenario": "Subnav montada con frontera real, flechas/Home/Tab/Escape/G y Enter en Ver objetivos.",
+          "expected": "No llega keydown a burbuja exterior; defaults no cancelados siguen; cambia pestaña/foco/scroll sin política.",
+          "regression": {
+            "file": "tests/helper-navigation.test.cjs",
+            "name": "mounted fleet navigation and goal shortcut preserve keyboard isolation, defaults and policy"
+          }
+        },
+        {
+          "scenario": "Panel de producción montado con dos sistemas sintéticos y detalles cerrados.",
+          "expected": "145→41 palabras de ayuda visibles; cifras, controles y avisos no quedan dentro de detalles.",
+          "regression": {
+            "file": "tests/helper-ui-density.test.cjs",
+            "name": "imperial default help stays concise while full explanations and critical state remain reachable"
+          }
+        },
+        {
+          "scenario": "Plantilla real de Flota analizada como árbol de fixture con detalles cerrados.",
+          "expected": "42→17 palabras visibles de ayuda; controles y aviso activo accesibles, explicación completa conservada.",
+          "regression": {
+            "file": "tests/helper-ui-density.test.cjs",
+            "name": "fleet default help is brief without collapsing controls or the active imperial notice"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Navegador real y geometría",
+          "reason": "Solo DOM/eventos sintéticos y recuento de texto. No se ejecutó Chromium en esta integración; no se validó zoom, tacto, layout, lector de pantalla ni foco real."
+        },
+        {
+          "scope": "Brave/Violentmonkey y Drive con cuenta real",
+          "reason": "No se inició sesión ni hubo pedidos, conexión Drive o permisos nuevos; las actualizaciones remotas son simuladas."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Reproducir los mismos tests en el árbol base y el integrado; no reutilizar gates anteriores del parche sin fusionar.",
+        "Conservar progreso guardado, productionSummary, ready-gated allocations y ambos IDs aria-describedby, con edición al final.",
+        "Revisar navegación fuera de scroll, minimización y misma raíz de teclado; no atribuir geometría real a la fixture.",
+        "Comprobar que solo cambian panel y presentación; runtime, core, adapter, observer, bridge, Drive y frontera de teclado deben conservar bytes.",
+        "Contrastar reducción de texto sin ocultar avisos, consentimientos ni controles; no presentar este lote como rediseño completo."
+      ]
+    },
+    {
+      "id": "imperial-edit-reentrant-review",
+      "feedback": "La revisión independiente del parche UI inicial encontró finalizaciones obsoletas que borraban una nueva edición, filtraban errores entre ámbitos, escribían después de destroy y dejaban rechazos asíncronos sin consumir.",
+      "beforeFail": {
+        "revision": "3e1cdc7a26022e642196a6bdf06bf3edcb3f8fad",
+        "command": "env -u NODE_PATH node --test --test-name-pattern='reentrant save completion|scope generation|destroy during|rejected async|nested saves of different' tests/empire-panel.test.cjs",
+        "observedFailure": "Los cinco casos finales copiados sin cambios sobre el parche anterior fallan: 40 sustituye borrador55; Old-scope failure aparece en B; destroy lanza TypeError reading dataset; Promise.reject genera unhandledRejection. Tras integrar los cinco pasan.",
+        "evidence": "docs/ui-ux-validation.md#revision-reentrante"
+      },
+      "regressions": [
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "reentrant save completion cannot overwrite a newer imperial draft or nested save"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "scope generation prevents reentrant errors or success leaking across A to B to A"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "destroy during an imperial save leaves no detached feedback writes or exception"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "rejected async goal saves are consumed and never reported as confirmed local saves"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "nested saves of different goals finish independently without clearing the newer error"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "setConfig crea nuevo borrador55, nuevo borrador del mismo valor, guardado anidado o error de operación obsoleta.",
+          "expected": "Solo la identidad vigente puede recibir feedback; no sobrescribe borrador ni resultado de guardado nuevo.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "reentrant save completion cannot overwrite a newer imperial draft or nested save"
+          }
+        },
+        {
+          "scenario": "setConfig cambia A→B o A→B→A y devuelve éxito o error.",
+          "expected": "La generación de ámbito invalida feedback y error anteriores aunque el nombre del ámbito vuelva a ser A.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "scope generation prevents reentrant errors or success leaking across A to B to A"
+          }
+        },
+        {
+          "scenario": "setConfig destruye el panel antes de terminar.",
+          "expected": "No escribe nodos separados ni lanza; listeners tardíos no guardan.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "destroy during an imperial save leaves no detached feedback writes or exception"
+          }
+        },
+        {
+          "scenario": "setConfig devuelve Promise.reject, sin confirmación síncrona.",
+          "expected": "Consume rechazo sin éxito falso; no altera política confirmada y el cambio de ámbito limpia el error.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "rejected async goal saves are consumed and never reported as confirmed local saves"
+          }
+        },
+        {
+          "scenario": "Guardar Marauder provoca un guardado de Probe, válido o fallido.",
+          "expected": "Cada campo termina su propio feedback; un éxito anterior no borra el error del segundo campo.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "nested saves of different goals finish independently without clearing the newer error"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Persistencia asíncrona",
+          "reason": "El callback sigue requiriendo guardado síncrono confirmado. Consumir el rechazo evita un error global; no convierte promesas en guardados compatibles ni controla un callback externo que mute política más tarde."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Reejecutar las reproducciones del revisor sobre los bytes congelados.",
+        "Comprobar identidad de edición además de valor, y generación además de igualdad del scope.",
+        "Verificar que no se presenta guardado local hasta confirmar el callback síncrono y que errores viejos no contaminan una operación nueva."
+      ]
+    },
+    {
+      "id": "fleet-explicit-execution-wait",
+      "feedback": "La flota parecía detenida con Vanguard pendiente e inasequible antes de Sentinel y Marauder. La prioridad estricta existente ahorra para la primera nave pendiente; su motivo quedaba fuera de la zona visible. Se pidió feedback breve sin cambiar esa estrategia.",
+      "beforeFail": {
+        "revision": "1fc791c96a6ab8087b15a01d93c8b117336cfa91",
+        "command": "Copiar tests/fleet-execution-feedback.test.cjs sin cambios a una copia temporal con old-light-auto-upgrade.user.js obtenido de git show 1fc791c:old-light-auto-upgrade.user.js; ejecutar node --test tests/fleet-execution-feedback.test.cjs en esa copia.",
+        "observedFailure": "Las siete pruebas finales fallan sobre los bytes previos: no existe la explicación de ejecución, el estado inline ni la relectura diagnóstica. Exit 1, 7 fallidas, 0 aprobadas/omitidas.",
+        "evidence": "docs/fleet-execution-feedback-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/fleet-execution-feedback.test.cjs",
+          "name": "resource reservation explains the exact selected ship and missing known resources"
+        },
+        {
+          "file": "tests/fleet-execution-feedback.test.cjs",
+          "name": "native, manual, mission and incomplete data waits do not falsely claim resource savings"
+        },
+        {
+          "file": "tests/fleet-execution-feedback.test.cjs",
+          "name": "ready forecast after a failed native preparation waits for availability instead of claiming savings"
+        },
+        {
+          "file": "tests/fleet-execution-feedback.test.cjs",
+          "name": "fleet inline status uses supplied execution text and clears stale messages without empire or stock reads"
+        },
+        {
+          "file": "tests/fleet-execution-feedback.test.cjs",
+          "name": "distributed wiring shows explicit fleet states and does not retain them across other execution messages"
+        },
+        {
+          "file": "tests/fleet-execution-feedback.test.cjs",
+          "name": "unknown reason, competing queue, changed priority or context cannot be described as saving"
+        },
+        {
+          "file": "tests/fleet-execution-feedback.test.cjs",
+          "name": "actual failed-preparation branch rereads current state, handles changed system and sends no orders"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "resource reservation explains the exact selected ship and missing known resources",
+          "expected": "Solo un bloqueo nativo de fondos con cifras exactas produce un aviso breve de ahorro; no hay mutaciones.",
+          "regression": {
+            "file": "tests/fleet-execution-feedback.test.cjs",
+            "name": "resource reservation explains the exact selected ship and missing known resources"
+          }
+        },
+        {
+          "scenario": "native, manual, mission and incomplete data waits do not falsely claim resource savings",
+          "expected": "No se atribuye ahorro ante bloqueo de edición, misión, nativo desconocido o cifras incompletas.",
+          "regression": {
+            "file": "tests/fleet-execution-feedback.test.cjs",
+            "name": "native, manual, mission and incomplete data waits do not falsely claim resource savings"
+          }
+        },
+        {
+          "scenario": "ready forecast after a failed native preparation waits for availability instead of claiming savings",
+          "expected": "Una preparación fallida espera disponibilidad real aunque la previsión anterior parezca lista.",
+          "regression": {
+            "file": "tests/fleet-execution-feedback.test.cjs",
+            "name": "ready forecast after a failed native preparation waits for availability instead of claiming savings"
+          }
+        },
+        {
+          "scenario": "fleet inline status uses supplied execution text and clears stale messages without empire or stock reads",
+          "expected": "El mensaje anterior se borra y oculta al salir del estado explícito de naves; no hay lecturas nuevas de cuenta.",
+          "regression": {
+            "file": "tests/fleet-execution-feedback.test.cjs",
+            "name": "fleet inline status uses supplied execution text and clears stale messages without empire or stock reads"
+          }
+        },
+        {
+          "scenario": "distributed wiring shows explicit fleet states and does not retain them across other execution messages",
+          "expected": "Solo las ramas explícitas de naves activan el estado inline; los otros mensajes operativos lo limpian.",
+          "regression": {
+            "file": "tests/fleet-execution-feedback.test.cjs",
+            "name": "distributed wiring shows explicit fleet states and does not retain them across other execution messages"
+          }
+        },
+        {
+          "scenario": "unknown reason, competing queue, changed priority or context cannot be described as saving",
+          "expected": "Se conserva un motivo desconocido o bloqueado sin inventar faltantes ni una estrategia de ahorro.",
+          "regression": {
+            "file": "tests/fleet-execution-feedback.test.cjs",
+            "name": "unknown reason, competing queue, changed priority or context cannot be described as saving"
+          }
+        },
+        {
+          "scenario": "actual failed-preparation branch rereads current state, handles changed system and sends no orders",
+          "expected": "La rama real relee estado y valida cuenta, sistema, modo, pausa, visibilidad, petición nativa en curso, permiso imperial y prioridad Depot; refleja cambios o fallo de lectura sin pedir naves ni volver a preparar.",
+          "regression": {
+            "file": "tests/fleet-execution-feedback.test.cjs",
+            "name": "actual failed-preparation branch rereads current state, handles changed system and sends no orders"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Brave/Violentmonkey con juego y Drive reales",
+          "reason": "No se usó una sesión real ni se enviaron órdenes. DOM y mutaciones son simulados; la integración visual final necesita revisión propia."
+        },
+        {
+          "scope": "Causa única de la captura de 17:48",
+          "reason": "No aparecen el estado imperial, los títulos completos, el umbral de Depot ni su intención retenida. Los recursos visibles están redondeados."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Verificar que el título nativo, coste y recursos respaldan el ahorro, con precedencia de cola, contexto, muelles y tesorería; no inferir causa de un resultado cero.",
+        "Revisar show y step reales, cambio síncrono tras preparación, fallo de lectura, ausencia de órdenes añadidas y limpieza de avisos anteriores.",
+        "Comparar planner, infraestructura y política estricta con 1.16.2; preservar pausas y guardas sin cambiar estrategia.",
+        "Ejecutar el gate completo del árbol integrado y mantener explícitos los límites de navegador y causalidad.",
+        "Reproducir cambios síncronos durante prepareShip: cuenta, pausa, permiso imperial y reserva Depot deben impedir Ahorrando. Verificar también una cola llena con ETA conocida. Una petición nativa b-loading conserva precedencia aunque quede un título anterior de fondos."
+      ]
+    },
+    {
+      "id": "reactor-current-energy-deficit",
+      "feedback": "Reactor asequible permanecía inactivo con déficit energético actual porque la política exigía otra mejora marcada ya disponible. El usuario pide atender ese déficit sin cambiar las reservas ni guardas existentes.",
+      "beforeFail": {
+        "revision": "1fc791c96a6ab8087b15a01d93c8b117336cfa91",
+        "command": "En una copia limpia de 1fc791c con tests/reactor-deficit.test.cjs final añadido sin cambios: node --test tests/reactor-deficit.test.cjs",
+        "observedFailure": "15 casos: 8 aprobados, 7 fallidos, 0 omitidos. El selector devuelve undefined, el step completo envía cero clics y la ETA devuelve waiting, aunque Reactor es asequible con energía -1.",
+        "evidence": "docs/reactor-deficit-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reactor-deficit.test.cjs",
+          "name": "negative-energy screenshot fixture selects and forecasts its affordable Reactor without another affordable upgrade"
+        },
+        {
+          "file": "tests/reactor-deficit.test.cjs",
+          "name": "negative-energy screenshot fixture reaches the native click through the complete imperial step exactly once"
+        },
+        {
+          "file": "tests/reactor-deficit.test.cjs",
+          "name": "negative-energy screenshot forecast independently reports the Reactor ready instead of waiting for Shipyard funds"
+        },
+        {
+          "file": "tests/reactor-deficit.test.cjs",
+          "name": "real deficit recovery applies in ordinary mode and every imperial role without altering saved settings"
+        },
+        {
+          "file": "tests/reactor-deficit.test.cjs",
+          "name": "zero positive or unknown energy does not justify a speculative Reactor without an affordable consumer"
+        },
+        {
+          "file": "tests/reactor-deficit.test.cjs",
+          "name": "negative energy never overrides an excluded Reactor or a native blocker"
+        },
+        {
+          "file": "tests/reactor-deficit.test.cjs",
+          "name": "deficit recovery requires a known positive Reactor gain and does not invent a zero-energy upgrade"
+        },
+        {
+          "file": "tests/reactor-deficit.test.cjs",
+          "name": "deficit recovery preserves pauses leadership cooldown pending work and imperial authority"
+        },
+        {
+          "file": "tests/reactor-deficit.test.cjs",
+          "name": "loss of imperial authority immediately before the Reactor boundary prevents the click"
+        },
+        {
+          "file": "tests/reactor-deficit.test.cjs",
+          "name": "an outstanding fleet resource reservation still precedes deficit recovery"
+        },
+        {
+          "file": "tests/reactor-deficit.test.cjs",
+          "name": "retained Depot reservations remain in charge rather than being spent on another building"
+        },
+        {
+          "file": "tests/reactor-deficit.test.cjs",
+          "name": "a recovered deficit releases its Reactor demand without requiring settings changes"
+        },
+        {
+          "file": "tests/reactor-deficit.test.cjs",
+          "name": "a Reactor alone repairs debt but still waits for its own resources and native queue"
+        },
+        {
+          "file": "tests/reactor-deficit.test.cjs",
+          "name": "a queued lone Reactor reports its real wait and insufficient production never invents a countdown"
+        },
+        {
+          "file": "tests/reactor-deficit.test.cjs",
+          "name": "current energy debt does not reorder an independently eligible zero-energy building"
+        },
+        {
+          "file": "tests/infrastructure-priority.test.cjs",
+          "name": "existing energy debt cannot divert a zero-energy urgent Depot reservation to Reactor"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Déficit actual sin otro edificio asequible",
+          "expected": "Elegir y pronosticar Reactor marcado y habilitado",
+          "regression": {
+            "file": "tests/reactor-deficit.test.cjs",
+            "name": "negative-energy screenshot fixture selects and forecasts its affordable Reactor without another affordable upgrade"
+          }
+        },
+        {
+          "scenario": "Paso imperial completo y cola",
+          "expected": "Un clic, sin duplicación pendiente ni en cola",
+          "regression": {
+            "file": "tests/reactor-deficit.test.cjs",
+            "name": "negative-energy screenshot fixture reaches the native click through the complete imperial step exactly once"
+          }
+        },
+        {
+          "scenario": "Energía no negativa o desconocida",
+          "expected": "Sin Reactor especulativo",
+          "regression": {
+            "file": "tests/reactor-deficit.test.cjs",
+            "name": "zero positive or unknown energy does not justify a speculative Reactor without an affordable consumer"
+          }
+        },
+        {
+          "scenario": "Exclusiones y bloqueo nativo",
+          "expected": "Cero clics",
+          "regression": {
+            "file": "tests/reactor-deficit.test.cjs",
+            "name": "negative energy never overrides an excluded Reactor or a native blocker"
+          }
+        },
+        {
+          "scenario": "Pausas y autorización imperial",
+          "expected": "Cero clics",
+          "regression": {
+            "file": "tests/reactor-deficit.test.cjs",
+            "name": "deficit recovery preserves pauses leadership cooldown pending work and imperial authority"
+          }
+        },
+        {
+          "scenario": "Revocación al capturar barrera",
+          "expected": "Cero clics y sin solicitud pendiente",
+          "regression": {
+            "file": "tests/reactor-deficit.test.cjs",
+            "name": "loss of imperial authority immediately before the Reactor boundary prevents the click"
+          }
+        },
+        {
+          "scenario": "Reserva de flota",
+          "expected": "No gastar sus recursos en Reactor ordinario",
+          "regression": {
+            "file": "tests/reactor-deficit.test.cjs",
+            "name": "an outstanding fleet resource reservation still precedes deficit recovery"
+          }
+        },
+        {
+          "scenario": "Reactor único y fondos/cola propios",
+          "expected": "Esperar recursos y cola sin depender de otro edificio",
+          "regression": {
+            "file": "tests/reactor-deficit.test.cjs",
+            "name": "a Reactor alone repairs debt but still waits for its own resources and native queue"
+          }
+        },
+        {
+          "scenario": "Reserva Depot de energía cero",
+          "expected": "No desviarla hacia Reactor",
+          "regression": {
+            "file": "tests/infrastructure-priority.test.cjs",
+            "name": "existing energy debt cannot divert a zero-energy urgent Depot reservation to Reactor"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Sesión real y configuración efectiva",
+          "reason": "La captura no muestra casillas/rol/cola exacta ni el resultado posterior; DOM, adaptador y recursos de pruebas son sintéticos. Brave/Violentmonkey con Drive pendiente."
+        },
+        {
+          "scope": "Release combinada con navegación/UI",
+          "reason": "Este commit funcional sin bump necesita revisión y gate completo del árbol integrado antes de publicar."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Contrastar selector y ETA ordinario: déficit negativo admite Reactor con aporte positivo, energía cero no basta sin consumidor disponible.",
+        "Verificar que la cadena depotRequired no gaste la reserva en un Reactor que no sea dependencia del Depot.",
+        "Comprobar que el step conserva casillas, pausas, fondos/cola nativos, reservas de flota y barrera imperial; las pruebas ejecutan código distribuido sin imitar la selección.",
+        "Distinguir hipótesis del fixture y reproducción offline de la causa concreta de la sesión y de la validación real pendiente."
+      ]
+    },
+    {
+      "id": "integrated-navigation-reactor-reservation",
+      "feedback": "Al combinar el filtro imperial, la recuperación de Reactor y la UI compacta, un sistema con deuda energética no debe desaparecer de destinos útiles. El filtro sigue siendo consultivo: no libera reservas ni concede pedidos.",
+      "beforeFail": {
+        "revision": "cd7aca8bf9aa7fe551c1e8c7174216c2029edd05",
+        "command": "Copiar tests/empire-navigation.test.cjs integrado al archivo de cd7aca8 y ejecutar node --test --test-name-pattern=^integrated tests/empire-navigation.test.cjs (siete casos originales, antes del test terminal).",
+        "observedFailure": "Los siete casos cruzados se ejecutaron: 1 aprobado y 6 fallidos. El Reactor asequible sin consumidor y la reactivación tras censo negativo no eran elegibles; la deuda no bastaba para la ETA. El fallo no se atribuye a una sesión real.",
+        "evidence": "docs/1.16.4-validation-matrix.md#reproducciones"
+      },
+      "regressions": [
+        {
+          "file": "tests/empire-navigation.test.cjs",
+          "name": "integrated filter retains affordable deficit Reactor without another affordable consumer"
+        },
+        {
+          "file": "tests/empire-navigation.test.cjs",
+          "name": "integrated deficit filter respects nonnegative energy exclusions queued Reactor and unknown data"
+        },
+        {
+          "file": "tests/empire-navigation.test.cjs",
+          "name": "integrated deficit filter wakes at resource threshold and rechecks nominal queue completion"
+        },
+        {
+          "file": "tests/empire-navigation.test.cjs",
+          "name": "integrated deficit filter preserves every role and marked building policy"
+        },
+        {
+          "file": "tests/empire-navigation.test.cjs",
+          "name": "integrated deficit filter cannot divert a retained energy-neutral Depot reservation"
+        },
+        {
+          "file": "tests/empire-navigation.test.cjs",
+          "name": "integrated deficit advisory eligibility never relaxes strict fleet reservation"
+        },
+        {
+          "file": "tests/empire-navigation.test.cjs",
+          "name": "integrated fresh energy revision cancels a pending deficit visit then restores it when needed"
+        },
+        {
+          "file": "tests/empire-navigation.test.cjs",
+          "name": "storage policy changes before selection microtask revoke disable/exclusion/role/target edits"
+        },
+        {
+          "file": "tests/empire-navigation.test.cjs",
+          "name": "stale, disconnected and incomplete censuses stop filtering/navigation and reconnect cleanly"
+        },
+        {
+          "file": "tests/empire-navigation.test.cjs",
+          "name": "next traversal intermediates do not consume useful fair turns or gain action authority"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Reactor es la única mejora asequible y energía negativa.",
+          "expected": "Conserva visita y ETA lista sin mutar inputs.",
+          "regression": {
+            "file": "tests/empire-navigation.test.cjs",
+            "name": "integrated filter retains affordable deficit Reactor without another affordable consumer"
+          }
+        },
+        {
+          "scenario": "Energía no negativa, casilla, requisito, cola o datos desconocidos.",
+          "expected": "Lo conocido bloquea la visita o el pedido; lo desconocido conserva recorrido conservador.",
+          "regression": {
+            "file": "tests/empire-navigation.test.cjs",
+            "name": "integrated deficit filter respects nonnegative energy exclusions queued Reactor and unknown data"
+          }
+        },
+        {
+          "scenario": "Recursos cruzan coste exacto o vence plazo nominal de cola.",
+          "expected": "Reevalúa recursos proyectados; el vencimiento conserva visita sin inventar confirmación.",
+          "regression": {
+            "file": "tests/empire-navigation.test.cjs",
+            "name": "integrated deficit filter wakes at resource threshold and rechecks nominal queue completion"
+          }
+        },
+        {
+          "scenario": "Cambian rol, casilla y Atender.",
+          "expected": "Respeta política efectiva de todos los roles y exclusiones.",
+          "regression": {
+            "file": "tests/empire-navigation.test.cjs",
+            "name": "integrated deficit filter preserves every role and marked building policy"
+          }
+        },
+        {
+          "scenario": "Depot retenido consume cero energía y espera recursos.",
+          "expected": "No desvía su reserva a Reactor por deuda independiente.",
+          "regression": {
+            "file": "tests/empire-navigation.test.cjs",
+            "name": "integrated deficit filter cannot divert a retained energy-neutral Depot reservation"
+          }
+        },
+        {
+          "scenario": "Flota reserva recursos y Reactor está listo.",
+          "expected": "La elegibilidad consultiva no cambia reserva estricta real.",
+          "regression": {
+            "file": "tests/empire-navigation.test.cjs",
+            "name": "integrated deficit advisory eligibility never relaxes strict fleet reservation"
+          }
+        },
+        {
+          "scenario": "Censo elimina déficit antes de microtarea y lo vuelve a introducir después.",
+          "expected": "Cancela el salto obsoleto y vuelve a considerar el destino con la revisión nueva.",
+          "regression": {
+            "file": "tests/empire-navigation.test.cjs",
+            "name": "integrated fresh energy revision cancels a pending deficit visit then restores it when needed"
+          }
+        },
+        {
+          "scenario": "Política cambia antes del selector.",
+          "expected": "Cancela salto de configuración antigua.",
+          "regression": {
+            "file": "tests/empire-navigation.test.cjs",
+            "name": "storage policy changes before selection microtask revoke disable/exclusion/role/target edits"
+          }
+        },
+        {
+          "scenario": "Censo caduca, se desconecta o pierde completitud.",
+          "expected": "No navega ni actúa hasta recuperar las guardas.",
+          "regression": {
+            "file": "tests/empire-navigation.test.cjs",
+            "name": "stale, disconnected and incomplete censuses stop filtering/navigation and reconnect cleanly"
+          }
+        },
+        {
+          "scenario": "Next atraviesa sistemas intermedios.",
+          "expected": "No concede pedidos ni consume turnos útiles en los pasos intermedios.",
+          "regression": {
+            "file": "tests/empire-navigation.test.cjs",
+            "name": "next traversal intermediates do not consume useful fair turns or gain action authority"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Brave/Violentmonkey/Drive y partida real",
+          "reason": "Solo DOM/DTO, eventos y tiempo sintéticos offline; sin navegación o pedidos de una partida real."
+        },
+        {
+          "scope": "Rendimiento total",
+          "reason": "Los bancos miden segmento imperial y render de panel, no toda la UI real ni coste de red/almacenamiento."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Revisar el árbol integrado final y el cruce de reservas Depot/flota con la decisión de Reactor.",
+        "Reprobar revocación temporal, censo e identidad antes de selección y pedido.",
+        "Comprobar que UI/borradores/teclado de 1.16.3 y permisos/autoupdate quedan preservados."
+      ]
+    },
+    {
+      "id": "integrated-terminal-reactor-filter",
+      "feedback": "La revisión cruzada detectó que Reactor maxed con déficit se describía como datos ausentes por aporte cero. El filtro lo volvía a visitar indefinidamente, aunque el bloqueo nativo era conocido.",
+      "beforeFail": {
+        "revision": "ecb72d0d3e7d5468b0b9e60a2117d23ca90f8bb1",
+        "command": "Copiar el test integrado a ecb72d0 y ejecutar node --test --test-name-pattern=\"integrated terminal Reactor\" tests/empire-navigation.test.cjs",
+        "observedFailure": "1 test ejecutado y fallido: forecast.reason era data en vez de maxed. Los bloqueos explícitos deben preceder al diagnóstico de aporte desconocido; no se observó ningún pedido inseguro.",
+        "evidence": "docs/1.16.4-validation-matrix.md#reproducciones"
+      },
+      "regressions": [
+        {
+          "file": "tests/empire-navigation.test.cjs",
+          "name": "integrated terminal Reactor blockers stay known and do not cause perpetual deficit visits"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Reactor único maxed o locked, aporte ausente y energía negativa.",
+          "expected": "ETA bloqueada con motivo nativo conocido y ningún destino consultivo inútil; queued y datos genuinamente desconocidos conservan sus guardas.",
+          "regression": {
+            "file": "tests/empire-navigation.test.cjs",
+            "name": "integrated terminal Reactor blockers stay known and do not cause perpetual deficit visits"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Navegador real",
+          "reason": "Caso reproducido en los planificadores reales con DTO sintéticos."
+        }
+      ],
+      "independentReviewCriteria": [
+        "La corrección solo cambia clasificación de bloqueos conocidos; no relaja selección final ni reservas."
+      ]
+    },
+    {
+      "id": "integrated-mid-hop-policy-revocation",
+      "feedback": "Revisión temporal independiente reprodujo un defecto heredado: detener Imperio durante A→intermedio→destino cancelaba la operación lógica pero no el siguiente clic next nativo todavía no enviado. La integración debe revocar cada clic restante.",
+      "beforeFail": {
+        "revision": "ecb72d0d3e7d5468b0b9e60a2117d23ca90f8bb1",
+        "command": "Copiar tests/empire-interaction.test.cjs al archivo ecb72d0 y ejecutar node --test --test-name-pattern=\"integrated mid-hop\" tests/empire-interaction.test.cjs",
+        "observedFailure": "8 casos ejecutados, 8 fallidos: la segunda pulsación next se enviaba después de disable, disable-enable, exclusión, rol, objetivos, desactivación remota, fallo de lectura y suspensión. Probe independiente idéntico confirma que el defecto ya existe en ca98e797d89596f46736f1e8e18fecc767762f88. canAct permanecía bloqueado al detener Imperio; no se observó pedido inseguro.",
+        "evidence": "docs/1.16.4-validation-matrix.md#reproducciones"
+      },
+      "regressions": [
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "integrated mid-hop disable revokes remaining native clicks without undoing the first"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "integrated mid-hop disable-enable revokes remaining native clicks without undoing the first"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "integrated mid-hop exclude revokes remaining native clicks without undoing the first"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "integrated mid-hop role revokes remaining native clicks without undoing the first"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "integrated mid-hop targets revokes remaining native clicks without undoing the first"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "integrated mid-hop remote-disable revokes remaining native clicks without undoing the first"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "integrated mid-hop storage-error revokes remaining native clicks without undoing the first"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "integrated mid-hop suspend revokes remaining native clicks without undoing the first"
+        },
+        {
+          "file": "tests/empire-adapter.test.cjs",
+          "name": "integrated navigation continuation false blocks the first native click"
+        },
+        {
+          "file": "tests/empire-adapter.test.cjs",
+          "name": "integrated navigation continuation false after one hop blocks every remaining click"
+        },
+        {
+          "file": "tests/empire-adapter.test.cjs",
+          "name": "integrated navigation continuation throw blocks the first native click"
+        },
+        {
+          "file": "tests/empire-adapter.test.cjs",
+          "name": "integrated navigation continuation throw after one hop blocks every remaining click"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "La política local cambia o se desactiva/reactiva durante un recorrido multi-hop.",
+          "expected": "Invalida el token de la operación anterior. El primer salto ya enviado permanece, no hay siguiente clic viejo ni manualHold por cancelación conocida.",
+          "regression": {
+            "file": "tests/empire-interaction.test.cjs",
+            "name": "integrated mid-hop disable-enable revokes remaining native clicks without undoing the first"
+          }
+        },
+        {
+          "scenario": "Otra pestaña desactiva Imperio sin entregar todavía storage/update.",
+          "expected": "Relee política antes del siguiente salto, cancela y no lo considera fallo nativo.",
+          "regression": {
+            "file": "tests/empire-interaction.test.cjs",
+            "name": "integrated mid-hop remote-disable revokes remaining native clicks without undoing the first"
+          }
+        },
+        {
+          "scenario": "La lectura de política falla mientras hay una selección activa.",
+          "expected": "Cancela saltos restantes y cierra permiso con error de lectura.",
+          "regression": {
+            "file": "tests/empire-interaction.test.cjs",
+            "name": "integrated mid-hop storage-error revokes remaining native clicks without undoing the first"
+          }
+        },
+        {
+          "scenario": "La condición de continuidad devuelve false o lanza.",
+          "expected": "El adaptador no envía ningún próximo clic; no intenta deshacer el ya enviado.",
+          "regression": {
+            "file": "tests/empire-adapter.test.cjs",
+            "name": "integrated navigation continuation throw after one hop blocks every remaining click"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Salto ya enviado",
+          "reason": "Un clic next ya enviado no se puede deshacer; la garantía cubre clics posteriores. Una edición habilitada puede recuperar autoridad nueva tras revalidar el sistema intermedio."
+        },
+        {
+          "scope": "Sesión real",
+          "reason": "Modelo nativo, temporizadores, DOM y eventos simulados. Brave/Violentmonkey/Drive no probados."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Reprobar causa antes/después sobre los mismos eventos.",
+        "Verificar token, epoch, ámbito, política vigente, pausas y error de lectura antes de cada next; no usar canNavigate mientras el selector está moving.",
+        "Comprobar que un stop conocido no crea manualHold y que los fallos nativos reales lo conservan."
+      ]
     }
   ]
 }

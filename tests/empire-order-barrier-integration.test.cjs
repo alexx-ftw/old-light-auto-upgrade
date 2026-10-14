@@ -14,7 +14,8 @@ const source = fs.readFileSync(process.env.OLD_LIGHT_ORDER_SOURCE || path.join(_
 const register = source.indexOf('    // Registra la petición ANTES del clic:');
 const captureStart = source.lastIndexOf('    const empireBoundary = empireController?.isEnabled()', register);
 const dispatchStart = captureStart >= 0 ? captureStart : source.lastIndexOf('    if (empireController?.isEnabled() && !empireController.canAct(empireAdapter.readActive()?.context)) {', register);
-const dispatchEnd = source.indexOf('\n  }\n\n  // BEGIN INFRASTRUCTURE PRIORITY PLANNER', register);
+// The function boundary is stable when additional planners are inserted below it.
+const dispatchEnd = source.indexOf('\n  }\n\n', register);
 const confirmBody = source.indexOf('      const requestSystemName = pending.systemName;');
 const confirmStart = source.lastIndexOf('    if (pending) {', confirmBody);
 const confirmEnd = source.indexOf('\n    if (!settings.enabled) {', confirmBody);

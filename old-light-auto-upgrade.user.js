@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.16.2
+// @version      1.16.4
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -390,8 +390,21 @@ function create(options){
   }
   function hold(reason){ready=false;status=reason;return state();}
   function reject(reason){cancelMove();return hold(reason);}
-  function chooseNext(current){
-    const eligible=roster.systems.filter(x=>config.systems[x.id]?.enabled!==false);
+  // Advisory work filtering cannot make any action executable. Unknown or
+  // incompatible forecasts retain the established fair rotation.
+  function navigationCandidates(bundle,currentPlan=plan){
+    if(typeof options.planNavigation!=='function'||!currentPlan?.complete||!bundle)return null;
+    try{
+      const result=options.planNavigation({work:bundle.work,snapshots:bundle.snapshots,config:copy(config),plan:copy(currentPlan),now:now()});
+      if(!result||result.scope!==scope||result.censusId!==bundle.transitCensus?.censusId
+        ||result.observedAt!==bundle.roster?.observedAt||!Array.isArray(result.eligibleSystemIds))return null;
+      const ids=new Set(result.eligibleSystemIds),owned=new Set(roster.systems.map(row=>row.id));
+      if(ids.size!==result.eligibleSystemIds.length||[...ids].some(id=>!owned.has(id)))return null;
+      return ids;
+    }catch{return null;}
+  }
+  function chooseNext(current,candidates=null){
+    const eligible=roster.systems.filter(x=>config.systems[x.id]?.enabled!==false&&(!candidates||candidates.has(x.id)));
     eligible.sort((a,b)=>(visited.get(a.id)??-1)-(visited.get(b.id)??-1)||a.id.localeCompare(b.id));
     return eligible.find(x=>x.id!==current)?.id||current;
   }
@@ -399,10 +412,32 @@ function create(options){
     const operation={id,scope,token:epoch,at:now(),started:false,cancelled:false};move=operation;
     Promise.resolve().then(()=>{
       if(operation.cancelled||move!==operation||operation.token!==epoch||!permitNavigation||!config.enabled||scope!==operation.scope||pauseDeadline()>now())return null;
+      // A storage event/update can arrive after this microtask. Re-read policy
+      // at dispatch so another tab's disable, exclusion or target edit wins.
+      try{if(JSON.stringify(core.normalizeConfig(sync(read(key()))))!==JSON.stringify(config)){operation.cancelled=true;return null;}}
+      catch{operation.cancelled=true;storageError=true;error='No se puede leer la configuración imperial. No se enviarán órdenes.';return null;}
       const bundled=typeof adapter.readBundle==='function',bundle=bundled?adapter.readBundle():null;
       const freshRoster=validRoster(bundled?bundle?.roster:adapter.readRoster()),active=bundled?bundle?.active:adapter.readActive();
       if(!freshRoster?.systems.some(x=>x.id===id)||!matches(active?.context,fromId)||!acceptable(active?.snapshot,fromId,freshRoster)||adapter.canNavigate?.()===false){operation.cancelled=true;return null;}
-      operation.started=true;return adapter.selectSystem(id,{scope:operation.scope});
+      if(typeof options.planNavigation==='function'&&bundled){
+        const freshPlan=core.plan(config,bundle?.snapshots,{scope,now:now(),maxAgeMs,
+          expectedIds:freshRoster.systems.map(x=>x.id),activeSystemId:fromId,transitCensus:bundle?.transitCensus});
+        const candidates=navigationCandidates(bundle,freshPlan);
+        if(candidates&&!candidates.has(id)){operation.cancelled=true;return null;}
+      }
+      const dispatchPolicy=JSON.stringify(config);
+      // The native selector may need several next clicks. A cancelled logical
+      // move must revoke every remaining click, not just its final result.
+      const isCurrent=()=>{
+        if(operation.cancelled||move!==operation||operation.token!==epoch||scope!==operation.scope
+          ||!config.enabled||config.systems[id]?.enabled===false||storageError||manualHold||pauseDeadline()>now()){
+          operation.cancelled=true;return false;
+        }
+        try{if(JSON.stringify(core.normalizeConfig(sync(read(key()))))!==dispatchPolicy){operation.cancelled=true;return false;}}
+        catch{operation.cancelled=true;storageError=true;error='No se puede leer la configuración imperial. No se enviarán órdenes.';return false;}
+        return true;
+      };
+      operation.started=true;return adapter.selectSystem(id,{scope:operation.scope,isCurrent});
     }).then(result=>{
       if(move!==operation)return;move=null;ready=false;permitNavigation=false;
       if(operation.cancelled||operation.token!==epoch||operation.scope!==scope){onChange();return;}
@@ -435,7 +470,10 @@ function create(options){
     const id=active?.context?.systemId?.toLowerCase();
     const current=id&&owned.has(id)&&matches(active.context,id)&&acceptable(active.snapshot,id);
     if(current&&(bundled||typeof adapter.readSnapshots==='function')&&JSON.stringify(current)!==JSON.stringify(snapshots.get(id)))return reject('El HUD y el censo imperial no coinciden.');
-    if(current){snapshots.set(id,current);if(id!==observedId){observedId=id;arrivedAt=now();visited.set(id,now());}}
+    // Native next may cross several systems while one selection is in flight.
+    // Those intermediate HUDs have no service opportunity and cannot consume
+    // their fair turn. Record arrival only after the selector has settled.
+    if(current){snapshots.set(id,current);if(!move&&id!==observedId){observedId=id;arrivedAt=now();visited.set(id,now());}}
     else if(id)snapshots.delete(id);
     let transit;try{transit=bundled?bundle?.transitCensus:adapter.readTransitCensus?.();}catch{transit=null;}
     transitCensus=transit?core.normalizeTransitCensus(transit):null;
@@ -451,14 +489,14 @@ function create(options){
     if(pauseUntil>now())return reject('Imperio suspendido. Revisa la pausa antes de continuar.');
     if(interactionUntil>now())return reject('Pausa por interacción: '+Math.ceil((interactionUntil-now())/1000)+' s restantes sin nueva actividad en el juego.');
     if(!current)return reject('Esperando identidad, propiedad y datos actuales del sistema seleccionado.');
-    const currentEnabled=config.systems[id]?.enabled!==false,nextId=chooseNext(id);
-    if(nextId&&nextId!==id&&(!plan.complete||!currentEnabled||now()-arrivedAt>=dwellMs)){
+    const candidates=navigationCandidates(bundle),currentEnabled=config.systems[id]?.enabled!==false,nextId=chooseNext(id,candidates);
+    if(nextId&&nextId!==id&&(!plan.complete||!currentEnabled||candidates&&!candidates.has(id)||now()-arrivedAt>=dwellMs)){
       if(typeof adapter.selectSystem!=='function')return reject('El selector nativo de sistemas todavía no está verificado.');
       permitNavigation=true;select(nextId,id);return hold('Recorriendo los sistemas del imperio…');
     }
     if(!currentEnabled)return reject('Este sistema está excluido del recorrido imperial.');
     if(!plan.complete)return reject(plan.reason||'Actualizando los sistemas antes de repartir objetivos.');
-    ready=true;status='Imperio activo: '+(current.name||id)+'.';error='';return state();
+    ready=true;status=candidates&&candidates.size===0?'Imperio al día: esperando trabajo disponible sin cambiar de sistema.':'Imperio activo: '+(current.name||id)+'.';error='';return state();
   }
   function checkAction(context,capture=false){
     if(!ready||!config.enabled||move||manualHold||pauseDeadline()>now()||!roster||!plan?.complete)return false;
@@ -553,8 +591,11 @@ return Object.freeze({create});
     ready: 'Datos completos; reparto calculado.', disabled: 'Modo imperio desactivado.',
   };
   const CSS = `
-.oldlight-empire{font:13px/1.45 system-ui,sans-serif;color:#e5eef6;background:#0c141d;border:1px solid #456177;border-radius:12px;padding:14px;box-sizing:border-box;max-width:100%;color-scheme:dark}
+.oldlight-empire{font:13px/1.45 system-ui,sans-serif;color:#e5eef6;background:#0c141d;border:1px solid #456177;border-radius:12px;padding:14px;box-sizing:border-box;max-width:100%;color-scheme:dark;container:empire-panel / inline-size}
 .oldlight-empire *{box-sizing:border-box}.oldlight-empire h2{font-size:18px;margin:0}.oldlight-empire h3{font-size:14px;margin:0 0 9px}.oldlight-empire p{margin:7px 0}.oldlight-empire button,.oldlight-empire select,.oldlight-empire input{font:inherit;min-height:38px;border-radius:7px;border:1px solid #456177;background:#152432;color:inherit;padding:7px;max-width:100%}.oldlight-empire input[type=checkbox]{min-height:20px}.oldlight-empire button{cursor:pointer}.oldlight-empire button:disabled{cursor:not-allowed;opacity:.55}.oldlight-empire :focus-visible{outline:2px solid #7edec0;outline-offset:2px}.oldlight-empire .empire-head{display:flex;align-items:center;gap:8px;justify-content:space-between}.oldlight-empire .empire-hint{font-size:12px;color:#aebdcc}.oldlight-empire .empire-status{border:1px solid #55715f;border-radius:8px;padding:9px;background:#172c28}.oldlight-empire .empire-warning{color:#ffcf8e}.oldlight-empire .empire-error{color:#ffaeae}.oldlight-empire .empire-goals{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}.oldlight-empire .empire-goals label{display:grid;gap:4px}.oldlight-empire .empire-goals input{width:100%}.oldlight-empire .empire-card{border:1px solid #344c60;border-radius:9px;padding:10px;margin-top:9px}.oldlight-empire .empire-card[data-stale=true]{border-style:dashed}.oldlight-empire .empire-card h3{overflow-wrap:anywhere}.oldlight-empire .empire-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.oldlight-empire .empire-controls label{display:flex;gap:5px;align-items:center}.oldlight-empire .empire-numbers{font-variant-numeric:tabular-nums;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin:8px 0}.oldlight-empire .empire-numbers div{padding:7px;background:#111f2b;border-radius:6px;overflow-wrap:anywhere}.oldlight-empire .empire-numbers small{display:block;color:#aebdcc}.oldlight-empire .empire-fleets{display:grid;gap:3px;font-size:12px;color:#bdcbd7}.oldlight-empire .empire-progress{font-size:12px;color:#b1dccf}.oldlight-empire .empire-empty{padding:14px 0;color:#aebdcc}.oldlight-empire[hidden]{display:none}
+.oldlight-empire .empire-head{flex-wrap:wrap}.oldlight-empire .empire-head>*{min-width:0;overflow-wrap:anywhere}.oldlight-empire .empire-goals label{min-width:0;overflow-wrap:anywhere}.oldlight-empire .empire-goals input{min-width:0}.oldlight-empire .empire-edit-status{display:block;font-size:11px;line-height:1.45;margin:0;color:#aebdcc;overflow-wrap:anywhere}.oldlight-empire .empire-edit-status:empty{display:none}.oldlight-empire .empire-edit-status[data-state=invalid],.oldlight-empire .empire-edit-status[data-state=error]{color:#ffaeae}.oldlight-empire .empire-edit-status[data-state=draft]{color:#ffcf8e}.oldlight-empire .empire-edit-status[data-state=saved]{color:#7edec0}.oldlight-empire [aria-invalid=true]{border-color:#ffaeae}.oldlight-empire .empire-help{margin:12px 0;padding:9px 10px;border:1px solid #344c60;border-radius:8px;background:#111f2b}.oldlight-empire .empire-help summary,.oldlight-empire .empire-role-details summary{cursor:pointer;min-height:28px;padding:4px 0;font-weight:600;overflow-wrap:anywhere}.oldlight-empire .empire-controls select{min-width:0}.oldlight-empire .empire-controls label{max-width:100%;flex-wrap:wrap}.oldlight-empire .empire-systems-heading{margin-top:16px}.oldlight-empire .empire-role-details{font-size:12px;color:#aebdcc;margin-top:6px}
+@container empire-panel (max-width:340px){.oldlight-empire .empire-head{align-items:flex-start;flex-direction:column}.oldlight-empire .empire-goals,.oldlight-empire .empire-numbers{grid-template-columns:minmax(0,1fr)}}
+@media(pointer:coarse){.oldlight-empire button,.oldlight-empire select,.oldlight-empire input:not([type=checkbox]),.oldlight-empire .empire-help summary,.oldlight-empire .empire-role-details summary{min-height:44px}}
 @media(max-width:400px){.oldlight-empire{padding:10px}.oldlight-empire button,.oldlight-empire select,.oldlight-empire input{min-height:44px}.oldlight-empire .empire-head{align-items:flex-start;flex-direction:column}}
 `;
   // Reuse the formatter: constructing locale machinery per resource/ship on
@@ -568,14 +609,58 @@ return Object.freeze({create});
     let root, style, status, toggle, total, fleetSummary, productionSummary, error, list, empty, overview;
     const panelId = ++panelSequence;
     let helpSequence = 0;
-    const inputs = new Map(), goalStatuses = new Map(), cards = new Map();
+    const inputs = new Map(), goalStatuses = new Map(), cards = new Map(), goalEdits = new Map(), goalFeedback = new Map();
+    let renderedScope = null, observedScope = null, scopeEpoch = 0, saveSequence = 0;
     let destroyed = false;
     const el = (tag, text, cls) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node; };
-    function save(next) {
-      if (destroyed) return;
-      try { const result = setConfig(next); if (result?.then) throw new Error('Se necesita guardado síncrono confirmado.'); error.textContent = ''; }
-      catch (cause) { error.textContent = cause?.message || 'No se pudo guardar la configuración.'; }
+    function save(next, validEdit = () => true) {
+      if (destroyed) return null;
+      const epoch = scopeEpoch, sequence = ++saveSequence, scope = renderedScope;
+      const current = () => {
+        if (destroyed) return false;
+        observeScope(getState().scope);
+        return epoch === scopeEpoch && scope === renderedScope && validEdit();
+      };
+      let saved = false, failure = '';
+      try {
+        const result = setConfig(next);
+        if (result?.then) {
+          // This callback contract is synchronous. Consume an eventual rejection
+          // without claiming success or applying completion to another scope.
+          Promise.resolve(result).catch(() => {});
+          throw new Error('Se necesita guardado síncrono confirmado.');
+        }
+        saved = true;
+      } catch (cause) { failure = cause?.message || 'No se pudo guardar la configuración.'; }
+      if (!current()) { render(); return null; }
+      // A newer save owns the shared alert, but another goal may still finish
+      // its own unchanged edit. Do not strand that field in Guardando… .
+      if (sequence === saveSequence) text(error, failure);
       render();
+      return current() ? saved : null;
+    }
+    function editFeedback(id, state, message, value, baseline = goalEdits.get(id)?.baseline) {
+      const node = goalFeedback.get(id);
+      if (destroyed || !node) return;
+      property(node.dataset, 'state', state); text(node, message);
+      if (state) goalEdits.set(id, { state, value, baseline }); else goalEdits.delete(id);
+    }
+    // Integration supplies the already-read identity even when this panel is
+    // hidden. This clears A -> B -> A drafts without reading or aggregating a
+    // hidden census, and does not grant permission to save or act.
+    function observeScope(scope) {
+      if (destroyed || observedScope === scope) return;
+      observedScope = scope; scopeEpoch++;
+      if (renderedScope === scope) return;
+      renderedScope = null; goalEdits.clear();
+      if (error) text(error, '');
+      for (const [id, input] of inputs) { input.removeAttribute('aria-invalid'); editFeedback(id, '', ''); }
+    }
+    function currentScope() {
+      if (destroyed) return false;
+      const scope = getState().scope;
+      if (scope !== renderedScope) { observeScope(scope); render(); return false; }
+      return typeof scope === 'string' && scope.length > 0;
     }
     function policy(change) { const state = getState(); return { ...core.normalizeConfig(state.config), ...change }; }
     function cardFor(id) {
@@ -589,6 +674,8 @@ return Object.freeze({create});
       const roleHelp = el('p', '', 'empire-hint empire-role-help');
       roleHelp.id = `oldlight-empire-role-${panelId}-${++helpSequence}`;
       role.setAttribute('aria-describedby', roleHelp.id);
+      const roleDetails = el('details', undefined, 'empire-role-details');
+      roleDetails.append(el('summary', 'Qué hace este rol'), roleHelp);
       const numbers = el('div', undefined, 'empire-numbers');
       const resourceNodes = {};
       for (const [key, label] of [['palladium', 'Palladium'], ['iridium', 'Iridium'], ['queues', 'Colas: edificios / naves'], ['energy', 'Energía libre']]) {
@@ -597,8 +684,9 @@ return Object.freeze({create});
       const ships = el('div', undefined, 'empire-fleets');
       const shipNodes = new Map(core.DEFAULT_SHIPS.map(id => { const node = el('div'); ships.append(node); return [id, node]; }));
       const allocation = el('p', '', 'empire-progress');
-      card.append(name, age, controls, roleHelp, numbers, ships, allocation); list.append(card);
+      card.append(name, age, controls, roleDetails, numbers, ships, allocation); list.append(card);
       const update = () => {
+        if (!currentScope()) return;
         const state = getState(), cfg = core.normalizeConfig(state.config);
         const current = cfg.systems[id] || { name: name.textContent, role: 'balanced', enabled: true };
         save({ ...cfg, systems: { ...cfg.systems, [id]: { ...current, role: role.value, enabled: enabled.checked } } });
@@ -609,6 +697,12 @@ return Object.freeze({create});
     function render() {
       if (!root || destroyed || !isVisible()) return;
       const state = getState(), cfg = core.normalizeConfig(state.config), clock = now();
+      observeScope(state.scope);
+      const scopeChanged = renderedScope !== state.scope;
+      if (scopeChanged) {
+        renderedScope = state.scope; goalEdits.clear(); text(error, '');
+        for (const [id, input] of inputs) { input.removeAttribute('aria-invalid'); editFeedback(id, '', ''); }
+      }
       const roster = state.roster?.systems || [];
       const data = core.aggregate(state.snapshots || [], { scope: state.scope, now: clock, maxAgeMs: state.maxAgeMs, transitCensus: state.transitCensus, expectedIds: roster.map(s => s.id) });
       const freshIds = new Set(data.rows.map(row => row.systemId)), incompleteIds = new Set(data.incompleteIds);
@@ -624,7 +718,12 @@ return Object.freeze({create});
       const fleetVerified = data.complete && data.fleetComplete;
       const deficits = core.DEFAULT_SHIPS.map(id => fleetVerified ? Math.max(0, cfg.fleetTargets[id] - data.totals.fleet[id].total) : null);
       for (const [id, input] of inputs) {
-        if (input.getRootNode().activeElement !== input) property(input, 'value', String(cfg.fleetTargets[id]));
+        const edit = goalEdits.get(id), pending = edit && edit.state !== 'saved';
+        if (scopeChanged || (!pending && input.getRootNode().activeElement !== input)) property(input, 'value', String(cfg.fleetTargets[id]));
+        // Remote policy changes may replace a committed value, never an unsaved
+        // local draft. Drop the old success message instead of claiming it saved
+        // the new value. No edit state is stored or shared outside this panel.
+        if (edit?.state === 'saved' && edit.value !== cfg.fleetTargets[id]) editFeedback(id, '', '');
         // Show the saved goal, not a focused draft, and discard stale totals.
         text(goalStatuses.get(id), fleetVerified
           ? `${num(data.totals.fleet[id].total)} en el imperio · objetivo ${num(cfg.fleetTargets[id])} · faltan ${num(Math.max(0, cfg.fleetTargets[id] - data.totals.fleet[id].total))}`
@@ -651,7 +750,7 @@ return Object.freeze({create});
         text(nodes.age, age === null ? 'Sin lectura verificada' : `${fresh ? 'Lectura' : 'Datos antiguos'} de hace ${age} s`);
         attribute(nodes.role, 'aria-label', 'Rol de ' + nodes.name.textContent);
         attribute(nodes.enabled, 'aria-label', 'Atender ' + nodes.name.textContent);
-        if (nodes.role.getRootNode().activeElement !== nodes.role) property(nodes.role, 'value', profile.role);
+        if (scopeChanged || nodes.role.getRootNode().activeElement !== nodes.role) property(nodes.role, 'value', profile.role);
         // Describe the visible choice, including a focused unsaved draft. The
         // save error remains separate; help text never claims it was applied.
         text(nodes.roleHelp, ROLE_HELP[nodes.role.value] || 'Selecciona un rol válido para consultar sus prioridades.');
@@ -674,35 +773,76 @@ return Object.freeze({create});
       if (root || destroyed) throw new Error('El panel ya está montado o destruido.');
       style = el('style', CSS); root = el('section', undefined, 'oldlight-empire'); root.setAttribute('aria-label', 'Gestión del imperio');
       const head = el('div', undefined, 'empire-head'); toggle = el('button', 'Activar imperio'); toggle.type = 'button'; head.append(el('h2', 'Imperio'), toggle);
-      toggle.addEventListener('click', () => { const cfg = policy({}); if (!cfg.enabled && !canEnable()) return; save({ ...cfg, enabled: !cfg.enabled }); });
+      toggle.addEventListener('click', () => { if (!currentScope()) return; const cfg = policy({}); if (!cfg.enabled && !canEnable()) return; save({ ...cfg, enabled: !cfg.enabled }); });
       status = el('p', '', 'empire-status'); status.setAttribute('role', 'status');
       total = el('p', '', 'empire-hint'); overview = el('p'); fleetSummary = el('p', '', 'empire-hint');
       productionSummary = el('p', '', 'empire-production-summary');
       const goals = el('div', undefined, 'empire-goals');
       for (const id of core.DEFAULT_SHIPS) {
         const label = el('label', `Objetivo imperial · ${LABELS[id]}`), input = el('input'); input.type = 'number'; input.min = '0'; input.max = String(core.MAX_TARGET); input.step = '1';
+        input.inputMode = 'numeric';
         input.setAttribute('aria-label', `Objetivo imperial de ${LABELS[id]}`);
         const progress = el('small', '', 'empire-goal-status empire-hint');
         progress.id = `oldlight-empire-goal-${panelId}-${id}`;
-        input.setAttribute('aria-describedby', progress.id);
-        label.append(input, progress); goals.append(label); inputs.set(id, input); goalStatuses.set(id, progress);
-        input.addEventListener('change', () => {
-          const value = input.value.trim() === '' ? NaN : Number(input.value);
-          if (!Number.isSafeInteger(value) || value < 0 || value > core.MAX_TARGET) { input.setAttribute('aria-invalid', 'true'); error.textContent = `Introduce un entero entre 0 y ${core.MAX_TARGET}.`; return; }
-          input.removeAttribute('aria-invalid'); const cfg = policy({}); save({ ...cfg, fleetTargets: { ...cfg.fleetTargets, [id]: value } });
+        goalStatuses.set(id, progress);
+        const feedback = el('small', '', 'empire-edit-status'); feedback.id = `oldlight-empire-edit-${panelId}-${id}`;
+        feedback.setAttribute('role', 'status'); feedback.setAttribute('aria-live', 'polite');
+        input.setAttribute('aria-describedby', `${progress.id} ${feedback.id}`);
+        label.append(input, progress, feedback); goals.append(label); inputs.set(id, input); goalFeedback.set(id, feedback);
+        input.addEventListener('input', () => {
+          if (!currentScope()) return;
+          input.removeAttribute('aria-invalid');
+          const edit = goalEdits.get(id), cfg = core.normalizeConfig(getState().config);
+          editFeedback(id, 'draft', 'Sin guardar. Se guarda al salir del campo.', input.value,
+            edit && edit.state !== 'saved' ? edit.baseline : cfg.fleetTargets[id]);
         });
+        input.addEventListener('blur', () => {
+          if (!currentScope()) return;
+          const edit = goalEdits.get(id), cfg = core.normalizeConfig(getState().config);
+          const value = input.value.trim() === '' ? NaN : Number(input.value);
+          // Native change may not fire for 20 -> 40 -> 20. Releasing that no-op
+          // must also reveal a policy update that arrived during the edit.
+          if (edit?.state === 'draft' && Number.isSafeInteger(value) && value >= 0 && value <= core.MAX_TARGET
+              && (value === edit.baseline || value === cfg.fleetTargets[id])) {
+            editFeedback(id, '', ''); input.removeAttribute('aria-invalid');
+            property(input, 'value', String(cfg.fleetTargets[id]));
+          } else if (edit?.state === 'draft') commit();
+        });
+        const commit = () => {
+          if (!currentScope()) return;
+          const value = input.value.trim() === '' ? NaN : Number(input.value);
+          if (!Number.isSafeInteger(value) || value < 0 || value > core.MAX_TARGET) {
+            input.setAttribute('aria-invalid', 'true');
+            editFeedback(id, 'invalid', `No guardado. Introduce un entero entre 0 y ${core.MAX_TARGET}.`, input.value); return;
+          }
+          input.removeAttribute('aria-invalid');
+          const cfg = policy({});
+          if (goalEdits.get(id)?.state === 'saved' && cfg.fleetTargets[id] === value) return;
+          editFeedback(id, 'draft', 'Guardando…', input.value);
+          const edit = goalEdits.get(id);
+          const saved = save({ ...cfg, fleetTargets: { ...cfg.fleetTargets, [id]: value } }, () => goalEdits.get(id) === edit);
+          if (saved === null || destroyed || goalEdits.get(id) !== edit || !currentScope()) return;
+          if (saved) editFeedback(id, 'saved', 'Guardado en este navegador.', value);
+          else editFeedback(id, 'error', 'Guardado sin confirmar. Vuelve a editar el campo para reintentar.', input.value);
+          render();
+        };
+        input.addEventListener('change', commit);
       }
       error = el('p', '', 'empire-error'); error.setAttribute('role', 'alert');
       list = el('div'); empty = el('p', 'Falta verificar la lista nativa completa de sistemas propios. El recorrido automático permanece bloqueado.', 'empire-empty');
-      root.append(head, status, total, overview, fleetSummary, productionSummary, el('h3', 'Objetivos para todo el imperio'), goals,
-        el('p', 'Los objetivos cuentan las naves de todo el imperio: base, misiones, traslados y construcción, una sola vez. Mientras Imperio esté activo sustituyen los mínimos locales de Flota; su casilla de contar misiones no cambia el total imperial. Los recursos permanecen en cada sistema; la suma es informativa.', 'empire-hint'),
+      const scopeHelp = el('p', 'Base + misiones + traslados + construcción, una sola vez. Imperio activo sustituye los mínimos locales; su casilla de misiones no cambia este recuento. 0 desactiva el objetivo.', 'empire-hint empire-scope-help');
+      const help = el('details', undefined, 'empire-help');
+      help.append(el('summary', 'Ayuda: reparto, recursos y Drive'),
+        el('p', 'Los recursos permanecen en cada sistema; la suma es informativa.', 'empire-hint'),
         el('p', 'Equilibrado y Astillero reciben producción de flota. Industria y Defensa no reciben producción imperial adicional en esta fase.', 'empire-hint'),
         el('p', 'El reparto requiere Atender. Los roles reordenan prioridades, no excluyen otros edificios: respetan tus edificios marcados y las reglas de Depot/Reactor. No organizan patrullas, ataques ni transportes.', 'empire-hint'),
-        el('p', 'Con la sincronización de Drive conectada, se comparten objetivos, roles y Atender. Activar o detener Imperio sigue siendo una decisión local.', 'empire-hint'), error, list, empty);
+        el('p', 'Con la sincronización de Drive conectada, se comparten objetivos, roles y Atender. Activar o detener Imperio sigue siendo una decisión local.', 'empire-hint'));
+      root.append(head, status, total, overview, fleetSummary, productionSummary, el('h3', 'Objetivos para todo el imperio'), scopeHelp, goals,
+        error, help, el('h3', 'Sistemas del imperio', 'empire-systems-heading'), list, empty);
       container.append(style, root); render();
       return root;
     }
-    return { mount, render, destroy() { destroyed = true; root?.remove(); style?.remove(); cards.clear(); inputs.clear(); goalStatuses.clear(); } };
+    return { mount, render, observeScope, destroy() { destroyed = true; scopeEpoch++; saveSequence++; root?.remove(); style?.remove(); cards.clear(); inputs.clear(); goalEdits.clear(); goalFeedback.clear(); goalStatuses.clear(); } };
   }
   return Object.freeze({ create });
 });
@@ -1342,6 +1482,7 @@ return Object.freeze({create});
   'use strict';
   const SHIPS = Object.freeze(['probe', 'marauder', 'sentinel', 'vanguard']);
   const RESOURCES = Object.freeze(['palladium', 'iridium']);
+  const BUILDINGS = Object.freeze(['command_center', 'reactor', 'palladium_extractor', 'iridium_extractor', 'warehouse', 'shipyard', 'trade_hub']);
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const SCOPE = /^[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{1,96}$/;
   const own = (x, key) => Object.prototype.hasOwnProperty.call(x, key);
@@ -1513,6 +1654,29 @@ return Object.freeze({create});
     }
     return out;
   }
+  // Advisory scheduling data only. Missing fields remain unknown and therefore
+  // cannot suppress a visit. This never grants action authority or reads tokens.
+  function navigationFacts(system) {
+    const buildingRows = get(system, 'buildings'), economy = get(system, 'economy'), yard = get(system, 'shipyard');
+    const buildings = array(buildingRows, 64) ? buildingRows.map(row => {
+      const next = get(row, 'nextUpgrade'), requirement = get(row, 'unlockRequirement');
+      return { id: BUILDINGS.includes(get(row, 'type')) ? get(row, 'type') : null, level: count(get(row, 'level')),
+        upgrade: next === null ? null : next === undefined ? undefined : {
+          palladium: number(get(next, 'paCost')), iridium: number(get(next, 'irCost')),
+          energy: number(get(next, 'energyDelta'), true) },
+        requirementMet: requirement === undefined || requirement === null ? true : typeof get(requirement, 'met') === 'boolean' ? get(requirement, 'met') : null };
+    }) : null;
+    const buildingQueue = get(economy, 'queue'), shipQueue = get(yard, 'queue'), types = get(yard, 'types');
+    return { systemId: id(get(system, 'id')), buildings,
+      buildingSlots: count(get(economy, 'queueSlots')),
+      buildingQueue: array(buildingQueue, 128) ? buildingQueue.map(job => ({ type: BUILDINGS.includes(get(job, 'type')) ? get(job, 'type') : null,
+        targetLevel: count(get(job, 'targetLevel')), completesAt: stamp(get(job, 'completesAt')) })) : null,
+      shipSlots: count(get(yard, 'queueSlots')),
+      shipQueue: array(shipQueue, 128) ? shipQueue.map(job => ({
+        nextCompletesAt: stamp(get(job, 'nextCompletesAt')), paused: typeof get(job, 'heldReason') === 'string' && !!get(job, 'heldReason') })) : null,
+      shipTypes: array(types, SHIPS.length) ? types.map(type => ({ id: SHIPS.includes(get(type, 'type')) ? get(type, 'type') : null, unlocked: typeof get(type, 'unlocked') === 'boolean' ? get(type, 'unlocked') : null,
+        palladium: number(get(get(type, 'stats'), 'paCost')), iridium: number(get(get(type, 'stats'), 'irCost')) })) : null };
+  }
   /**
    * @typedef {{phase:'attempted'|'unavailable',
    * readyState:'loading'|'interactive'|'complete'|'unknown',
@@ -1590,13 +1754,15 @@ return Object.freeze({create});
           worldIssue = 'out-of-order-observation'; return null;
         }
         const identity = `${scope}:${generation}:${epoch}`, key = `${identity}:${revision}`;
-        const fingerprint = JSON.stringify({ complete, observedAt, roster, snapshots, transits });
+        const work = { scope, censusId, observedAt, systems: systems.map(navigationFacts),
+          treasuryBlocked: typeof get(get(source, 'credits'), 'inDeficit') === 'boolean' ? get(get(source, 'credits'), 'inDeficit') : null };
+        const fingerprint = JSON.stringify({ complete, observedAt, roster, snapshots, transits, work });
         if (key === poisonedKey) { worldIssue = 'contradictory-observation'; return null; }
         if (lastKey === key && lastFingerprint !== fingerprint) { poisonedKey = key; worldIssue = 'contradictory-observation'; return null; }
         lastKey = key; lastFingerprint = fingerprint;
         lastVersion = { scope, generation, epoch, revision, observedAt };
         worldIssue = '';
-        return { scope, identity, censusId, observedAt, roster, rawById, snapshots, complete,
+        return { scope, identity, censusId, observedAt, roster, rawById, snapshots, complete, work,
           transit: transits && Object.values(ships).every(x => x !== null) ? { scope, censusId, observedAt, ships } : null };
       } catch { worldIssue = 'invalid-observation'; return null; }
     }
@@ -1687,6 +1853,7 @@ return Object.freeze({create});
       return copy({
         roster: { scope: current.scope, complete: current.complete, observedAt: current.observedAt, systems: current.roster },
         snapshots: current.snapshots,
+        work: current.work,
         transitCensus: current.complete ? current.transit : null,
         active: active(current),
       });
@@ -1732,6 +1899,7 @@ return Object.freeze({create});
     const rosterKey = current => current.roster.map(x => x.id).sort().join(',');
     function safeWorld(operation) {
       if (moving !== operation || operation.cancelled || !gates()) return null;
+      try { if (operation.isCurrent && operation.isCurrent() !== true) return null; } catch { return null; }
       const current = world();
       return current?.complete && current.identity === operation.identity && current.scope === operation.scope
         && rosterKey(current) === operation.roster && current.roster.some(x => x.id === operation.target) ? current : null;
@@ -1758,13 +1926,14 @@ return Object.freeze({create});
       }
       return null;
     }
-    async function selectSystem(uuid, { scope } = {}) {
+    async function selectSystem(uuid, { scope, isCurrent } = {}) {
       const target = id(uuid);
-      if (!target || !SCOPE.test(scope || '') || moving || !gates()) return false;
+      if (!target || !SCOPE.test(scope || '') || moving || !gates()
+          || isCurrent !== undefined && typeof isCurrent !== 'function') return false;
       const initial = world(), before = active(initial);
       if (!initial?.complete || initial.scope !== scope || !before?.context.settled || !initial.roster.some(x => x.id === target)) return false;
       if (before.context.systemId === target) return true;
-      const operation = { target, scope, identity: initial.identity, roster: rosterKey(initial), seen: new Set([before.context.systemId]), cancelled: false };
+      const operation = { target, scope, identity: initial.identity, roster: rosterKey(initial), seen: new Set([before.context.systemId]), cancelled: false, isCurrent };
       moving = operation; status = 'Confirmando la selección nativa del sistema.';
       let currentId = before.context.systemId;
       try {
@@ -2956,7 +3125,7 @@ return Object.freeze({create});
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.16.2';
+  const SCRIPT_VERSION = '1.16.4';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -4017,11 +4186,12 @@ return Object.freeze({create});
       return energy !== null && delta !== null && delta < 0 && energy + delta < 0;
     };
     // El juego permite déficit energético: este requisito previo lo añade el script.
-    // Reactor solo se justifica por otra mejora seleccionada y disponible que consumiría
-    // más energía libre de la existente. No se construye por un umbral fijo de energía.
-    const reactorNeeded = selected.some(row => row.id !== 'reactor' && needsPower(row));
+    // Corrige un déficit ya existente sin esperar a otra mejora asequible.
+    // Con energía no negativa sigue exigiendo una mejora disponible que la necesite.
+    const reactorNeeded = energy !== null && energy < 0
+      || selected.some(row => row.id !== 'reactor' && needsPower(row));
     return selected.find(row => row.id === 'reactor'
-      ? reactorNeeded && !queuedBuilding('reactor') : !needsPower(row));
+      ? reactorNeeded && upgradeEnergy(row) > 0 && !queuedBuilding('reactor') : !needsPower(row));
   }
 
   function readResourceSnapshot() {
@@ -4235,7 +4405,7 @@ return Object.freeze({create});
       if (className) node.className = className;
       return node;
     };
-    const workspace = ui.workspace = { state, controls: new Map(), views: new Map(), lists: new Map(), scroll: new Map() };
+    const workspace = ui.workspace = { state, nav: null, controls: new Map(), views: new Map(), lists: new Map(), scroll: new Map() };
     const save = patch => {
       Object.assign(state, normalizeHelperWorkspace({ ...state, ...patch }));
       try { localStorage.setItem(key, JSON.stringify(state)); }
@@ -4299,7 +4469,19 @@ return Object.freeze({create});
       if (target === null) return;
       event.preventDefault(); buttons[target].click(); buttons[target].focus();
     }));
-    ui.fleetDetails.append(nav, ...workspace.views.values());
+    // Keep task navigation outside the scroller, like the main tabs. Normal
+    // flex flow adapts to header height, zoom and wrapping without overlays or
+    // a fixed sticky offset that could cover focused controls.
+    workspace.nav = nav;
+    ui.scroll.parentNode.insertBefore(nav, ui.scroll);
+    ui.fleetDetails.append(...workspace.views.values());
+
+    // A view shortcut only: reuse the main tab handler without changing policy.
+    shadow.querySelector('[data-action="empire-goals"]')?.addEventListener('click', () => {
+      const tab = ui.tabs.find(button => button.dataset.settingsTab === 'empire');
+      tab.click(); ui.scroll.scrollTop = 0;
+      shadow.querySelector('.oldlight-empire input')?.focus();
+    });
 
     // Put automatic synchronization before deliberate full-backup restoration.
     const dataPage = shadow.querySelector('[data-page="data"]');
@@ -4329,6 +4511,7 @@ return Object.freeze({create});
     if (!workspace) return;
     const { state } = workspace;
     ui.section.dataset.density = state.density;
+    workspace.nav.hidden = settings.activeTab !== 'fleet';
     for (const [id, page] of workspace.views) {
       const selected = state.fleetView === id;
       page.hidden = !selected;
@@ -4392,6 +4575,16 @@ return Object.freeze({create});
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.16.4', title: 'Reactor y recorrido con trabajo útil', changes: [
+        'Reactor puede corregir un déficit actual aunque no haya otra mejora asequible. Conserva casillas, orden, colas y reservas de flota y Depot.',
+        'Imperio evita destinos sin trabajo inmediato y los reevalúa. Detenerlo revoca los siguientes saltos nativos; no deshace un salto ya enviado.',
+        'Flota explica de forma compacta la espera de producción con datos actuales. Mantiene la prioridad estricta; comprobación real Brave/Violentmonkey y Drive pendiente.',
+      ] },
+      { version: '1.16.3', title: 'Menos texto y navegación estable', changes: [
+        'Flota mantiene sus subpestañas fuera del área desplazable. Imperio y Flota muestran ayuda breve y detalles desplegables; se conservan cifras, avisos y controles.',
+        'Los objetivos imperiales conservan borradores inválidos o fallidos y muestran su estado de guardado. Cambiar de cuenta o galaxia descarta la edición anterior.',
+        'El diseño imperial se adapta al ancho del panel. Pruebas sintéticas; la revisión visual con Brave/Violentmonkey y Drive sigue pendiente.',
+      ] },
       { version: '1.16.2', title: 'Objetivos de flota claros', changes: [
         'Flota distingue sus mínimos locales y avisa cuando Imperio los sustituye por objetivos globales, incluyendo naves en misión.',
         'Imperio muestra total, objetivo guardado y faltantes con censo actual y completo; explica objetivos cubiertos o falta de productores sin ocultar pausas ni errores.',
@@ -4591,7 +4784,7 @@ return Object.freeze({create});
             transition:background-color .12s,border-color .12s; }
           button:hover:not(:disabled) { background:#23394b; border-color:#65869f; }
           button:disabled { opacity:.42; cursor:default; }
-          button:focus-visible, summary:focus-visible, input:focus-visible, a:focus-visible {
+          button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible {
             outline:2px solid var(--ol-focus); outline-offset:2px; }
           [data-action="automation-toggle"] { min-width:68px; font-size:12px; color:var(--ol-accent);
             background:var(--ol-accent-bg); border-color:#356959; }
@@ -4731,7 +4924,12 @@ return Object.freeze({create});
           .settings-tabs button[data-attention="true"]::after { content:''; position:absolute; right:5px; top:5px; width:6px; height:6px; border-radius:50%; background:var(--ol-warning); }
           .helper-scroll { scrollbar-gutter:stable; }
           .settings-page[role="tabpanel"]:focus-visible, [data-fleet-view]:focus-visible { outline:2px solid var(--ol-focus); outline-offset:-2px; border-radius:8px; }
-          .fleet-workspace-tabs { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:4px; padding:4px; margin:0 0 14px; border:1px solid var(--ol-border); border-radius:9px; background:#080f17; }
+          .helper-help { margin:8px 0; }
+          .helper-help summary { cursor:pointer; min-height:32px; padding:6px 0; color:var(--ol-muted); font-size:12px; }
+          .fleet-policy-notice { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin:8px 0; padding:8px; border:1px solid var(--ol-border-strong); border-radius:8px; font-size:12px; }
+          .fleet-policy-notice span { flex:1 1 160px; }
+          .fleet-policy-notice button { min-height:38px; }
+          .fleet-workspace-tabs { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:4px; flex-shrink:0; padding:4px; margin:0 12px 10px; border:1px solid var(--ol-border); border-radius:9px; background:#080f17; }
           .fleet-workspace-tabs button { display:flex; align-items:center; justify-content:center; gap:4px; min-width:0; min-height:38px; padding:6px 3px; font-size:11.5px; border-color:transparent; background:transparent; color:var(--ol-muted); }
           .fleet-workspace-tabs button[aria-selected="true"] { color:var(--ol-text); background:var(--ol-surface-raised); border-color:var(--ol-border-strong); }
           .workspace-count { font-size:10px; padding:1px 4px; border-radius:4px; font-variant-numeric:tabular-nums; background:var(--ol-accent-bg); color:var(--ol-accent); }
@@ -4777,7 +4975,7 @@ return Object.freeze({create});
             .helper-grip { display:none; }
             .page-heading { flex-wrap:wrap; }
             .helper-scroll { padding-left:9px; padding-right:9px; }
-            .settings-tabs { margin-left:9px; margin-right:9px; }
+            .settings-tabs, .fleet-workspace-tabs { margin-left:9px; margin-right:9px; }
             .helper-context { max-width:150px; }
           }
           @media (pointer:coarse) {
@@ -4818,7 +5016,7 @@ return Object.freeze({create});
               <div class="choices" role="list" aria-label="Prioridad de edificios"></div>
               <div class="priority-tools"><span class="hint">Arrastra ⠿ o usa las flechas</span><button type="button" class="reset-order">Restablecer orden</button></div>
               <details class="conditions-details" open><summary>Reactor y almacenamiento</summary>
-                <p class="hint">Reactor solo cuando otra mejora marcada necesita energía. Cada Reactor o Depot espera al anterior en cola.</p>
+                <p class="hint">Reactor corrige un déficit actual o aporta energía para otra mejora marcada disponible. Respeta su casilla y las reservas de flota/Depot. Cada Reactor o Depot espera al anterior en cola.</p>
                 <label class="depot-threshold">Mejorar Depot desde <input type="text" inputmode="numeric" maxlength="32" data-setting="depot-fill-percent" aria-label="Porcentaje de capacidad para mejorar Resource Depot" aria-describedby="depot-numeric-status">% de capacidad</label>
                 <small class="numeric-autosave" id="depot-numeric-status" data-numeric-status="depot" aria-live="polite"></small>
               </details>
@@ -4826,8 +5024,10 @@ return Object.freeze({create});
             </details>
             <details class="settings-page fleet-details" data-page="fleet" id="oldlight-settings-fleet" role="tabpanel" tabindex="0" aria-labelledby="oldlight-tab-fleet" open hidden><summary>Flota</summary>
               <div class="page-heading"><h3>Flota mínima local</h3><span class="count-badge">Depot necesario primero</span></div>
-              <p class="page-intro">Estos mínimos se usan con Imperio desactivado. Ordena las naves e indica cuántas mantener. 0 desactiva su reposición. El Depot necesario y su Reactor se atienden antes.</p>
-              <p class="page-intro" data-field="fleet-policy-notice" role="status" hidden>Imperio activo: estos mínimos locales no se aplican. Configura los objetivos en Imperio; siempre cuentan base, misiones, traslados y construcción de todos tus sistemas.</p>
+              <p class="page-intro">Mínimos con Imperio desactivado. 0 desactiva la reposición.</p>
+              <div class="fleet-policy-notice" data-field="fleet-policy-notice" hidden><span role="status">Imperio activo: estos mínimos locales no se aplican.</span><button type="button" data-action="empire-goals">Ver objetivos</button></div>
+              <details class="helper-help fleet-help"><summary>Cómo se cuentan y producen</summary><p class="hint">Ordena las naves e indica cuántas mantener. El Depot necesario y su Reactor se atienden antes. Imperio cuenta base, misiones, traslados y construcción una sola vez, sin depender de la casilla local de misiones.</p></details>
+              <p class="page-intro" data-field="fleet-execution-status" role="status" hidden></p>
               <div class="fleet-choices" role="list" aria-label="Mínimos y prioridad de naves"></div>
               <label class="count-away"><input type="checkbox">Contar también las naves en misión (solo modo local)</label>
               <div class="priority-tools"><span class="hint">Se descuenta la producción en cola</span><button type="button" class="reset-ships">Restablecer orden</button></div>
@@ -4835,7 +5035,7 @@ return Object.freeze({create});
               <div data-field="attack-retry"></div>
               <div data-field="fleet-wait"></div>
               <div class="fleet-shortcut"><label><input type="checkbox" data-setting="shift-preset-shortcut"><span><kbd>Shift</kbd> + clic para mostrar presets</span></label>
-                <p class="hint">Selecciona un preset junto al sector para enviarlo. Si faltan naves, puedes esperar o producirlas.</p>
+                <details class="helper-help"><summary>Cómo usar los presets</summary><p class="hint">Selecciona un preset junto al sector para enviarlo. Si faltan naves, puedes esperar o producirlas.</p></details>
               </div>
             </details>
             <div class="settings-page" data-page="notifications" id="oldlight-settings-notifications" role="tabpanel" tabindex="0" aria-labelledby="oldlight-tab-notifications" hidden></div>
@@ -4903,6 +5103,7 @@ return Object.freeze({create});
         fleetDetails: shadow.querySelector('.fleet-details'),
         fleetChoices: shadow.querySelector('.fleet-choices'),
         fleetPolicyNotice: shadow.querySelector('[data-field="fleet-policy-notice"]'),
+        fleetExecutionStatus: shadow.querySelector('[data-field="fleet-execution-status"]'),
         allyProtectionContainer: shadow.querySelector('[data-field="ally-protection"]'),
         attackRetryContainer: shadow.querySelector('[data-field="attack-retry"]'),
         fleetWaitContainer: shadow.querySelector('[data-field="fleet-wait"]'),
@@ -5907,13 +6108,20 @@ return Object.freeze({create});
     }
   }
 
-  function show(message) {
+  function syncFleetExecutionStatus(message) {
+    if (!ui?.fleetExecutionStatus) return;
+    setText(ui.fleetExecutionStatus, message);
+    ui.fleetExecutionStatus.hidden = !message;
+  }
+
+  function show(message, fleetStatus = false) {
     if (!ui) return;
     setText(ui.toggle, settings.enabled ? 'Pausar' : 'Reanudar');
     ui.toggle.setAttribute('aria-pressed', String(settings.enabled));
     ui.toggle.title = settings.enabled ? 'Pausar mejoras y reposición. No cancela misiones ni campañas.' : 'Reanudar mejoras y reposición';
     ui.toggle.setAttribute('aria-label', ui.toggle.title);
     setText(ui.status, message);
+    syncFleetExecutionStatus(fleetStatus ? message : '');
     setText(ui.last, lastClick ? `Última solicitud: ${lastClick}` : '');
     const reportState = reports.getDiagnostics();
     const reportAlert = reportState.enabled && reportState.active && (reportState.lastError || reportState.storageError)
@@ -6089,7 +6297,7 @@ return Object.freeze({create});
           emitEvent('automation.paused', error, undefined, requestSystemName);
         }
       } else {
-        show(settings.enabled ? `Esperando respuesta: ${pending.name}…` : 'Pausado. Último clic enviado.');
+        show(settings.enabled ? `Esperando respuesta: ${pending.name}…` : 'Pausado. Último clic enviado.', ship);
         wakeAt(pending.started + RESPONSE_TIMEOUT_MS);
         return;
       }
@@ -6168,9 +6376,37 @@ return Object.freeze({create});
     }
     if (!infrastructurePlan.reserve && fleetPlan.reserve && fleetPlan.target) {
       const row = ships.find(item => item.id === fleetPlan.target.id);
+      let beforeWaitScope = '';
+      try { beforeWaitScope = missionContext().scope; } catch (_) { /* Diagnostic context only. */ }
+      const beforeWaitImperial = Boolean(empireController?.isEnabled());
       const quantity = row && fleetPlan.target.blocker !== 'mission' ? prepareShip(row, fleetPlan.target.quantity) : 0;
       if (!quantity) {
-        show(`Flota prioritaria: ${fleetPlan.target.name} ×${fleetPlan.target.quantity}.`);
+        // Preparation may update the native form synchronously. Explain the
+        // latest observable reason, never infer savings from a zero result.
+        let waitMessage = 'No se pudo preparar el pedido. Faltan datos actuales del juego.';
+        try {
+          const context = missionContext(), imperial = Boolean(empireController?.isEnabled());
+          if (!settings.enabled) waitMessage = 'Automatización pausada.';
+          else if (!beforeWaitScope || context.scope !== beforeWaitScope || context.selectionCount !== 1
+              || activeSystem !== systemId() || imperial !== beforeWaitImperial) {
+            waitMessage = 'No se pudo preparar el pedido: el contexto seleccionado ha cambiado.';
+          } else if (document.hidden || !leader || pending || importingBackup || reports.isRecovering()
+              || missionAdapter?.isBusy() || attackRetry?.isBusy()
+              || document.querySelector(`${PANEL} .b-loading, ${FLEET_PANEL} .b-loading`)) {
+            waitMessage = 'No se pudo preparar el pedido: hay otra operación o pausa pendiente.';
+          } else if (imperial && !empireController.canAct(empireAdapter.readActive()?.context)) {
+            waitMessage = 'No se pudo preparar el pedido: esperando validación imperial.';
+          } else {
+            const waitingSnapshot = readFleetPrioritySnapshot(shipRows());
+            const waitingPlan = fleetPriority.select(waitingSnapshot);
+            const waitingInfrastructure = infrastructurePriority.select(readUpgradeEtaSnapshot(rows(), waitingSnapshot.resources),
+              waitingSnapshot, depotPrioritySystem === activeSystem);
+            waitMessage = waitingInfrastructure.reserve
+              ? 'Naves en espera: Depot/Reactor prioritario.'
+              : fleetProductionWaitMessage(waitingSnapshot, waitingPlan, fleetPlan.target.id);
+          }
+        } catch (_) { /* Diagnostic failures cannot break or retry production. */ }
+        show(waitMessage, true);
         return;
       }
       // Changing the native quantity can synchronously update selection, counts,
@@ -6207,7 +6443,7 @@ return Object.freeze({create});
     pending = request;
     nextClickAt = now + MIN_GAP_MS;
     lastClick = `${candidate.name} · ${candidate.target}`;
-    show(candidate.kind === 'ship' ? `Encargando ${candidate.quantity} ${candidate.name}…` : `Mejorando ${candidate.name}…`);
+    show(candidate.kind === 'ship' ? `Encargando ${candidate.quantity} ${candidate.name}…` : `Mejorando ${candidate.name}…`, candidate.kind === 'ship');
     try {
       candidate.button.click();
       emitEvent('request.sent', candidate.kind === 'ship'
@@ -6224,6 +6460,162 @@ return Object.freeze({create});
       console.warn('[Old Light Auto Upgrade]', cause);
     }
   }
+
+  function fleetProductionWaitMessage(snapshot, plan, expectedId = plan.target?.id) {
+    const ship = plan.target;
+    const unknown = 'No se pudo preparar el pedido. Esperando disponibilidad del juego.';
+    if (!snapshot.contextReady || !plan.reserve || !ship || ship.id !== expectedId) return unknown;
+    const forecast = fleetPriority.estimate(snapshot, plan);
+    const base = `Flota prioritaria: ${ship.name} ×${ship.quantity}.`;
+    // Only a fresh native funds blocker plus exact costs/resources justifies
+    // saying that the selected ship is being saved for. Other blockers win.
+    const resourcesKnown = ['palladium', 'iridium'].every(id =>
+      Number.isFinite(snapshot.resources?.[id]?.amount) && snapshot.resources[id].amount >= 0
+      && Number.isFinite(ship.cost?.[id]) && ship.cost[id] >= 0);
+    const nativeFunds = ship.blocker === 'resources'
+      && /^(?:Not enough resources|No selected system can afford this batch)\.?$/i.test(ship.nativeReason || '');
+    if (forecast.state === 'waiting' && nativeFunds && resourcesKnown && !snapshot.queue?.full
+        && !snapshot.queue?.paused && !snapshot.docksFull && !snapshot.treasuryBlocked) {
+      const missing = [['palladium', 'Palladium'], ['iridium', 'Iridium']]
+        .filter(([id]) => ship.cost[id] > snapshot.resources[id].amount)
+        .map(([id, name]) => `${Math.ceil(ship.cost[id] - snapshot.resources[id].amount).toLocaleString()} ${name === 'Palladium' ? 'P' : 'I'}`);
+      if (missing.length) return `Ahorrando para ${ship.name} ×${ship.quantity} · faltan ${missing.join(' y ')}.`;
+    }
+    const reasons = {
+      manual: 'Termina de editar su cantidad en el astillero.',
+      mission: 'La producción de la misión espera disponibilidad.',
+      queue: 'Esperando hueco en la cola de naves.',
+      refresh: 'Esperando confirmación del hueco libre.',
+      data: 'Faltan datos exactos de recursos, capacidad o costes.',
+      rate: 'No se puede estimar la producción de recursos.',
+      production: 'Los recursos no alcanzan durante la espera.',
+    };
+    if (snapshot.queue?.full || ship.blocker === 'queue') return `${ship.name}: esperando hueco en la cola de naves.`;
+    if (forecast.state === 'blocked' && reasons[forecast.reason]) return `${ship.name}: ${reasons[forecast.reason]}`;
+    return `${base} ${unknown}`;
+  }
+
+  // BEGIN EMPIRE NAVIGATION PLANNER
+  // Forecasts only decide whether a visit is worthwhile. The native HUD and
+  // existing order barriers remain the sole final dispatch checks.
+  function createEmpireNavigationPlanner({ infrastructurePriority, fleetPriority, upgradeEta }) {
+    const resources = ['palladium', 'iridium'];
+    const ships = ['probe', 'marauder', 'sentinel', 'vanguard'];
+    const roles = {
+      industry: ['palladium_extractor', 'iridium_extractor', 'warehouse', 'reactor', 'command_center', 'shipyard', 'trade_hub'],
+      shipyard: ['shipyard', 'command_center', 'reactor', 'warehouse', 'palladium_extractor', 'iridium_extractor', 'trade_hub'],
+      defense: ['command_center', 'warehouse', 'reactor', 'palladium_extractor', 'iridium_extractor', 'shipyard', 'trade_hub'],
+    };
+    const known = n => typeof n === 'number' && Number.isFinite(n) && n >= 0;
+    return function ({ work, snapshots, config, plan, now, policy }) {
+      if (!work || !plan?.complete || !Array.isArray(work.systems) || !Array.isArray(snapshots)
+          || work.systems.length !== snapshots.length || !policy || !Array.isArray(policy.order)
+          || !Array.isArray(policy.excluded) || !Array.isArray(policy.shipOrder)
+          || !Array.isArray(policy.missionSystemIds) || !Number.isSafeInteger(now)) return null;
+      const byId = new Map(work.systems.map(row => [row.systemId, row]));
+      if (!Number.isSafeInteger(work.observedAt) || work.observedAt < 0 || now < work.observedAt
+          || new Set(snapshots.map(row => row.systemId)).size !== snapshots.length
+          || byId.size !== snapshots.length || snapshots.some(row => row.scope !== work.scope
+          || row.censusId !== work.censusId || row.observedAt !== work.observedAt || !byId.has(row.systemId))) return null;
+      const missionIds = new Set(policy.missionSystemIds);
+      const eligibleSystemIds = [], idleSystemIds = [];
+      for (const source of snapshots) {
+        if (config.systems[source.systemId]?.enabled === false) continue;
+        const raw = byId.get(source.systemId);
+        const decide = () => {
+          // Missions and retries have their own origin/claim rules. Keep their
+          // origins in the ordinary fair rotation instead of second-guessing them.
+          if (missionIds.has(source.systemId)) return true;
+          const stock = {};
+          for (const name of resources) {
+            const value = source.resources[name];
+            if (!known(value?.amount) || !known(value?.cap) || value.cap <= 0
+                || !Number.isFinite(value?.rate) || now < source.observedAt) return true;
+            stock[name] = { ...value, amount: Math.floor(Math.min(value.cap,
+              Math.max(0, value.amount + value.rate * (now - source.observedAt) / 60000))) };
+          }
+          const order = roles[config.systems[source.systemId]?.role] || policy.order;
+          const selected = order.filter(id => !policy.excluded.includes(id));
+          const demand = Object.fromEntries(ships.map(id => [id, plan.summary?.allocationsBySystem?.[source.systemId]?.[id] || 0]));
+          const hasDemand = ships.some(id => demand[id] > 0);
+          if (!selected.length && !hasDemand) return false;
+          if (selected.length && (!Number.isFinite(source.energy)
+              || !Array.isArray(raw.buildings) || !Array.isArray(raw.buildingQueue)
+              || !Number.isSafeInteger(raw.buildingSlots) || raw.buildingSlots < 0)) return true;
+          const rows = new Map((raw.buildings || []).map(row => [row.id, row]));
+          const queue = raw.buildingQueue || [];
+          if (rows.size !== (raw.buildings || []).length || selected.some(id => !rows.has(id))
+              || queue.some(job => !rows.has(job.type) || !Number.isSafeInteger(job.completesAt)
+                || !Number.isSafeInteger(job.targetLevel))) return true;
+          // A nominal completion changes levels, energy and prices. Until the
+          // next native revision arrives, it is not evidence of an idle system.
+          if (queue.some(job => job.completesAt <= now)) return true;
+          const full = selected.length && queue.filter(job => job.completesAt > now).length >= raw.buildingSlots;
+          const queueWait = full ? Math.max(0, Math.min(...queue.map(job => job.completesAt)) - now) : 0;
+          const buildings = [];
+          for (const id of selected) {
+            const row = rows.get(id), upgrade = row.upgrade;
+            if (!Number.isSafeInteger(row.level) || typeof row.requirementMet !== 'boolean') return true;
+            if (upgrade !== null && (!upgrade || resources.some(name => !known(upgrade[name])) || !Number.isFinite(upgrade.energy))) return true;
+            const cost = { palladium: upgrade?.palladium ?? 0, iridium: upgrade?.iridium ?? 0 };
+            const targetLevel = Math.max(row.level, ...queue.filter(job => job.type === id).map(job => job.targetLevel)) + 1;
+            const blocker = !row.requirementMet ? 'locked' : upgrade === null ? 'maxed'
+              : resources.some(name => cost[name] > stock[name].cap) ? 'capacity' : full ? 'queue'
+                : resources.some(name => cost[name] > stock[name].amount) ? 'resources' : 'ready';
+            buildings.push({ id, name: id, visible: true, targetLevel, blocker, cost, energy: upgrade?.energy ?? 0, nativeReason: '' });
+          }
+          const structure = { resources: stock, buildings, energy: source.energy, order,
+            excluded: policy.excluded, depotFillPercent: policy.depotFillPercent,
+            cooldownMs: 0, queue: { full: !!full, waitMs: queueWait,
+              buildings: Object.fromEntries(queue.map(job => [job.type, true])) } };
+          let fleet = { active: false, contextReady: true, ships: [], resources: stock };
+          if (hasDemand) {
+            if (!Array.isArray(raw.shipTypes) || !Array.isArray(raw.shipQueue)
+                || !Number.isSafeInteger(raw.shipSlots) || raw.shipSlots < 0 || typeof work.treasuryBlocked !== 'boolean') return true;
+            const types = new Map(raw.shipTypes.map(row => [row.id, row]));
+            if (ships.some(id => demand[id] > 0 && (!types.has(id) || typeof types.get(id).unlocked !== 'boolean'
+                || resources.some(name => !known(types.get(id)[name]))))) return true;
+            if (types.size !== raw.shipTypes.length || raw.shipQueue.some(job =>
+                typeof job.paused !== 'boolean' || !Number.isSafeInteger(job.nextCompletesAt))) return true;
+            // A finished batch can free a slot or change the next native job.
+            if (raw.shipQueue.some(job => !job.paused && job.nextCompletesAt <= now)) return true;
+            const shipFull = raw.shipQueue.length >= raw.shipSlots;
+            const nextTimes = raw.shipQueue.map(job => job.nextCompletesAt).filter(Number.isSafeInteger);
+            fleet = { active: true, contextReady: true, resources: stock, treasuryBlocked: work.treasuryBlocked,
+              docksFull: false, cooldownMs: 0,
+              queue: { full: shipFull, paused: raw.shipQueue.some(job => job.paused),
+                waitMs: nextTimes.length === raw.shipQueue.length && nextTimes.length ? Math.max(0, Math.min(...nextTimes) - now) : null },
+              ships: policy.shipOrder.map(id => {
+                const type = types.get(id);
+                return { id, name: id, deficit: demand[id], maxBatch: 1,
+                  blocker: !type?.unlocked ? 'locked' : shipFull ? 'queue'
+                    : resources.some(name => type[name] > stock[name].amount) ? 'resources' : 'ready',
+                  unitCost: { palladium: type?.palladium ?? null, iridium: type?.iridium ?? null } };
+              }) };
+          }
+          // Reuse the real planners, but never treat absent HUD/intent state as
+          // proof of idleness. These alternatives only preserve a visit; they
+          // cannot reserve resources or dispatch a different production order.
+          const retained = policy.retainedDepotId === source.systemId;
+          const infrastructure = infrastructurePriority.select(structure, fleet, retained);
+          if (infrastructure.reserve) return infrastructure.forecast?.state === 'ready';
+          // The current-system engine retains one Depot chain. Moving elsewhere
+          // may clear that hint; an affordable continuation must remain visitable.
+          if (!retained && infrastructurePriority.select(structure, fleet, true).forecast?.state === 'ready') return true;
+          const fleetPlan = fleetPriority.select(fleet);
+          if (fleetPlan.reserve && fleetPriority.estimate(fleet, fleetPlan).state === 'ready') return true;
+          // Dock fullness is a HUD fact, absent from this advisory bundle. Full
+          // docks release the real fleet reservation and can leave a building
+          // executable even when an unaffordable ship would otherwise reserve.
+          const forecast = upgradeEta.estimate(structure);
+          return forecast.state === 'ready' || forecast.reason === 'data';
+        };
+        (decide() ? eligibleSystemIds : idleSystemIds).push(source.systemId);
+      }
+      return { scope: work.scope, censusId: work.censusId, observedAt: work.observedAt, eligibleSystemIds, idleSystemIds };
+    };
+  }
+  // END EMPIRE NAVIGATION PLANNER
 
   // BEGIN INFRASTRUCTURE PRIORITY PLANNER
   function createInfrastructurePriorityPlanner(upgradeEta) {
@@ -6484,6 +6876,10 @@ return Object.freeze({create});
       const notBefore = Math.max(0, snapshot.cooldownMs || 0, queueWait || 0);
       const threshold = Math.min(100, Math.max(1, snapshot.depotFillPercent || 90));
       const depotRequired = snapshot.depotRequired === true;
+      // A reserved Depot chain may spend only on the Depot and its dependency.
+      // Ordinary deficit recovery must not divert that reservation to a Reactor
+      // when the Depot itself consumes no energy.
+      const energyDeficit = !depotRequired && Number.isFinite(snapshot.energy) && snapshot.energy < 0;
       const costKnown = row => RESOURCES.every(id => Number.isFinite(row.cost?.[id]) && row.cost[id] >= 0);
       const capacityFits = row => costKnown(row) && RESOURCES.every(id => row.cost[id] <= resources[id].cap);
       const powerKnown = row => Number.isFinite(row.energy) && Number.isFinite(snapshot.energy);
@@ -6521,13 +6917,16 @@ return Object.freeze({create});
           RESOURCES.every(id => amounts[id] + EPSILON >= row.cost[id]) &&
           (row.id !== 'warehouse' || depotRequired || fill + EPSILON >= threshold));
         // An urgent Depot justifies starting its Reactor before the Depot's
-        // own resources are complete; no speculative Reactor for normal builds.
+        // own resources are complete. Existing energy debt is an independent
+        // reason; nonnegative energy still requires an affordable consumer.
         const consumer = available.find(row => row.id !== 'reactor' && needsPower(row))
           || (depotRequired ? models.find(row => row.id === 'warehouse' && needsPower(row)) : null);
-        const candidate = available.find(row => row.id === 'reactor' ? Boolean(consumer) : !needsPower(row));
+        const candidate = available.find(row => row.id === 'reactor'
+          ? row.energy > 0 && (energyDeficit || Boolean(consumer)) : !needsPower(row));
         if (!candidate) continue;
         const notes = [];
-        if (candidate.id === 'reactor') notes.push(`Energía necesaria para ${consumer.name}.`);
+        if (candidate.id === 'reactor') notes.push(energyDeficit
+          ? 'Reactor para corregir el déficit actual de energía.' : `Energía necesaria para ${consumer.name}.`);
         if (candidate.id === 'warehouse') notes.push(depotRequired ? 'Ampliación necesaria del Depot.' : `Depot al ${threshold}% de capacidad.`);
         if (queue.full) notes.push(`Hueco en cola en ≈${formatDuration(queueWait)}.`);
         const missing = RESOURCES.filter(id => candidate.cost[id] > resources[id].amount)
@@ -6541,7 +6940,16 @@ return Object.freeze({create});
       // Give a concrete blocker instead of displaying infinity, zero, or a
       // countdown inferred from the duration of a job that has not been queued.
       for (const row of selected) {
-        if (row.id === 'reactor') continue;
+        if (row.id === 'reactor') {
+          if (!energyDeficit) continue;
+          if (queued.reactor) return result('blocked', 'Esperando el Reactor en cola; se recalculará cuando termine.', row, null, 'energy');
+          // Native terminal blockers are known facts, not missing energy data.
+          // Do not keep visiting a maxed/locked Reactor just because it has no upgrade gain.
+          if (!['ready', 'resources', 'queue', 'capacity'].includes(row.blocker)) continue;
+          if (!Number.isFinite(row.energy) || row.energy <= 0) {
+            return result('blocked', 'Esperando una mejora de Reactor con aporte de energía confirmado.', row, null, 'data');
+          }
+        }
         if (queued[row.id] && row.id === 'warehouse') {
           return result('blocked', 'Resource Depot ya está en cola; se recalculará cuando termine.', row, null, 'queued');
         }
@@ -6565,11 +6973,11 @@ return Object.freeze({create});
         if (row.id === 'warehouse') return result('blocked', `Esperando que un recurso alcance el ${threshold}% del Depot.`, row, null, 'threshold');
         return result('blocked', 'Esperando disponibilidad actualizada del juego.', row, null, 'refresh');
       }
-      const locked = selected.find(row => row.id !== 'reactor');
+      const locked = selected.find(row => row.id !== 'reactor' || energyDeficit);
       if (locked) return result('blocked', locked.blocker === 'maxed' ? `${locked.name} ha alcanzado su máximo.`
         : locked.blocker === 'locked' ? `Requisito pendiente: ${locked.nativeReason || locked.name}.`
           : 'Esperando que el juego permita la siguiente mejora.', locked, null, locked.blocker);
-      return result('idle', 'Reactor solo se mejora cuando otra mejora marcada necesita energía.', null, null, 'demand');
+      return result('idle', 'Reactor se mejora ante un déficit actual o cuando otra mejora marcada disponible necesita energía.', null, null, 'demand');
     }
 
     return { estimate, parseRate, parseDuration, formatDuration };
@@ -15576,7 +15984,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     if (!leader) blocked = 'Esperando control exclusivo de esta pestaña.';
     else if (!canNavigateEmpire()) blocked = 'Esperando a que termine la operación o edición actual.';
     empireController.update({ scope: context.scope, enabled: settings.enabled && !document.hidden, blocked });
-    if (typeof empirePanel !== 'undefined') empirePanel?.render();
+    if (typeof empirePanel !== 'undefined') { empirePanel?.observeScope?.(context.scope); empirePanel?.render(); }
   }
 
   function installEmpirePanel(shadow) {
@@ -15595,6 +16003,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const native = globalThis.OldLightEmpireAdapter;
     const bridge = globalThis.OldLightEmpireBridge;
     if (core && runtime && native) {
+      const navigationPlanner = createEmpireNavigationPlanner({ infrastructurePriority, fleetPriority, upgradeEta });
       empireAdapter = native.create({ getWorld: () => bridge?.snapshot?.({ includeOwnership: false }) || null, document,
         getObservationStatus: () => ({ ...bridge?.status?.(), bootstrap: globalThis.OldLightEmpireBootstrapStatus?.() }),
         getContext: () => ({ ...missionContext(), systemId: systemId() || '',
@@ -15609,6 +16018,21 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         isHelperEditorFocused: () => Boolean(host?.shadowRoot?.activeElement?.matches('input,select,textarea,[contenteditable="true"]')),
         onManualInteraction: ms => empireController?.suspendInteraction(ms) });
       empireController = runtime.create({ core, adapter: empireAdapter, onChange: schedule,
+        planNavigation: input => {
+          // An unreadable mission store keeps ordinary visits; no mission or
+          // retry can be silently dropped by the idle-system optimization.
+          const jobs = fleetWait.list();
+          const retries = attackRetry.exportConfig();
+          const missionSystemIds = jobs.filter(job => job.scope === input.work?.scope && ['waiting', 'sending'].includes(job.status)).map(job => job.originId);
+          if (retries.enabled) for (const campaign of retries.campaigns) {
+            if (campaign.scope === input.work?.scope && ['waiting_origin', 'waiting_slot', 'queued'].includes(campaign.status)) missionSystemIds.push(campaign.originId);
+          }
+          // New retry campaigns know the origin coordinate before they know
+          // its UUID. Keep normal rotation until their own resolver binds it.
+          if (missionSystemIds.some(id => typeof id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id))) return null;
+          return navigationPlanner({ ...input, policy: { order: settings.order, excluded: settings.excluded,
+            shipOrder: settings.shipOrder, depotFillPercent: settings.depotFillPercent, retainedDepotId: depotPrioritySystem, missionSystemIds } });
+        },
         read: key => { const value = localStorage.getItem(key); return value === null ? undefined : JSON.parse(value); },
         write: (key, value) => localStorage.setItem(key, JSON.stringify(value)) });
       bridge?.subscribe?.(() => { observeEmpireStartup(); schedule(); });

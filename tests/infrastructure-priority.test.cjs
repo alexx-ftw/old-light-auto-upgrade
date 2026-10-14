@@ -55,6 +55,16 @@ test('an urgent Depot precedes affordable ships as well as a full seven-hour shi
 test('the urgent Depot ignores its low position in building priorities', () => {
   expectTarget(snapshot({ order: ['command_center', 'reactor', 'warehouse'] }), 'warehouse');
 });
+test('existing energy debt cannot divert a zero-energy urgent Depot reservation to Reactor', () => {
+  for (const cost of [23800, 80000]) {
+    const input = snapshot({ energy: -1, buildings: [row('warehouse', { energy: 0,
+      cost: { palladium: cost, iridium: cost } }), row('reactor')] });
+    input.resources.palladium.cap = input.resources.iridium.cap = 100000;
+    input.resources.palladium.amount = 95000;
+    const expectedWait = Math.max(0, cost - input.resources.iridium.amount) / 277.2 * minute;
+    expectTarget(input, 'warehouse', expectedWait);
+  }
+});
 test('normal fleet priority is preserved below the threshold with no capacity blocker', () => {
   const plan = planner.select(low(), fleet());
   assert.equal(plan.reserve, false);

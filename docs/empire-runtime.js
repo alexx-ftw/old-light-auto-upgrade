@@ -89,8 +89,21 @@ function create(options){
   }
   function hold(reason){ready=false;status=reason;return state();}
   function reject(reason){cancelMove();return hold(reason);}
-  function chooseNext(current){
-    const eligible=roster.systems.filter(x=>config.systems[x.id]?.enabled!==false);
+  // Advisory work filtering cannot make any action executable. Unknown or
+  // incompatible forecasts retain the established fair rotation.
+  function navigationCandidates(bundle,currentPlan=plan){
+    if(typeof options.planNavigation!=='function'||!currentPlan?.complete||!bundle)return null;
+    try{
+      const result=options.planNavigation({work:bundle.work,snapshots:bundle.snapshots,config:copy(config),plan:copy(currentPlan),now:now()});
+      if(!result||result.scope!==scope||result.censusId!==bundle.transitCensus?.censusId
+        ||result.observedAt!==bundle.roster?.observedAt||!Array.isArray(result.eligibleSystemIds))return null;
+      const ids=new Set(result.eligibleSystemIds),owned=new Set(roster.systems.map(row=>row.id));
+      if(ids.size!==result.eligibleSystemIds.length||[...ids].some(id=>!owned.has(id)))return null;
+      return ids;
+    }catch{return null;}
+  }
+  function chooseNext(current,candidates=null){
+    const eligible=roster.systems.filter(x=>config.systems[x.id]?.enabled!==false&&(!candidates||candidates.has(x.id)));
     eligible.sort((a,b)=>(visited.get(a.id)??-1)-(visited.get(b.id)??-1)||a.id.localeCompare(b.id));
     return eligible.find(x=>x.id!==current)?.id||current;
   }
@@ -98,10 +111,32 @@ function create(options){
     const operation={id,scope,token:epoch,at:now(),started:false,cancelled:false};move=operation;
     Promise.resolve().then(()=>{
       if(operation.cancelled||move!==operation||operation.token!==epoch||!permitNavigation||!config.enabled||scope!==operation.scope||pauseDeadline()>now())return null;
+      // A storage event/update can arrive after this microtask. Re-read policy
+      // at dispatch so another tab's disable, exclusion or target edit wins.
+      try{if(JSON.stringify(core.normalizeConfig(sync(read(key()))))!==JSON.stringify(config)){operation.cancelled=true;return null;}}
+      catch{operation.cancelled=true;storageError=true;error='No se puede leer la configuración imperial. No se enviarán órdenes.';return null;}
       const bundled=typeof adapter.readBundle==='function',bundle=bundled?adapter.readBundle():null;
       const freshRoster=validRoster(bundled?bundle?.roster:adapter.readRoster()),active=bundled?bundle?.active:adapter.readActive();
       if(!freshRoster?.systems.some(x=>x.id===id)||!matches(active?.context,fromId)||!acceptable(active?.snapshot,fromId,freshRoster)||adapter.canNavigate?.()===false){operation.cancelled=true;return null;}
-      operation.started=true;return adapter.selectSystem(id,{scope:operation.scope});
+      if(typeof options.planNavigation==='function'&&bundled){
+        const freshPlan=core.plan(config,bundle?.snapshots,{scope,now:now(),maxAgeMs,
+          expectedIds:freshRoster.systems.map(x=>x.id),activeSystemId:fromId,transitCensus:bundle?.transitCensus});
+        const candidates=navigationCandidates(bundle,freshPlan);
+        if(candidates&&!candidates.has(id)){operation.cancelled=true;return null;}
+      }
+      const dispatchPolicy=JSON.stringify(config);
+      // The native selector may need several next clicks. A cancelled logical
+      // move must revoke every remaining click, not just its final result.
+      const isCurrent=()=>{
+        if(operation.cancelled||move!==operation||operation.token!==epoch||scope!==operation.scope
+          ||!config.enabled||config.systems[id]?.enabled===false||storageError||manualHold||pauseDeadline()>now()){
+          operation.cancelled=true;return false;
+        }
+        try{if(JSON.stringify(core.normalizeConfig(sync(read(key()))))!==dispatchPolicy){operation.cancelled=true;return false;}}
+        catch{operation.cancelled=true;storageError=true;error='No se puede leer la configuración imperial. No se enviarán órdenes.';return false;}
+        return true;
+      };
+      operation.started=true;return adapter.selectSystem(id,{scope:operation.scope,isCurrent});
     }).then(result=>{
       if(move!==operation)return;move=null;ready=false;permitNavigation=false;
       if(operation.cancelled||operation.token!==epoch||operation.scope!==scope){onChange();return;}
@@ -134,7 +169,10 @@ function create(options){
     const id=active?.context?.systemId?.toLowerCase();
     const current=id&&owned.has(id)&&matches(active.context,id)&&acceptable(active.snapshot,id);
     if(current&&(bundled||typeof adapter.readSnapshots==='function')&&JSON.stringify(current)!==JSON.stringify(snapshots.get(id)))return reject('El HUD y el censo imperial no coinciden.');
-    if(current){snapshots.set(id,current);if(id!==observedId){observedId=id;arrivedAt=now();visited.set(id,now());}}
+    // Native next may cross several systems while one selection is in flight.
+    // Those intermediate HUDs have no service opportunity and cannot consume
+    // their fair turn. Record arrival only after the selector has settled.
+    if(current){snapshots.set(id,current);if(!move&&id!==observedId){observedId=id;arrivedAt=now();visited.set(id,now());}}
     else if(id)snapshots.delete(id);
     let transit;try{transit=bundled?bundle?.transitCensus:adapter.readTransitCensus?.();}catch{transit=null;}
     transitCensus=transit?core.normalizeTransitCensus(transit):null;
@@ -150,14 +188,14 @@ function create(options){
     if(pauseUntil>now())return reject('Imperio suspendido. Revisa la pausa antes de continuar.');
     if(interactionUntil>now())return reject('Pausa por interacción: '+Math.ceil((interactionUntil-now())/1000)+' s restantes sin nueva actividad en el juego.');
     if(!current)return reject('Esperando identidad, propiedad y datos actuales del sistema seleccionado.');
-    const currentEnabled=config.systems[id]?.enabled!==false,nextId=chooseNext(id);
-    if(nextId&&nextId!==id&&(!plan.complete||!currentEnabled||now()-arrivedAt>=dwellMs)){
+    const candidates=navigationCandidates(bundle),currentEnabled=config.systems[id]?.enabled!==false,nextId=chooseNext(id,candidates);
+    if(nextId&&nextId!==id&&(!plan.complete||!currentEnabled||candidates&&!candidates.has(id)||now()-arrivedAt>=dwellMs)){
       if(typeof adapter.selectSystem!=='function')return reject('El selector nativo de sistemas todavía no está verificado.');
       permitNavigation=true;select(nextId,id);return hold('Recorriendo los sistemas del imperio…');
     }
     if(!currentEnabled)return reject('Este sistema está excluido del recorrido imperial.');
     if(!plan.complete)return reject(plan.reason||'Actualizando los sistemas antes de repartir objetivos.');
-    ready=true;status='Imperio activo: '+(current.name||id)+'.';error='';return state();
+    ready=true;status=candidates&&candidates.size===0?'Imperio al día: esperando trabajo disponible sin cambiar de sistema.':'Imperio activo: '+(current.name||id)+'.';error='';return state();
   }
   function checkAction(context,capture=false){
     if(!ready||!config.enabled||move||manualHold||pauseDeadline()>now()||!roster||!plan?.complete)return false;

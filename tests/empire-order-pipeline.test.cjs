@@ -33,7 +33,8 @@ function section(begin, end, from = 0) {
 const registration = source.indexOf('    // Registra la petición ANTES del clic:');
 const boundaryStart = source.lastIndexOf('    const empireBoundary = ', registration);
 assert.ok(registration > 0 && boundaryStart > 0, 'The pipeline must execute the candidate order-boundary integration.');
-const dispatchCode = section('    const empireBoundary = ', '\n  }\n\n  // BEGIN INFRASTRUCTURE PRIORITY PLANNER', boundaryStart);
+// Stop at the shipped step() boundary, regardless of the planner that follows.
+const dispatchCode = section('    const empireBoundary = ', '\n  }\n\n', boundaryStart);
 const confirmBody = source.indexOf('      const requestSystemName = pending.systemName;');
 const confirmStart = source.lastIndexOf('    if (pending) {', confirmBody);
 assert.ok(confirmStart > 0);
