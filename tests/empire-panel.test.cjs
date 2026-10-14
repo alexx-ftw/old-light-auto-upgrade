@@ -74,7 +74,7 @@ function harness({ ids = [A, B], capable = true, shadow = false, visible = true 
     transitCensus: { scope: SCOPE, censusId: 'source-1', observedAt: clock, ships: Object.fromEntries(core.DEFAULT_SHIPS.map(ship => [ship, 0])) },
   };
   const app = panel.create({ document, core, now: () => clock, canEnable: () => capable, isVisible: () => visible,
-    getState: () => (reads++, { ...data, plan: core.plan(data.config, data.snapshots, { scope: SCOPE, now: clock, maxAgeMs: data.maxAgeMs,
+    getState: () => (reads++, { ...data, plan: data.cachedPlan || core.plan(data.config, data.snapshots, { scope: data.scope, now: clock, maxAgeMs: data.maxAgeMs,
       expectedIds: data.roster.systems.map(row => row.id), transitCensus: data.transitCensus }) }),
     setConfig: value => {
       writes++;
@@ -149,6 +149,8 @@ test('activation rechecks capability and stopping stays available when capabilit
   assert.equal(h.toggle.disabled, true); h.toggle.dispatch('click'); assert.equal(h.writes, 0);
   h.capable = true; h.app.render(); h.toggle.dispatch('click');
   assert.equal(h.data.config.enabled, true); assert.equal(h.toggle.getAttribute('aria-pressed'), 'true');
+  assert.equal(withClass(h.cards[0], 'empire-progress')[0].textContent, 'Sin producción imperial adicional asignada.');
+  h.data.ready = true; h.app.render();
   assert.equal(withClass(h.cards[0], 'empire-progress')[0].textContent, 'Reparto propuesto: Marauder ×6');
   h.capable = false; h.app.render(); assert.equal(h.toggle.disabled, false); h.toggle.dispatch('click');
   assert.equal(h.data.config.enabled, false); assert.equal(h.writes, 2);
@@ -240,4 +242,159 @@ test('hidden dashboard does no census reads and renders the latest values when o
   h.visible = true; h.app.render(); assert.equal(h.reads, 2);
   assert.equal(h.cards[0].dataset.stale, 'true');
   assert.ok(h.paragraphs().includes('0 de 2 sistemas con datos recientes · información incompleta'));
+});
+
+
+test('reported ship totals explain covered imperial goals despite unmet local minima', () => {
+  const h = harness();
+  h.data.config = core.normalizeConfig({ enabled: true, fleetTargets: { probe: 30, marauder: 300, sentinel: 300, vanguard: 5 } });
+  const quantities = [
+    { probe: [0, 30], marauder: [0, 165], sentinel: [147, 0], vanguard: [1, 1] },
+    { probe: [0, 30], marauder: [0, 238], sentinel: [163, 0], vanguard: [3, 1] },
+  ];
+  h.data.snapshots.forEach((row, index) => { for (const [ship, [parked, away]] of Object.entries(quantities[index])) row.fleet[ship] = { parked, away, building: 0 }; });
+  h.data.transitCensus.ships = { probe: 60, marauder: 403, sentinel: 0, vanguard: 2 };
+  h.data.status = 'Imperio activo: Sede.'; h.data.ready = true; h.app.render();
+  const summaries = withClass(h.container, 'empire-goal-status').map(node => node.textContent);
+  assert.deepEqual(summaries, [
+    '60 en el imperio · objetivo 30 · faltan 0', '403 en el imperio · objetivo 300 · faltan 0',
+    '310 en el imperio · objetivo 300 · faltan 0', '6 en el imperio · objetivo 5 · faltan 0',
+  ]);
+  assert.ok(h.paragraphs().includes('Objetivos de flota cubiertos: no se necesitan naves nuevas.'));
+  assert.ok(h.paragraphs().includes('Imperio activo: Sede.'));
+  for (const message of ['Imperio pausado con el Helper.', 'Esperando un censo nativo posterior al pedido confirmado; no se enviarán nuevos pedidos.']) {
+    h.data.status = message; h.data.ready = false; h.app.render();
+    assert.ok(h.paragraphs().includes(message), 'Stock feedback must not replace operational pauses or barriers');
+  }
+  assert.equal(h.writes, 0);
+  for (const ship of ['Probe', 'Marauder', 'Sentinel', 'Vanguard']) {
+    const describedBy = h.goal(ship).getAttribute('aria-describedby');
+    assert.ok(describedBy && all(h.container).some(node => node.id === describedBy));
+  }
+});
+
+test('goal feedback never labels partial, stale or unsynchronized totals as verified', () => {
+  for (const change of [
+    h => { h.data.snapshots.pop(); },
+    h => { h.clock += 120001; },
+    h => { h.data.transitCensus = null; },
+    h => { h.data.snapshots[1].censusId = 'other'; },
+    h => { h.data.snapshots[0].fleet.probe.parked = null; },
+  ]) {
+    const h = harness(); h.data.config.enabled = true; h.data.ready = true;
+    h.data.status = 'Imperio activo: Sede.'; h.app.render(); change(h); h.app.render();
+    const summaries = withClass(h.container, 'empire-goal-status');
+    assert.equal(summaries.length, 4);
+    assert.ok(summaries.every(node => node.textContent === 'Total y faltantes sin verificar: falta un censo actual y completo.'));
+    assert.ok(h.paragraphs().includes('Producción imperial sin calcular: falta un censo actual y completo.'));
+    assert.ok(!h.paragraphs().includes('Objetivos de flota cubiertos: no se necesitan naves nuevas.'));
+    assert.ok(withClass(h.container, 'empire-progress').every(node => !node.textContent.startsWith('Reparto propuesto')));
+  }
+});
+
+test('goal feedback uses saved goals while editing and updates after save', () => {
+  const h = harness(); h.data.config.enabled = true; h.app.render();
+  const goal = h.goal('Marauder'); goal.focus(); goal.value = '40'; h.app.render();
+  assert.equal(goal.value, '40');
+  assert.equal(withClass(h.container, 'empire-goal-status')[1].textContent, '8 en el imperio · objetivo 20 · faltan 12');
+  goal.dispatch('change');
+  assert.equal(withClass(h.container, 'empire-goal-status')[1].textContent, '8 en el imperio · objetivo 40 · faltan 32');
+  assert.equal(h.writes, 1);
+});
+
+test('production summary distinguishes stopped mode, no fleet goal, and ineligible roles', () => {
+  const h = harness();
+  assert.ok(h.paragraphs().includes('Imperio desactivado: se aplican los mínimos locales de Flota.'));
+  h.data.config.enabled = true;
+  h.data.config.systems = { [A]: { role: 'industry' }, [B]: { role: 'shipyard', enabled: false } }; h.app.render();
+  assert.ok(h.paragraphs().includes('Faltan naves, pero no hay sistemas con Atender y rol Equilibrado o Astillero.'));
+  h.data.config.systems = {}; h.app.render();
+  assert.ok(h.paragraphs().includes('Faltan naves para los objetivos imperiales. Los pedidos respetan pausas, recursos, colas y Depot/Reactor.'));
+  h.data.config.fleetTargets = {}; h.app.render();
+  assert.ok(h.paragraphs().includes('No hay objetivos imperiales de flota activados.'));
+});
+
+
+test('goal feedback clears cross-scope totals and cached allocations before any new census', () => {
+  for (const scope of ['other-galaxy/player', 'alpha/other-player']) {
+    const h = harness(); h.data.config.enabled = true; h.data.ready = true; h.app.render();
+    h.data.cachedPlan = core.plan(h.data.config, h.data.snapshots, { scope: SCOPE, now: h.clock,
+      expectedIds: [A, B], transitCensus: h.data.transitCensus });
+    assert.ok(withClass(h.container, 'empire-goal-status').some(node => /8 en el imperio/.test(node.textContent)));
+    assert.ok(withClass(h.container, 'empire-progress').some(node => /Reparto propuesto/.test(node.textContent)));
+    h.data.scope = scope; h.data.status = 'Falta verificar la identidad de la cuenta y galaxia.'; h.data.ready = false;
+    h.app.render();
+    assert.ok(withClass(h.container, 'empire-goal-status').every(node => node.textContent === 'Total y faltantes sin verificar: falta un censo actual y completo.'));
+    assert.ok(withClass(h.container, 'empire-progress').every(node => !node.textContent.includes('Reparto propuesto')));
+    assert.ok(h.paragraphs().includes(h.data.status)); assert.equal(h.writes, 0);
+  }
+});
+
+test('goal feedback rejects conflicting, unowned and foreign transit observations', () => {
+  for (const change of [
+    h => { h.data.snapshots.push(structuredClone(h.data.snapshots[0])); },
+    h => { h.data.snapshots[0].owned = false; },
+    h => { h.data.snapshots[0].scope = 'other/player'; },
+    h => { h.data.transitCensus.scope = 'other/player'; },
+    h => { h.data.snapshots[0].fleet.marauder.away = 1; },
+  ]) {
+    const h = harness(); h.data.config.enabled = true; h.app.render(); change(h); h.app.render();
+    const statuses = withClass(h.container, 'empire-goal-status');
+    assert.equal(statuses.length, 4); assert.ok(statuses.every(node => node.textContent.startsWith('Total y faltantes sin verificar:')));
+    assert.ok(h.paragraphs().includes('Producción imperial sin calcular: falta un censo actual y completo.'));
+    assert.equal(h.writes, 0);
+  }
+});
+
+test('goal feedback expires reused census objects at the runtime freshness boundary', () => {
+  const h = harness(); h.data.config.enabled = true; h.data.maxAgeMs = 15000;
+  const snapshots = h.data.snapshots, transit = h.data.transitCensus;
+  h.clock = 25000; h.app.render();
+  assert.equal(withClass(h.container, 'empire-goal-status')[1].textContent, '8 en el imperio · objetivo 20 · faltan 12');
+  h.data.cachedPlan = core.plan(h.data.config, snapshots, { scope: SCOPE, now: h.clock, maxAgeMs: 15000, expectedIds: [A, B], transitCensus: transit });
+  h.clock++; h.app.render();
+  assert.equal(h.data.snapshots, snapshots); assert.equal(h.data.transitCensus, transit);
+  assert.ok(withClass(h.container, 'empire-goal-status').every(node => node.textContent.startsWith('Total y faltantes sin verificar:')));
+  assert.ok(withClass(h.container, 'empire-progress').every(node => !node.textContent.includes('Reparto propuesto')));
+  for (const row of snapshots) { row.observedAt = h.clock; row.censusId = 'source-2'; }
+  h.app.render();
+  assert.ok(withClass(h.container, 'empire-goal-status').every(node => node.textContent.startsWith('Total y faltantes sin verificar:')));
+  h.data.transitCensus = { ...transit, observedAt: h.clock, censusId: 'source-2' }; h.data.cachedPlan = null; h.app.render();
+  assert.equal(withClass(h.container, 'empire-goal-status')[1].textContent, '8 en el imperio · objetivo 20 · faltan 12');
+});
+
+test('goal feedback preserves focused drafts and saved goals across conflicts and failed saves', () => {
+  for (const shadow of [false, true]) for (const failure of ['sync', 'async']) {
+    const h = harness({ shadow }); h.data.config.enabled = true; h.app.render();
+    const goal = h.goal('Marauder'); goal.focus(); goal.value = '40';
+    h.data.config.fleetTargets.marauder = 30; h.app.render();
+    assert.equal(goal.value, '40');
+    assert.equal(withClass(h.container, 'empire-goal-status')[1].textContent, '8 en el imperio · objetivo 30 · faltan 22');
+    h.failure = failure; goal.dispatch('change');
+    assert.equal(goal.value, '40'); assert.equal(h.data.config.fleetTargets.marauder, 30);
+    assert.equal(withClass(h.container, 'empire-goal-status')[1].textContent, '8 en el imperio · objetivo 30 · faltan 22');
+    assert.match(h.error.textContent, failure === 'sync' ? /No se pudo guardar/ : /guardado síncrono/);
+    h.app.render(); assert.notEqual(h.error.textContent, '');
+    h.root.activeElement = null; h.app.render(); assert.equal(goal.value, '30');
+    h.failure = ''; goal.focus(); goal.value = '40'; goal.dispatch('change');
+    assert.equal(h.error.textContent, ''); assert.equal(h.data.config.fleetTargets.marauder, 40);
+    assert.equal(withClass(h.container, 'empire-goal-status')[1].textContent, '8 en el imperio · objetivo 40 · faltan 32');
+  }
+});
+
+test('production feedback respects disabled and conflicting producers without clearing runtime errors', () => {
+  for (const systems of [
+    { [A]: { role: 'industry' }, [B]: { role: 'defense' } },
+    { [A]: { role: 'balanced', enabled: false }, [B]: { role: 'shipyard', enabled: false } },
+    { [A]: { role: 'shipyard' }, [A.toUpperCase()]: { role: 'shipyard', enabled: false }, [B]: { role: 'industry' } },
+  ]) {
+    const h = harness(); h.data.config = { enabled: true, fleetTargets: { marauder: 20 }, systems };
+    h.data.status = 'Error del selector; detén y vuelve a activar Imperio.'; h.data.ready = false; h.app.render();
+    assert.ok(h.paragraphs().includes('Faltan naves, pero no hay sistemas con Atender y rol Equilibrado o Astillero.'));
+    assert.ok(h.paragraphs().includes(h.data.status));
+    assert.ok(withClass(h.container, 'empire-progress').every(node => !node.textContent.includes('Reparto propuesto')));
+    h.data.config.fleetTargets.marauder = 8; h.app.render();
+    assert.ok(h.paragraphs().includes('Objetivos de flota cubiertos: no se necesitan naves nuevas.'));
+    assert.ok(h.paragraphs().includes(h.data.status)); assert.equal(h.writes, 0);
+  }
 });

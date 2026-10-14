@@ -233,8 +233,31 @@ function harness(t, { kind = 'ship', initialize = true, dwellMs = 1000000, maxAg
   };
 }
 
+// These assertions run in the existing temporal cases; they do not create
+// extra test counts. Verified stock is independent of permission to dispatch.
+function assertFleetFeedback(h, state) {
+  const cfg = core.normalizeConfig(state.config);
+  const data = core.aggregate(state.snapshots, { scope: state.scope, now: h.clock, maxAgeMs: state.maxAgeMs,
+    expectedIds: (state.roster?.systems || []).map(row => row.id), transitCensus: state.transitCensus });
+  const statuses = withClass(h.container, 'empire-goal-status');
+  assert.equal(statuses.length, 4, 'Every ship must have current goal feedback');
+  const format = value => new Intl.NumberFormat('es-ES', { maximumFractionDigits: 2 }).format(value);
+  for (const [index, id] of core.DEFAULT_SHIPS.entries()) {
+    const expected = data.complete && data.fleetComplete
+      ? `${format(data.totals.fleet[id].total)} en el imperio · objetivo ${format(cfg.fleetTargets[id])} · faltan ${format(Math.max(0, cfg.fleetTargets[id] - data.totals.fleet[id].total))}`
+      : 'Total y faltantes sin verificar: falta un censo actual y completo.';
+    assert.equal(statuses[index].textContent, expected, id);
+  }
+  assert.equal(h.statusNode.textContent, state.status, 'Stock feedback must preserve the runtime status');
+  if (cfg.enabled && !(data.complete && data.fleetComplete)) {
+    assert.ok(h.paragraphs.includes('Producción imperial sin calcular: falta un censo actual y completo.'));
+    assert.ok(withClass(h.container, 'empire-progress').every(node => !node.textContent.includes('Reparto propuesto')));
+  }
+}
+
 function assertBlocked(h, { censusIncomplete = false } = {}) {
   const state = h.tick();
+  assertFleetFeedback(h, state);
   assert.equal(state.ready, false);
   assert.equal(h.controller.canAct(h.adapter.readActive()?.context), false);
   assert.ok(h.statusNode.classList.contains('empire-warning'), 'Panel must expose the runtime refusal');
@@ -244,6 +267,7 @@ function assertBlocked(h, { censusIncomplete = false } = {}) {
 }
 function assertReady(h, expectedCount = 2) {
   const state = h.tick();
+  assertFleetFeedback(h, state);
   assert.equal(state.ready, true, state.status);
   assert.equal(state.snapshots.length, expectedCount);
   assert.equal(h.controller.canAct(h.adapter.readActive()?.context), true);
@@ -470,4 +494,32 @@ test('pipeline: resource projection and repeated panel reads preserve observatio
   h.publishDelta(); const refreshed = assertReady(h);
   assert.equal(refreshed.snapshots[0].observedAt, h.clock);
   assert.equal(refreshed.snapshots[0].resources.palladium.amount, 115.001);
+});
+
+test('pipeline: immediate config edits hide retained allocations until runtime recalculates goals, roles and Atender', t => {
+  for (const scenario of ['goals', 'roles', 'Atender']) {
+    const h = harness(t); const initial = assertReady(h);
+    assert.deepEqual(initial.plan.summary.allocationsBySystem[A].probe, 9);
+    assert.deepEqual(initial.plan.summary.allocationsBySystem[B].probe, 9);
+    const next = clone(initial.config);
+    if (scenario === 'goals') next.fleetTargets.probe = 0;
+    else if (scenario === 'roles') next.systems = { [A]: { role: 'industry' }, [B]: { role: 'defense' } };
+    else next.systems = { [B]: { enabled: false, role: 'balanced' } };
+    h.controller.setConfig(next);
+    const edited = h.controller.state();
+    assert.equal(edited.ready, false); assert.deepEqual(edited.plan, initial.plan, 'The runtime deliberately retains the old plan until update');
+    assert.equal(h.controller.canAct(h.adapter.readActive()?.context), false);
+    h.panel.render(); assertFleetFeedback(h, edited);
+    assert.ok(withClass(h.container, 'empire-progress').every(node => !node.textContent.includes('Reparto propuesto')),
+      `A retained plan must not appear alongside the new ${scenario} before update`);
+    assert.equal(withClass(h.container, 'empire-goal-status')[0].textContent,
+      `22 en el imperio · objetivo ${scenario === 'goals' ? 0 : 40} · faltan ${scenario === 'goals' ? 0 : 18}`);
+    const refreshed = assertReady(h);
+    if (scenario === 'Atender') {
+      assert.equal(refreshed.plan.summary.allocationsBySystem[A].probe, 18);
+      assert.equal(refreshed.plan.summary.allocationsBySystem[B], undefined);
+      assert.equal(withClass(h.cards.find(node => node.dataset.systemId === A), 'empire-progress')[0].textContent, 'Reparto propuesto: Probe ×18');
+    } else assert.ok(withClass(h.container, 'empire-progress').every(node => !node.textContent.includes('Reparto propuesto')));
+    assert.equal(h.clicks, 0); assert.equal(h.navigationClicks, 0);
+  }
 });

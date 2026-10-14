@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.16.1
+// @version      1.16.2
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -565,10 +565,10 @@ return Object.freeze({create});
   const attribute = (node, key, value) => { if (node.getAttribute(key) !== value) node.setAttribute(key, value); };
   const property = (node, key, value) => { if (node[key] !== value) node[key] = value; };
   function create({ document, core, getState, setConfig, canEnable = () => false, isVisible = () => true, now = Date.now }) {
-    let root, style, status, toggle, total, fleetSummary, error, list, empty, overview;
+    let root, style, status, toggle, total, fleetSummary, productionSummary, error, list, empty, overview;
     const panelId = ++panelSequence;
     let helpSequence = 0;
-    const inputs = new Map(), cards = new Map();
+    const inputs = new Map(), goalStatuses = new Map(), cards = new Map();
     let destroyed = false;
     const el = (tag, text, cls) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node; };
     function save(next) {
@@ -621,7 +621,25 @@ return Object.freeze({create});
       text(total, `${data.rows.length} de ${roster.length} sistemas con datos recientes${data.complete ? '' : ' · información incompleta'}`);
       text(overview, `Palladium ${num(data.totals.resources.palladium.amount)} / ${num(data.totals.resources.palladium.cap)} · Iridium ${num(data.totals.resources.iridium.amount)} / ${num(data.totals.resources.iridium.cap)}`);
       text(fleetSummary, data.fleetComplete ? (roster.length === 1 && !data.censusId ? 'Recuento exacto del sistema seleccionado.' : 'Flota contada una vez en un censo verificado.') : 'Flota sin censo sincronizado: los totales observados no autorizan nuevos pedidos.');
-      for (const [id, input] of inputs) if (input.getRootNode().activeElement !== input) property(input, 'value', String(cfg.fleetTargets[id]));
+      const fleetVerified = data.complete && data.fleetComplete;
+      const deficits = core.DEFAULT_SHIPS.map(id => fleetVerified ? Math.max(0, cfg.fleetTargets[id] - data.totals.fleet[id].total) : null);
+      for (const [id, input] of inputs) {
+        if (input.getRootNode().activeElement !== input) property(input, 'value', String(cfg.fleetTargets[id]));
+        // Show the saved goal, not a focused draft, and discard stale totals.
+        text(goalStatuses.get(id), fleetVerified
+          ? `${num(data.totals.fleet[id].total)} en el imperio · objetivo ${num(cfg.fleetTargets[id])} · faltan ${num(Math.max(0, cfg.fleetTargets[id] - data.totals.fleet[id].total))}`
+          : 'Total y faltantes sin verificar: falta un censo actual y completo.');
+      }
+      const producer = data.rows.some(row => {
+        const profile = cfg.systems[row.systemId] || { enabled: true, role: 'balanced' };
+        return profile.enabled && ['balanced', 'shipyard'].includes(profile.role);
+      });
+      text(productionSummary, !cfg.enabled ? 'Imperio desactivado: se aplican los mínimos locales de Flota.'
+        : !fleetVerified ? 'Producción imperial sin calcular: falta un censo actual y completo.'
+        : core.DEFAULT_SHIPS.every(id => cfg.fleetTargets[id] === 0) ? 'No hay objetivos imperiales de flota activados.'
+        : deficits.every(value => value === 0) ? 'Objetivos de flota cubiertos: no se necesitan naves nuevas.'
+        : !producer ? 'Faltan naves, pero no hay sistemas con Atender y rol Equilibrado o Astillero.'
+        : 'Faltan naves para los objetivos imperiales. Los pedidos respetan pausas, recursos, colas y Depot/Reactor.');
       const retained = new Set();
       for (const entry of roster) {
         retained.add(entry.id); const nodes = cardFor(entry.id), snap = raw.get(entry.id), profile = cfg.systems[entry.id] || { role: 'balanced', enabled: true };
@@ -644,7 +662,8 @@ return Object.freeze({create});
         text(nodes.resourceNodes.queues, `${num(snap?.queue?.buildings)} / ${num(snap?.queue?.ships)}`);
         text(nodes.resourceNodes.energy, num(snap?.energy));
         for (const [id, node] of nodes.shipNodes) { const fleet = snap?.fleet?.[id]; text(node, `${LABELS[id]}: ${num(fleet?.parked)} en base · ${num(fleet?.away)} en misión · ${num(fleet?.building)} en cola`); }
-        const allocation = state.plan?.summary?.allocationsBySystem?.[entry.id];
+        // setConfig revokes ready immediately but retains the old plan until update.
+        const allocation = cfg.enabled && fleetVerified && state.ready === true ? state.plan?.summary?.allocationsBySystem?.[entry.id] : null;
         const parts = allocation ? core.DEFAULT_SHIPS.filter(id => allocation[id] > 0).map(id => `${LABELS[id]} ×${num(allocation[id])}`) : [];
         text(nodes.allocation, parts.length ? 'Reparto propuesto: ' + parts.join(' · ') : 'Sin producción imperial adicional asignada.');
       }
@@ -658,10 +677,15 @@ return Object.freeze({create});
       toggle.addEventListener('click', () => { const cfg = policy({}); if (!cfg.enabled && !canEnable()) return; save({ ...cfg, enabled: !cfg.enabled }); });
       status = el('p', '', 'empire-status'); status.setAttribute('role', 'status');
       total = el('p', '', 'empire-hint'); overview = el('p'); fleetSummary = el('p', '', 'empire-hint');
+      productionSummary = el('p', '', 'empire-production-summary');
       const goals = el('div', undefined, 'empire-goals');
       for (const id of core.DEFAULT_SHIPS) {
         const label = el('label', `Objetivo imperial · ${LABELS[id]}`), input = el('input'); input.type = 'number'; input.min = '0'; input.max = String(core.MAX_TARGET); input.step = '1';
-        input.setAttribute('aria-label', `Objetivo imperial de ${LABELS[id]}`); label.append(input); goals.append(label); inputs.set(id, input);
+        input.setAttribute('aria-label', `Objetivo imperial de ${LABELS[id]}`);
+        const progress = el('small', '', 'empire-goal-status empire-hint');
+        progress.id = `oldlight-empire-goal-${panelId}-${id}`;
+        input.setAttribute('aria-describedby', progress.id);
+        label.append(input, progress); goals.append(label); inputs.set(id, input); goalStatuses.set(id, progress);
         input.addEventListener('change', () => {
           const value = input.value.trim() === '' ? NaN : Number(input.value);
           if (!Number.isSafeInteger(value) || value < 0 || value > core.MAX_TARGET) { input.setAttribute('aria-invalid', 'true'); error.textContent = `Introduce un entero entre 0 y ${core.MAX_TARGET}.`; return; }
@@ -670,15 +694,15 @@ return Object.freeze({create});
       }
       error = el('p', '', 'empire-error'); error.setAttribute('role', 'alert');
       list = el('div'); empty = el('p', 'Falta verificar la lista nativa completa de sistemas propios. El recorrido automático permanece bloqueado.', 'empire-empty');
-      root.append(head, status, total, overview, fleetSummary, el('h3', 'Objetivos para todo el imperio'), goals,
-        el('p', 'Los objetivos cuentan base, misiones y construcción. Los recursos permanecen en cada sistema; la suma es informativa.', 'empire-hint'),
+      root.append(head, status, total, overview, fleetSummary, productionSummary, el('h3', 'Objetivos para todo el imperio'), goals,
+        el('p', 'Los objetivos cuentan las naves de todo el imperio: base, misiones, traslados y construcción, una sola vez. Mientras Imperio esté activo sustituyen los mínimos locales de Flota; su casilla de contar misiones no cambia el total imperial. Los recursos permanecen en cada sistema; la suma es informativa.', 'empire-hint'),
         el('p', 'Equilibrado y Astillero reciben producción de flota. Industria y Defensa no reciben producción imperial adicional en esta fase.', 'empire-hint'),
         el('p', 'El reparto requiere Atender. Los roles reordenan prioridades, no excluyen otros edificios: respetan tus edificios marcados y las reglas de Depot/Reactor. No organizan patrullas, ataques ni transportes.', 'empire-hint'),
         el('p', 'Con la sincronización de Drive conectada, se comparten objetivos, roles y Atender. Activar o detener Imperio sigue siendo una decisión local.', 'empire-hint'), error, list, empty);
       container.append(style, root); render();
       return root;
     }
-    return { mount, render, destroy() { destroyed = true; root?.remove(); style?.remove(); cards.clear(); inputs.clear(); } };
+    return { mount, render, destroy() { destroyed = true; root?.remove(); style?.remove(); cards.clear(); inputs.clear(); goalStatuses.clear(); } };
   }
   return Object.freeze({ create });
 });
@@ -2932,7 +2956,7 @@ return Object.freeze({create});
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.16.1';
+  const SCRIPT_VERSION = '1.16.2';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -4368,6 +4392,11 @@ return Object.freeze({create});
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.16.2', title: 'Objetivos de flota claros', changes: [
+        'Flota distingue sus mínimos locales y avisa cuando Imperio los sustituye por objetivos globales, incluyendo naves en misión.',
+        'Imperio muestra total, objetivo guardado y faltantes con censo actual y completo; explica objetivos cubiertos o falta de productores sin ocultar pausas ni errores.',
+        'No cambia las reglas de producción ni añade permisos. Validación offline; sigue pendiente comprobar la UI en Brave/Violentmonkey con Drive.'
+      ] },
       { version: '1.16.1', title: 'Teclado dentro del Helper', changes: [
         'Escribir en los campos del Helper ya no propaga G y otros atajos al mapa. Cubre el panel, menús y diálogos propios sin cancelar la edición normal.',
         'Conserva Tab, Enter, composición y atajos de edición. Soltar teclas sigue llegando al juego para liberar movimiento; Escape mantiene la cancelación del arrastre.',
@@ -4796,10 +4825,11 @@ return Object.freeze({create});
               <div data-field="level-targets"></div>
             </details>
             <details class="settings-page fleet-details" data-page="fleet" id="oldlight-settings-fleet" role="tabpanel" tabindex="0" aria-labelledby="oldlight-tab-fleet" open hidden><summary>Flota</summary>
-              <div class="page-heading"><h3>Flota mínima</h3><span class="count-badge">Depot necesario primero</span></div>
-              <p class="page-intro">Ordena las naves e indica cuántas mantener. 0 desactiva su reposición. El Depot necesario y su Reactor se atienden antes.</p>
+              <div class="page-heading"><h3>Flota mínima local</h3><span class="count-badge">Depot necesario primero</span></div>
+              <p class="page-intro">Estos mínimos se usan con Imperio desactivado. Ordena las naves e indica cuántas mantener. 0 desactiva su reposición. El Depot necesario y su Reactor se atienden antes.</p>
+              <p class="page-intro" data-field="fleet-policy-notice" role="status" hidden>Imperio activo: estos mínimos locales no se aplican. Configura los objetivos en Imperio; siempre cuentan base, misiones, traslados y construcción de todos tus sistemas.</p>
               <div class="fleet-choices" role="list" aria-label="Mínimos y prioridad de naves"></div>
-              <label class="count-away"><input type="checkbox">Contar también las naves en misión</label>
+              <label class="count-away"><input type="checkbox">Contar también las naves en misión (solo modo local)</label>
               <div class="priority-tools"><span class="hint">Se descuenta la producción en cola</span><button type="button" class="reset-ships">Restablecer orden</button></div>
               <div data-field="ally-protection"></div>
               <div data-field="attack-retry"></div>
@@ -4872,6 +4902,7 @@ return Object.freeze({create});
         items: new Map(),
         fleetDetails: shadow.querySelector('.fleet-details'),
         fleetChoices: shadow.querySelector('.fleet-choices'),
+        fleetPolicyNotice: shadow.querySelector('[data-field="fleet-policy-notice"]'),
         allyProtectionContainer: shadow.querySelector('[data-field="ally-protection"]'),
         attackRetryContainer: shadow.querySelector('[data-field="attack-retry"]'),
         fleetWaitContainer: shadow.querySelector('[data-field="fleet-wait"]'),
@@ -5807,8 +5838,15 @@ return Object.freeze({create});
     schedule();
   }
 
+  function syncFleetPolicyNotice() {
+    if (!ui?.fleetPolicyNotice) return;
+    const hidden = !empireController?.isEnabled();
+    if (ui.fleetPolicyNotice.hidden !== hidden) ui.fleetPolicyNotice.hidden = hidden;
+  }
+
   function syncFleetChoices() {
     if (!ui) return;
+    syncFleetPolicyNotice();
     const focused = ui.fleetChoices.getRootNode().activeElement;
     const hadFocus = focused && ui.fleetChoices.contains(focused);
     for (const [index, id] of settings.shipOrder.entries()) {

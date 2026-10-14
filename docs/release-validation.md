@@ -80,6 +80,7 @@ Un resultado offline satisfactorio no significa «listo para publicar» por sí 
 - Deben quedar explícitas las invariantes de identidad y frescura, la exclusión mientras hay una operación pendiente, la posibilidad de reintentar cuando procede y los mensajes que verá el usuario.
 - Hay que distinguir pruebas sintéticas, visuales y de integración real. Un gap de navegador o servicio real no se convierte en una prueba aprobada. No se envían órdenes a una partida real para completar este gate.
 - No se declara una causa definitiva del problema del usuario solo porque una simulación reproduzca el mismo mensaje.
+- Ante un reporte de automatización inactiva, contrastar el resultado esperado con la configuración efectiva, no solo con inputs visibles: modo local o global, precedencia, totales y déficits, frescura, roles y pausas. Una configuración sustituida debe indicarlo en su propia pantalla; los valores parciales o antiguos no se presentan como verificados. Conservar la diferencia entre causa demostrada y una explicación compatible con capturas de instantes distintos.
 - Si un revisor encuentra un fallo, se corrige y se repiten los checks pertinentes y el gate completo sobre el árbol final; el número de pruebas no justifica publicar un fallo conocido.
 
 La [matriz de 1.15.1](1.15.1-validation-matrix.md) es un ejemplo de evidencia por flujo y límites, no una aprobación reutilizable de versiones futuras.

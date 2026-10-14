@@ -95,7 +95,7 @@ function harness(activeTab = 'buildings') {
 test('Changelog starts with the installed release and lists distinct versions newest first', () => {
   const h = harness(), entries = h.entries();
   assert.equal(entries[0].version, version);
-  assert.deepEqual(entries.map(entry => entry.version), ['1.16.1', '1.16.0', '1.15.2', '1.15.1', '1.15.0', '1.14.3', '1.14.2', '1.14.1', '1.14.0', '1.13.1', '1.13.0', '1.12.1', '1.12.0', '1.11.0']);
+  assert.deepEqual(entries.map(entry => entry.version), ['1.16.2', '1.16.1', '1.16.0', '1.15.2', '1.15.1', '1.15.0', '1.14.3', '1.14.2', '1.14.1', '1.14.0', '1.13.1', '1.13.0', '1.12.1', '1.12.0', '1.11.0']);
   assert.equal(new Set(entries.map(entry => entry.version)).size, entries.length);
   for (const entry of entries) {
     assert.ok(entry.title.length > 0);

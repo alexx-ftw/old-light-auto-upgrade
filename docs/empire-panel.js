@@ -41,10 +41,10 @@
   const attribute = (node, key, value) => { if (node.getAttribute(key) !== value) node.setAttribute(key, value); };
   const property = (node, key, value) => { if (node[key] !== value) node[key] = value; };
   function create({ document, core, getState, setConfig, canEnable = () => false, isVisible = () => true, now = Date.now }) {
-    let root, style, status, toggle, total, fleetSummary, error, list, empty, overview;
+    let root, style, status, toggle, total, fleetSummary, productionSummary, error, list, empty, overview;
     const panelId = ++panelSequence;
     let helpSequence = 0;
-    const inputs = new Map(), cards = new Map();
+    const inputs = new Map(), goalStatuses = new Map(), cards = new Map();
     let destroyed = false;
     const el = (tag, text, cls) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node; };
     function save(next) {
@@ -97,7 +97,25 @@
       text(total, `${data.rows.length} de ${roster.length} sistemas con datos recientes${data.complete ? '' : ' · información incompleta'}`);
       text(overview, `Palladium ${num(data.totals.resources.palladium.amount)} / ${num(data.totals.resources.palladium.cap)} · Iridium ${num(data.totals.resources.iridium.amount)} / ${num(data.totals.resources.iridium.cap)}`);
       text(fleetSummary, data.fleetComplete ? (roster.length === 1 && !data.censusId ? 'Recuento exacto del sistema seleccionado.' : 'Flota contada una vez en un censo verificado.') : 'Flota sin censo sincronizado: los totales observados no autorizan nuevos pedidos.');
-      for (const [id, input] of inputs) if (input.getRootNode().activeElement !== input) property(input, 'value', String(cfg.fleetTargets[id]));
+      const fleetVerified = data.complete && data.fleetComplete;
+      const deficits = core.DEFAULT_SHIPS.map(id => fleetVerified ? Math.max(0, cfg.fleetTargets[id] - data.totals.fleet[id].total) : null);
+      for (const [id, input] of inputs) {
+        if (input.getRootNode().activeElement !== input) property(input, 'value', String(cfg.fleetTargets[id]));
+        // Show the saved goal, not a focused draft, and discard stale totals.
+        text(goalStatuses.get(id), fleetVerified
+          ? `${num(data.totals.fleet[id].total)} en el imperio · objetivo ${num(cfg.fleetTargets[id])} · faltan ${num(Math.max(0, cfg.fleetTargets[id] - data.totals.fleet[id].total))}`
+          : 'Total y faltantes sin verificar: falta un censo actual y completo.');
+      }
+      const producer = data.rows.some(row => {
+        const profile = cfg.systems[row.systemId] || { enabled: true, role: 'balanced' };
+        return profile.enabled && ['balanced', 'shipyard'].includes(profile.role);
+      });
+      text(productionSummary, !cfg.enabled ? 'Imperio desactivado: se aplican los mínimos locales de Flota.'
+        : !fleetVerified ? 'Producción imperial sin calcular: falta un censo actual y completo.'
+        : core.DEFAULT_SHIPS.every(id => cfg.fleetTargets[id] === 0) ? 'No hay objetivos imperiales de flota activados.'
+        : deficits.every(value => value === 0) ? 'Objetivos de flota cubiertos: no se necesitan naves nuevas.'
+        : !producer ? 'Faltan naves, pero no hay sistemas con Atender y rol Equilibrado o Astillero.'
+        : 'Faltan naves para los objetivos imperiales. Los pedidos respetan pausas, recursos, colas y Depot/Reactor.');
       const retained = new Set();
       for (const entry of roster) {
         retained.add(entry.id); const nodes = cardFor(entry.id), snap = raw.get(entry.id), profile = cfg.systems[entry.id] || { role: 'balanced', enabled: true };
@@ -120,7 +138,8 @@
         text(nodes.resourceNodes.queues, `${num(snap?.queue?.buildings)} / ${num(snap?.queue?.ships)}`);
         text(nodes.resourceNodes.energy, num(snap?.energy));
         for (const [id, node] of nodes.shipNodes) { const fleet = snap?.fleet?.[id]; text(node, `${LABELS[id]}: ${num(fleet?.parked)} en base · ${num(fleet?.away)} en misión · ${num(fleet?.building)} en cola`); }
-        const allocation = state.plan?.summary?.allocationsBySystem?.[entry.id];
+        // setConfig revokes ready immediately but retains the old plan until update.
+        const allocation = cfg.enabled && fleetVerified && state.ready === true ? state.plan?.summary?.allocationsBySystem?.[entry.id] : null;
         const parts = allocation ? core.DEFAULT_SHIPS.filter(id => allocation[id] > 0).map(id => `${LABELS[id]} ×${num(allocation[id])}`) : [];
         text(nodes.allocation, parts.length ? 'Reparto propuesto: ' + parts.join(' · ') : 'Sin producción imperial adicional asignada.');
       }
@@ -134,10 +153,15 @@
       toggle.addEventListener('click', () => { const cfg = policy({}); if (!cfg.enabled && !canEnable()) return; save({ ...cfg, enabled: !cfg.enabled }); });
       status = el('p', '', 'empire-status'); status.setAttribute('role', 'status');
       total = el('p', '', 'empire-hint'); overview = el('p'); fleetSummary = el('p', '', 'empire-hint');
+      productionSummary = el('p', '', 'empire-production-summary');
       const goals = el('div', undefined, 'empire-goals');
       for (const id of core.DEFAULT_SHIPS) {
         const label = el('label', `Objetivo imperial · ${LABELS[id]}`), input = el('input'); input.type = 'number'; input.min = '0'; input.max = String(core.MAX_TARGET); input.step = '1';
-        input.setAttribute('aria-label', `Objetivo imperial de ${LABELS[id]}`); label.append(input); goals.append(label); inputs.set(id, input);
+        input.setAttribute('aria-label', `Objetivo imperial de ${LABELS[id]}`);
+        const progress = el('small', '', 'empire-goal-status empire-hint');
+        progress.id = `oldlight-empire-goal-${panelId}-${id}`;
+        input.setAttribute('aria-describedby', progress.id);
+        label.append(input, progress); goals.append(label); inputs.set(id, input); goalStatuses.set(id, progress);
         input.addEventListener('change', () => {
           const value = input.value.trim() === '' ? NaN : Number(input.value);
           if (!Number.isSafeInteger(value) || value < 0 || value > core.MAX_TARGET) { input.setAttribute('aria-invalid', 'true'); error.textContent = `Introduce un entero entre 0 y ${core.MAX_TARGET}.`; return; }
@@ -146,15 +170,15 @@
       }
       error = el('p', '', 'empire-error'); error.setAttribute('role', 'alert');
       list = el('div'); empty = el('p', 'Falta verificar la lista nativa completa de sistemas propios. El recorrido automático permanece bloqueado.', 'empire-empty');
-      root.append(head, status, total, overview, fleetSummary, el('h3', 'Objetivos para todo el imperio'), goals,
-        el('p', 'Los objetivos cuentan base, misiones y construcción. Los recursos permanecen en cada sistema; la suma es informativa.', 'empire-hint'),
+      root.append(head, status, total, overview, fleetSummary, productionSummary, el('h3', 'Objetivos para todo el imperio'), goals,
+        el('p', 'Los objetivos cuentan las naves de todo el imperio: base, misiones, traslados y construcción, una sola vez. Mientras Imperio esté activo sustituyen los mínimos locales de Flota; su casilla de contar misiones no cambia el total imperial. Los recursos permanecen en cada sistema; la suma es informativa.', 'empire-hint'),
         el('p', 'Equilibrado y Astillero reciben producción de flota. Industria y Defensa no reciben producción imperial adicional en esta fase.', 'empire-hint'),
         el('p', 'El reparto requiere Atender. Los roles reordenan prioridades, no excluyen otros edificios: respetan tus edificios marcados y las reglas de Depot/Reactor. No organizan patrullas, ataques ni transportes.', 'empire-hint'),
         el('p', 'Con la sincronización de Drive conectada, se comparten objetivos, roles y Atender. Activar o detener Imperio sigue siendo una decisión local.', 'empire-hint'), error, list, empty);
       container.append(style, root); render();
       return root;
     }
-    return { mount, render, destroy() { destroyed = true; root?.remove(); style?.remove(); cards.clear(); inputs.clear(); } };
+    return { mount, render, destroy() { destroyed = true; root?.remove(); style?.remove(); cards.clear(); inputs.clear(); goalStatuses.clear(); } };
   }
   return Object.freeze({ create });
 });

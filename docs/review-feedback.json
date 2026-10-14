@@ -316,6 +316,314 @@
         "Comprobar que los enlaces exigen eventos reales del runner y que el manifiesto no sustituye los controles completos de suite, inventario, builders e integridad.",
         "Revisar que los criterios y gaps no se presentan como aprobación independiente ni como prueba de integración real."
       ]
+    },
+    {
+      "id": "imperial-fleet-effective-policy-feedback",
+      "feedback": "El reporte «No está construyendo naves» mostró mínimos locales sin explicar que Imperio activo los sustituye, y objetivos imperiales sin total/faltantes ni razón de producción. La causa de aquella sesión no está probada; se reproduce la falta de información y se preserva la política efectiva existente.",
+      "beforeFail": {
+        "revision": "41d6621415ae6472c2faddbc566dc1cafad0b341",
+        "command": "env -u NODE_PATH node --test tests/empire-fleet-feedback.test.cjs tests/empire-panel.test.cjs tests/empire-order-pipeline.test.cjs (en git archive de 41d6621 con los mismos tres archivos de tests finales copiados sin cambios)",
+        "observedFailure": "55 casos: 17 aprobados, 38 fallidos, 0 omitidos, exit 1. El caso de stock esperado obtiene [] en vez de cuatro resúmenes; el pipeline obtiene 0 !== 4 goal-status y Flota carece del aviso local. Los tests de política existente pasan. SHA-256 de userscript base: 9e68c8662bafae79001b08a286e6ba0aa6af0743896b1baf4a591e7341b719b6. El mismo harness final pasa 55/55 después.",
+        "evidence": "docs/fleet-goal-feedback-validation.md#reproducción-sobre-1161"
+      },
+      "regressions": [
+        {
+          "file": "tests/empire-fleet-feedback.test.cjs",
+          "name": "covered imperial goals create zero deficits while local away-excluded minima stay saved"
+        },
+        {
+          "file": "tests/empire-fleet-feedback.test.cjs",
+          "name": "verified loss or increased goal requests only the real global shortfall once"
+        },
+        {
+          "file": "tests/empire-fleet-feedback.test.cjs",
+          "name": "mixed censuses, missing transit and stale counts cannot authorize screenshot-like orders"
+        },
+        {
+          "file": "tests/empire-fleet-feedback.test.cjs",
+          "name": "local fleet page identifies its scope and explains the active imperial override"
+        },
+        {
+          "file": "tests/empire-fleet-feedback.test.cjs",
+          "name": "local override notice follows active mode without changing settings or requiring census reads"
+        },
+        {
+          "file": "tests/empire-fleet-feedback.test.cjs",
+          "name": "local override notice writes visibility only when active mode changes"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "stable visible render does not rewrite identical text or lose live age updates"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "hidden dashboard does no census reads and renders the latest values when opened"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "reported ship totals explain covered imperial goals despite unmet local minima"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "goal feedback never labels partial, stale or unsynchronized totals as verified"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "goal feedback uses saved goals while editing and updates after save"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "production summary distinguishes stopped mode, no fleet goal, and ineligible roles"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "goal feedback clears cross-scope totals and cached allocations before any new census"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "goal feedback rejects conflicting, unowned and foreign transit observations"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "goal feedback expires reused census objects at the runtime freshness boundary"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "goal feedback preserves focused drafts and saved goals across conflicts and failed saves"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "production feedback respects disabled and conflicting producers without clearing runtime errors"
+        },
+        {
+          "file": "tests/empire-order-pipeline.test.cjs",
+          "name": "pipeline: complete init and delta count own transit once and render exact production"
+        },
+        {
+          "file": "tests/empire-order-pipeline.test.cjs",
+          "name": "pipeline ship: census-before-HUD preserves the first post-order census"
+        },
+        {
+          "file": "tests/empire-order-pipeline.test.cjs",
+          "name": "pipeline ship: HUD-before-census preserves the first post-order census"
+        },
+        {
+          "file": "tests/empire-order-pipeline.test.cjs",
+          "name": "pipeline ship: synchronous-click preserves the first post-order census"
+        },
+        {
+          "file": "tests/empire-order-pipeline.test.cjs",
+          "name": "pipeline building: census-before-HUD preserves the first post-order census"
+        },
+        {
+          "file": "tests/empire-order-pipeline.test.cjs",
+          "name": "pipeline building: HUD-before-census preserves the first post-order census"
+        },
+        {
+          "file": "tests/empire-order-pipeline.test.cjs",
+          "name": "pipeline building: synchronous-click preserves the first post-order census"
+        },
+        {
+          "file": "tests/empire-order-pipeline.test.cjs",
+          "name": "pipeline: reconnect ignores late old-generation frames and HUD ACK waits for the new complete init"
+        },
+        {
+          "file": "tests/empire-order-pipeline.test.cjs",
+          "name": "pipeline: account/scope change cannot reuse pending ownership, and returning requires current account evidence"
+        },
+        {
+          "file": "tests/empire-order-pipeline.test.cjs",
+          "name": "pipeline: duplicate native deltas replace inventory instead of double counting, while duplicate DTO delivery never refreshes age"
+        },
+        {
+          "file": "tests/empire-order-pipeline.test.cjs",
+          "name": "pipeline: missing/ambiguous live HUD ownership never becomes ready despite a complete native census"
+        },
+        {
+          "file": "tests/empire-order-pipeline.test.cjs",
+          "name": "pipeline: HUD acceptance plus incomplete post-order colony data cannot restore partial authority"
+        },
+        {
+          "file": "tests/empire-order-pipeline.test.cjs",
+          "name": "pipeline: resource projection and repeated panel reads preserve observation time and exact freshness cutoff"
+        },
+        {
+          "file": "tests/empire-order-pipeline.test.cjs",
+          "name": "pipeline: immediate config edits hide retained allocations until runtime recalculates goals, roles and Atender"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Imperio activo, stock global cubierto y mínimos locales incumplidos con countAway local desmarcado.",
+          "expected": "El déficit imperial es cero; al desactivar Imperio se recuperan los mínimos locales sin mutarlos.",
+          "regression": {
+            "file": "tests/empire-fleet-feedback.test.cjs",
+            "name": "covered imperial goals create zero deficits while local away-excluded minima stay saved"
+          }
+        },
+        {
+          "scenario": "Pérdida verificada o incremento del objetivo global.",
+          "expected": "Solo se reparte una vez el déficit global real.",
+          "regression": {
+            "file": "tests/empire-fleet-feedback.test.cjs",
+            "name": "verified loss or increased goal requests only the real global shortfall once"
+          }
+        },
+        {
+          "scenario": "100 actualizaciones consecutivas con el mismo modo, y una transición de activación.",
+          "expected": "No hay escrituras redundantes de hidden ni lecturas del censo; cada transición escribe una vez.",
+          "regression": {
+            "file": "tests/empire-fleet-feedback.test.cjs",
+            "name": "local override notice writes visibility only when active mode changes"
+          }
+        },
+        {
+          "scenario": "Censo parcial, caducado, no sincronizado o con flota incompleta.",
+          "expected": "No se muestran totales, faltantes o asignaciones como verificados.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "goal feedback never labels partial, stale or unsynchronized totals as verified"
+          }
+        },
+        {
+          "scenario": "Cambio de cuenta/galaxia conservando snapshots y plan anteriores.",
+          "expected": "Desaparecen inmediatamente las cifras verificadas y el reparto del ámbito anterior.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "goal feedback clears cross-scope totals and cached allocations before any new census"
+          }
+        },
+        {
+          "scenario": "Observaciones duplicadas, sin propiedad o tránsito de otro ámbito/inconsistente con el HUD.",
+          "expected": "El resumen no afirma disponibilidad de producción ni cifras verificadas.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "goal feedback rejects conflicting, unowned and foreign transit observations"
+          }
+        },
+        {
+          "scenario": "Se reutilizan exactamente los mismos objetos de censo hasta 15 segundos y un milisegundo después.",
+          "expected": "El límite inclusivo sigue vigente; al caducar desaparecen cifras y no regresan hasta sincronizar la nueva generación.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "goal feedback expires reused census objects at the runtime freshness boundary"
+          }
+        },
+        {
+          "scenario": "Borrador enfocado, objetivo guardado cambiado y guardado fallido síncrono/asíncrono.",
+          "expected": "Se conserva el borrador y el error; el progreso usa solo el objetivo guardado hasta un guardado válido.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "goal feedback preserves focused drafts and saved goals across conflicts and failed saves"
+          }
+        },
+        {
+          "scenario": "Roles no productores, Atender desactivado o políticas UUID ambiguas con error operativo.",
+          "expected": "Se explica la ausencia de productores; al cubrir metas cambia el resumen sin borrar el error.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "production feedback respects disabled and conflicting producers without clearing runtime errors"
+          }
+        },
+        {
+          "scenario": "Objetivos cubiertos con pausa del Helper o barrera de censo posterior al pedido.",
+          "expected": "El progreso y el estado operativo permanecen visibles como información independiente.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "reported ship totals explain covered imperial goals despite unmet local minima"
+          }
+        },
+        {
+          "scenario": "Render visible sin cambios o panel oculto.",
+          "expected": "No se reescribe texto idéntico; oculto no lee censo y al reabrirse evalúa la frescura actual.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "hidden dashboard does no census reads and renders the latest values when opened"
+          }
+        },
+        {
+          "scenario": "La confirmación del HUD llega antes del censo posterior al pedido.",
+          "expected": "Se conserva la barrera y no se presentan cifras sin verificar como autorización.",
+          "regression": {
+            "file": "tests/empire-order-pipeline.test.cjs",
+            "name": "pipeline ship: HUD-before-census preserves the first post-order census"
+          }
+        },
+        {
+          "scenario": "El censo nativo llega primero y el HUD confirma después.",
+          "expected": "El stock disponible puede verse aunque siga pausado; tras confirmar se utiliza la primera revisión nativa válida.",
+          "regression": {
+            "file": "tests/empire-order-pipeline.test.cjs",
+            "name": "pipeline ship: census-before-HUD preserves the first post-order census"
+          }
+        },
+        {
+          "scenario": "Confirmación y censo durante el clic sintético.",
+          "expected": "Las cuatro cifras se revisan en las transiciones sin duplicar el pedido ni fabricar frescura.",
+          "regression": {
+            "file": "tests/empire-order-pipeline.test.cjs",
+            "name": "pipeline ship: synchronous-click preserves the first post-order census"
+          }
+        },
+        {
+          "scenario": "Reconexión con mensajes tardíos de la generación anterior.",
+          "expected": "El stock depende del censo actual; la generación antigua no recupera autoridad.",
+          "regression": {
+            "file": "tests/empire-order-pipeline.test.cjs",
+            "name": "pipeline: reconnect ignores late old-generation frames and HUD ACK waits for the new complete init"
+          }
+        },
+        {
+          "scenario": "Cambio de cuenta con una orden simulada pendiente y vuelta a la cuenta inicial.",
+          "expected": "Ninguna cifra ni permiso utiliza propiedad del ámbito anterior; se exige evidencia actual.",
+          "regression": {
+            "file": "tests/empire-order-pipeline.test.cjs",
+            "name": "pipeline: account/scope change cannot reuse pending ownership, and returning requires current account evidence"
+          }
+        },
+        {
+          "scenario": "Delta duplicado y entrega repetida del mismo DTO.",
+          "expected": "No se duplican naves ni se refresca la edad por releerlo; los mensajes caducan en el límite real.",
+          "regression": {
+            "file": "tests/empire-order-pipeline.test.cjs",
+            "name": "pipeline: duplicate native deltas replace inventory instead of double counting, while duplicate DTO delivery never refreshes age"
+          }
+        },
+        {
+          "scenario": "HUD múltiple, ajeno o no coincidente aunque haya censo completo.",
+          "expected": "La guarda de pedidos permanece cerrada y el estado operativo no se sustituye por el resumen de stock.",
+          "regression": {
+            "file": "tests/empire-order-pipeline.test.cjs",
+            "name": "pipeline: missing/ambiguous live HUD ownership never becomes ready despite a complete native census"
+          }
+        },
+        {
+          "scenario": "setConfig cambia objetivos, roles o Atender y render se ejecuta antes del siguiente update, conservando el plan anterior.",
+          "expected": "El reparto retenido no se muestra mientras ready sea falso; el stock actual sigue visible y el siguiente update presenta solo las asignaciones de la configuración nueva.",
+          "regression": {
+            "file": "tests/empire-order-pipeline.test.cjs",
+            "name": "pipeline: immediate config edits hide retained allocations until runtime recalculates goals, roles and Atender"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Brave/Violentmonkey con partida real y Drive",
+          "reason": "No se ejecutó una sesión real ni se enviaron pedidos. El DOM y el tráfico de integración son sintéticos; no validan distribución visual, accesibilidad o comportamiento de la cuenta real."
+        },
+        {
+          "scope": "Causa de las capturas del reporte",
+          "reason": "Son capturas de instantes/sistemas distintos sin respuesta nativa completa, roles ni secuencia temporal. La explicación de objetivos cubiertos es compatible, no una atribución definitiva."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Reproducir la ausencia de UI en los bytes de 1.16.1 con los tres tests finales sin cambios y distinguir ese fallo de las reglas de producción ya correctas.",
+        "Verificar que las cifras dependen de aggregate actual, scope, roster, propiedad y frescura, no de un plan retenido; contrastar los casos de censo reutilizado, desconexión y barrera de pedido.",
+        "Revisar que errores y pausas no se sustituyen por objetivos cubiertos, que los borradores enfocados no se presentan como guardados y que los productores coinciden con la normalización del core.",
+        "Comparar bytes del planner, runtime, observador, adaptador, puente, Drive y frontera de teclado con 1.16.1; no hay cambios de permisos, navegación, captura, telemetría, consentimiento ni reglas de pedidos.",
+        "Revisar las pruebas y los gaps de integración real antes de publicar; el gate completo del commit final no sustituye una revisión independiente.",
+        "Reproducir la secuencia real setConfig → render → update: el runtime conserva plan pero revoca ready. La UI debe ocultar ese reparto sin ocultar stock verificado y recuperarlo al recalcular; no basta con el harness que rehace plan en cada lectura."
+      ]
     }
   ]
 }
