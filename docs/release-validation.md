@@ -20,7 +20,7 @@ No sobrescribe un informe existente. No acepta listas de tests, filtros ni opcio
 
 ## Preparar el árbol final
 
-1. Termina los cambios y sus pruebas de regresión. Si cambia un módulo embebido, ejecuta su builder correspondiente antes de guardar el commit. Un builder que «repare» un artefacto durante la validación es un fallo de la candidata, no una aprobación.
+1. Termina los cambios y sus pruebas de regresión. Convierte el feedback reproducible en una entrada de `docs/review-feedback.json` siguiendo el ciclo de revisión de abajo. Si cambia un módulo embebido, ejecuta su builder correspondiente antes de guardar el commit. Un builder que «repare» un artefacto durante la validación es un fallo de la candidata, no una aprobación.
 2. Comprueba la versión de los dos metadatos, `SCRIPT_VERSION`, las notas integradas y README cuando cambie el userscript distribuido. Un cambio exclusivo de herramientas/documentación puede conservar la versión y los bytes del Helper.
 3. Guarda todos los archivos relevantes en un commit. No deben quedar cambios locales ni archivos nuevos fuera de Git. Esto evita probar silenciosamente una selección diferente de la que se va a publicar.
 4. Ejecuta el gate completo, sin filtros de pruebas ni variables de sustitución de fuentes. Guarda el informe fuera del repositorio si necesitas conservarlo. Si algo falla, corrige, crea el nuevo commit final y vuelve a ejecutar el gate completo.
@@ -31,6 +31,7 @@ El reporte utiliza resúmenes estructurados por archivo y global del [test runne
 
 - Inventario recursivo de todas las entradas `*.test.cjs`, sin seleccionar solo las pruebas de la función modificada. Se rechazan entradas `*.test.js`, `*.test.mjs`, `*.test.ts`, `*.test.cts`, `*.test.mts`, `*.test.jsx` y `*.test.tsx` no soportadas para que no queden silenciosamente fuera de la suite. Node 24 puede ejecutar TypeScript, pero este gate solo admite `*.test.cjs`; añadir otro formato requiere integrarlo expresamente en el inventario y sus controles.
 - Suite completa sin fallos, cancelaciones, pruebas omitidas, TODO ni resultados vacíos o incompletos. Un código de salida cero por sí solo no basta.
+- Manifiesto de feedback obligatorio y versionado: esquema estricto, enlaces a evidencia y tests seguidos por Git, escenarios límite y criterios para la revisión independiente. Cada caso enlazado debe generar exactamente un evento real `test:pass` del archivo y nombre indicados. No valen una suite, un nombre duplicado ni texto de consola que imite un resultado.
 - Sintaxis de todos los archivos `*.js` y `*.cjs` del inventario, incluido el archivo de la prueba de navegador sin ejecutarla.
 - Coherencia de los metadatos del userscript y del archivo `.meta.js`, `SCRIPT_VERSION` y la primera entrada de las notas integradas.
 - Los cuatro builders en una copia temporal, dos pasadas; cada ejecución debe conservar los artefactos ya preparados. No se actualiza el checkout original para hacer que una prueba pase.
@@ -38,6 +39,37 @@ El reporte utiliza resúmenes estructurados por archivo y global del [test runne
 - Informe explícito del alcance offline. Las pruebas de navegador quedan identificadas como no ejecutadas, nunca contadas como aprobadas.
 
 Los archivos cacheados de Pages pueden conservar versiones anteriores si no han cambiado. Por ejemplo, en 1.15.1 `drive.js`, `sync-core.js` y `drive.css` llevan versiones diferentes. Revisar que un recurso modificado invalide correctamente su caché sigue formando parte de la revisión del diff.
+
+## Convertir feedback en controles duraderos
+
+Con cada fallo reproducible o hueco de revisión detectado:
+
+1. Identifica el comportamiento observado, su alcance y el árbol anterior. Conserva un caso que falle antes de corregirlo y anota el comando y el fallo concreto en una evidencia Markdown seguida por Git. No confundas una avería del harness con la reproducción del comportamiento.
+2. Corrige y ejecuta ese mismo caso. Añade límites realistas a ambos lados de la guarda: el flujo que debe bloquearse y el flujo legítimo que debe seguir funcionando. Incluye el orden de eventos y otras superficies afectadas cuando importen.
+3. Añade una entrada a `docs/review-feedback.json` y conserva las anteriores. Los nombres enlazados son exactos y deben ser únicos dentro de su archivo; al renombrar un test, actualiza también sus referencias. Una eliminación de cobertura exige revisar y justificar la sustitución, no borrar el registro para poner el gate en verde.
+4. Especifica los gaps pendientes y criterios concretos que otro revisor pueda contrastar contra el diff, los escenarios y la evidencia. Si un informe no se reproduce, anótalo como límite en la matriz; no inventes un fallo previo ni cierres su incertidumbre por tener una suite verde.
+5. Revisa de forma independiente el árbol final y ejecuta el gate completo sobre su commit limpio. Las correcciones posteriores invalidan el resultado anterior y requieren volver a validar.
+
+El esquema versión 1 exige un objeto con `schemaVersion: 1` y un array `entries` no vacío. Cada entrada contiene exactamente:
+
+- `id`: slug único en minúsculas, y `feedback`: descripción del fallo o hueco de control.
+- `beforeFail`: `revision` (ID Git completo de commit o árbol), `command`, `observedFailure` y `evidence` (ruta a un Markdown seguido por Git; puede incluir un fragmento). El registro explica cómo se conservó el mismo harness al probar el árbol anterior.
+- `regressions`: uno o más objetos `{ "file": "tests/archivo.test.cjs", "name": "nombre exacto del caso" }`.
+- `boundaries`: uno o más objetos con `scenario`, `expected` y `regression`; este último debe ser una referencia de `regressions` de la propia entrada.
+- `qaGaps`: array explícito de objetos `scope` y `reason`. `[]` significa que no se conocen gaps específicos de esa entrada; no elimina las limitaciones offline del gate.
+- `independentReviewCriteria`: array no vacío de criterios concretos de revisión, no una declaración de aprobación.
+
+Se rechazan campos desconocidos, textos vacíos, IDs repetidos, enlaces no seguidos, casos no inventariados y referencias de límites que no estén en la propia entrada. El informe distingue `feedbackManifest.scope: schema-and-tracked-links-only` de `tests.regressionPasses`, la evidencia de ejecución actual vinculada al commit y hashes del informe. La presencia de un registro histórico no demuestra automáticamente que el fallo previo sucediera, que el escenario sea realista o que un revisor lo haya aprobado. Estas tres cosas requieren inspección independiente. Tampoco se vuelve a ejecutar código histórico ni comandos guardados en el JSON.
+
+### Regresión del propio control de feedback
+
+Se reprodujo la ausencia de este control con el validador del árbol `7529a0d4f798ddf2995c4f8d6ddd41200916d974` (commit local equivalente `90bc8f9acbeb805356faf11657da65ae9724e46d`). En un directorio temporal se colocaron ese `validate-release.cjs` y el nuevo `tests/release-validation.test.cjs`, conservando el test nuevo sin cambios, y se ejecutó:
+
+```sh
+node --test --test-name-pattern='CLI fails closed on missing or malformed feedback' /ruta/temporal/tests/release-validation.test.cjs
+```
+
+El caso esperaba que el CLI rechazara un manifiesto ausente. El validador anterior devolvió éxito y el test falló con `0 !== 1`. Ese filtro sirve únicamente para el experimento antes/después; no es una validación de publicación. Con el validador corregido se comprueban además JSON malformado, referencias inexistentes, casos no ejecutados, nombres ambiguos, suites y falsas afirmaciones impresas. La aprobación actual solo queda establecida por el gate completo del árbol final.
 
 ## Lo que requiere revisión antes de publicar
 

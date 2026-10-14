@@ -12,6 +12,7 @@ const { spawnSync, spawn } = require('node:child_process');
 const BUILDERS = ['build-sync.cjs', 'build-empire.cjs', 'build-drive.cjs', 'build-metrics.cjs'];
 const USER_SCRIPT = 'old-light-auto-upgrade.user.js';
 const META_SCRIPT = 'old-light-auto-upgrade.meta.js';
+const FEEDBACK_MANIFEST = 'docs/review-feedback.json';
 const activeGroups = new Map();
 const UNSAFE_ENV = /^(?:QA_|OLD_LIGHT_|NODE_OPTIONS$|NODE_PATH$|NODE_TEST_|NODE_V8_COVERAGE$)/;
 const hash = (value, algorithm = 'sha256') => crypto.createHash(algorithm).update(value).digest('hex');
@@ -24,7 +25,7 @@ const assert = (condition, message) => { if (!condition) throw new Error(message
 // reporter JSON, so a console.log cannot masquerade as a successful summary.
 async function* reporter(events) {
   for await (const event of events) {
-    if (event.type === 'test:summary' || event.type === 'test:fail'
+    if (event.type === 'test:summary' || event.type === 'test:fail' || event.type === 'test:pass'
       || (event.type === 'test:diagnostic' && event.data.message === "'only' and 'runOnly' require the --test-only command-line option.")) {
       yield JSON.stringify(event, (_, value) => value instanceof Error
         ? { message: value.message, code: value.code, failureType: value.failureType } : value) + '\n';
@@ -193,9 +194,69 @@ function versionCheck(root) {
   assert(meta.replace(/\r?\n$/, '') === metaMeta.header, 'Meta file must contain only the metadata header and an optional final newline.');
   return versions;
 }
-function parseTests(stdout, files, snapshot) {
+// This validates recorded review evidence, not the truth of a historical claim
+// or the quality/completion of independent review. Current regression execution
+// is checked separately against runner events for this exact candidate tree.
+function parseFeedback(manifest, names, testFiles) {
+  const object = (value, keys, label) => {
+    assert(value && typeof value === 'object' && !Array.isArray(value)
+      && same(Object.keys(value).sort(), [...keys].sort()), `Invalid feedback ${label} fields.`);
+  };
+  const text = (value, label) => assert(typeof value === 'string' && value.trim().length > 0,
+    `Invalid feedback ${label}: expected nonempty text.`);
+  const list = (value, label, allowEmpty = false) => assert(Array.isArray(value) && (allowEmpty || value.length > 0),
+    `Invalid feedback ${label}: expected ${allowEmpty ? 'an' : 'a nonempty'} array.`);
+  const reference = (value, label) => {
+    object(value, ['file', 'name'], label);
+    text(value.file, `${label} file`); text(value.name, `${label} test name`);
+    safePath(value.file);
+    assert(names.includes(value.file) && testFiles.includes(value.file),
+      `Feedback regression must name an inventoried tracked *.test.cjs file: ${value.file}`);
+    return JSON.stringify([value.file, value.name]);
+  };
+  object(manifest, ['schemaVersion', 'entries'], 'manifest');
+  assert(manifest.schemaVersion === 1, 'Unsupported feedback schemaVersion.');
+  list(manifest.entries, 'entries');
+  const ids = new Set(), regressions = new Map();
+  for (const entry of manifest.entries) {
+    object(entry, ['id', 'feedback', 'beforeFail', 'regressions', 'boundaries', 'qaGaps', 'independentReviewCriteria'], 'entry');
+    assert(typeof entry.id === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(entry.id) && !ids.has(entry.id),
+      'Feedback entry IDs must be unique lowercase slugs.');
+    ids.add(entry.id); text(entry.feedback, 'description');
+    object(entry.beforeFail, ['revision', 'command', 'observedFailure', 'evidence'], 'beforeFail');
+    assert(typeof entry.beforeFail.revision === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(entry.beforeFail.revision),
+      'Feedback beforeFail revision must be a full Git commit/tree object ID.');
+    for (const key of ['command', 'observedFailure', 'evidence']) text(entry.beforeFail[key], `beforeFail ${key}`);
+    const evidencePath = entry.beforeFail.evidence.split('#')[0];
+    safePath(evidencePath);
+    assert(names.includes(evidencePath) && /\.md$/.test(evidencePath),
+      `Feedback beforeFail evidence must reference a tracked Markdown record: ${evidencePath}`);
+    list(entry.regressions, 'regressions');
+    const linked = new Set();
+    for (const regression of entry.regressions) {
+      const key = reference(regression, 'regression');
+      assert(!linked.has(key), `Duplicate feedback regression in ${entry.id}.`);
+      linked.add(key); regressions.set(key, regression);
+    }
+    list(entry.boundaries, 'boundaries');
+    for (const boundary of entry.boundaries) {
+      object(boundary, ['scenario', 'expected', 'regression'], 'boundary');
+      text(boundary.scenario, 'boundary scenario'); text(boundary.expected, 'boundary expected result');
+      assert(linked.has(reference(boundary.regression, 'boundary regression')),
+        `Feedback boundary must link a regression from its own entry: ${entry.id}`);
+    }
+    list(entry.qaGaps, 'qaGaps', true);
+    for (const gap of entry.qaGaps) {
+      object(gap, ['scope', 'reason'], 'QA gap'); text(gap.scope, 'QA scope'); text(gap.reason, 'QA reason');
+    }
+    list(entry.independentReviewCriteria, 'independentReviewCriteria');
+    for (const criterion of entry.independentReviewCriteria) text(criterion, 'independent review criterion');
+  }
+  return { manifest, regressions: [...regressions.values()] };
+}
+function parseTests(stdout, files, snapshot, regressions = []) {
   const records = stdout.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
-  assert(records.every(record => record && ['test:summary', 'test:fail', 'test:diagnostic'].includes(record.type) && record.data), 'Invalid test reporter record.');
+  assert(records.every(record => record && ['test:summary', 'test:fail', 'test:pass', 'test:diagnostic'].includes(record.type) && record.data), 'Invalid test reporter record.');
   const summaries = records.filter(record => record.type === 'test:summary').map(record => record.data);
   const globals = summaries.filter(summary => summary.file === undefined);
   assert(globals.length === 1, 'Incomplete test report: expected exactly one global summary.');
@@ -217,12 +278,21 @@ function parseTests(stdout, files, snapshot) {
   }
   assert(!records.some(record => record.type === 'test:diagnostic'), 'Focused test source/options are not allowed.');
   assert(!records.some(record => record.type === 'test:fail'), 'A test failure was reported.');
-  return { counts: globals[0].counts, durationMs: globals[0].duration_ms,
+  const regressionPasses = regressions.map(regression => {
+    const passes = records.filter(record => record.type === 'test:pass' && record.data.name === regression.name
+      && record.data.details?.type === 'test' && !record.data.skip && !record.data.todo
+      && typeof record.data.file === 'string'
+      && path.relative(snapshot, record.data.file).split(path.sep).join('/') === regression.file);
+    assert(passes.length === 1, `Feedback regression must execute exactly once and pass: ${regression.file} :: ${regression.name}`);
+    return { ...regression, status: 'passed' };
+  });
+  return { counts: globals[0].counts, durationMs: globals[0].duration_ms, regressionPasses,
     files: perFile.map(summary => ({ path: path.relative(snapshot, summary.file).split(path.sep).join('/'), counts: summary.counts })) };
 }
 // Export narrow pure checks for malformed-report regressions, without adding
 // a CLI escape hatch that can replace the real test command or input files.
 module.exports.parseTests = parseTests;
+module.exports.parseFeedback = parseFeedback;
 
 async function main() {
   const started = new Date().toISOString();
@@ -230,11 +300,12 @@ async function main() {
     node: process.version, platform: process.platform, stages: {}, errors: [],
     limitations: ['No real browser, game, OAuth or network validation.',
       'No independent reviewer approval, remote state/lease verification or publication authorization.',
+      'Feedback before-fail records and review criteria are recorded claims; only current linked regression passes are checked automatically.',
       'Temporary copies isolate normal writes; trusted repository code is executed, not security-sandboxed.',
       'Process groups clean ordinary descendants on failure, timeout, SIGINT and SIGTERM; SIGKILL of this gate cannot be cleaned up.',
       'Asset cache query versions require separate changed-asset review; they need not equal the release version.'] };
-  for (const name of ['preflight', 'snapshot', 'versions', 'syntax', 'tests', 'builders', 'finalIntegrity']) report.stages[name] = { status: 'not-run' };
-  let root, env, input, temporary, snapshot, reportPath, reportParent, active = 'preflight';
+  for (const name of ['preflight', 'snapshot', 'versions', 'feedbackManifest', 'syntax', 'tests', 'builders', 'finalIntegrity']) report.stages[name] = { status: 'not-run' };
+  let root, env, input, temporary, snapshot, reportPath, reportParent, feedback, active = 'preflight';
   let interrupted = null;
   const signalHandlers = Object.fromEntries(['SIGINT', 'SIGTERM'].map(signal => [signal, () => {
     interrupted = signal;
@@ -309,6 +380,15 @@ async function main() {
     const names = input.files.map(file => file.path);
     const syntaxFiles = names.filter(name => /\.(?:js|cjs)$/.test(name));
     const testFiles = names.filter(name => name.endsWith('.test.cjs'));
+    await stage('feedbackManifest', () => {
+      assert(testFiles.length > 0, 'No tracked *.test.cjs files were found.');
+      assert(names.includes(FEEDBACK_MANIFEST), `Required tracked feedback manifest missing: ${FEEDBACK_MANIFEST}`);
+      feedback = parseFeedback(JSON.parse(fs.readFileSync(path.join(snapshot, FEEDBACK_MANIFEST), 'utf8')), names, testFiles);
+      return { path: FEEDBACK_MANIFEST, schemaVersion: feedback.manifest.schemaVersion,
+        entryCount: feedback.manifest.entries.length, regressionCount: feedback.regressions.length,
+        scope: 'schema-and-tracked-links-only', independentReview: 'required-separately',
+        qaGaps: feedback.manifest.entries.map(({ id, qaGaps }) => ({ id, qaGaps })) };
+    });
     report.notRun = names.filter(name => name.endsWith('.browser.cjs')).map(name => ({ path: name, reason: 'Requires separate real-browser validation.' }));
     await stage('syntax', async () => {
       for (const name of syntaxFiles) requireSuccess(await nodeChild(['--check', path.join(snapshot, name)], snapshot, env), `Syntax ${name}`);
@@ -327,7 +407,7 @@ async function main() {
       } catch { report.stages.tests.reporterOutputTail = result.stdout.slice(-4000); }
       unchanged();
       requireSuccess(result, 'Complete test suite');
-      const details = parseTests(result.stdout, testFiles, snapshot);
+      const details = parseTests(result.stdout, testFiles, snapshot, feedback.regressions);
       return { ...report.stages.tests, status: 'passed', ...details };
     });
     await stage('builders', async () => {

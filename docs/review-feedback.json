@@ -1,0 +1,321 @@
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "id": "helper-shadow-keyboard-isolation",
+      "feedback": "Escribir G en Nombre exacto de jugadores protegidos abría el mapa galáctico. La revisión anterior no modelaba retargeting de Shadow DOM ni la interacción con listeners globales y liberación de teclas.",
+      "beforeFail": {
+        "revision": "90bc8f9acbeb805356faf11657da65ae9724e46d",
+        "command": "QA_HELPER_KEYBOARD_SOURCE=/tmp/oldlight-keyboard-baseline.user.js node --test tests/helper-keyboard-boundary.test.cjs",
+        "observedFailure": "Con el mismo harness y los bytes anteriores guardados desde git show HEAD, el caso de G obtiene ['galaxy-map'] en vez de []. La suite termina con exit 1: 8 aprobadas, 15 fallidas, 0 omitidas. El archivo base tiene SHA-256 8c4d0cd93804ecfa02343651c3796297a3d9cb1feaf9f6238b70eb41704350c2.",
+        "evidence": "docs/1.16.1-validation-matrix.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/helper-keyboard-boundary.test.cjs",
+          "name": "typing G in Helper shadow input does not trigger the native galaxy-map shortcut"
+        },
+        {
+          "file": "tests/helper-keyboard-boundary.test.cjs",
+          "name": "production wiring installs at all four ShadowRoots and both Helper dialog roots"
+        },
+        {
+          "file": "tests/helper-keyboard-boundary.test.cjs",
+          "name": "all Helper control types contain keydown without suppressing target handlers or defaults"
+        },
+        {
+          "file": "tests/helper-keyboard-boundary.test.cjs",
+          "name": "stopPropagation preserves earlier and later same-root handlers and target-to-root order"
+        },
+        {
+          "file": "tests/helper-keyboard-boundary.test.cjs",
+          "name": "explicit limitation: arbitrary earlier capture handlers still observe Helper keyboard events"
+        },
+        {
+          "file": "tests/helper-keyboard-boundary.test.cjs",
+          "name": "keypress is contained but keyup and non-keyboard input events remain observable"
+        },
+        {
+          "file": "tests/helper-keyboard-boundary.test.cjs",
+          "name": "Ctrl/Cmd editing chords, navigation and selection keep their default callbacks"
+        },
+        {
+          "file": "tests/helper-keyboard-boundary.test.cjs",
+          "name": "IME composition and input payloads pass unchanged while composing keydowns are contained"
+        },
+        {
+          "file": "tests/helper-keyboard-boundary.test.cjs",
+          "name": "actual bindPointerDrag Escape cancellation survives the Helper bubble boundary"
+        },
+        {
+          "file": "tests/helper-keyboard-boundary.test.cjs",
+          "name": "native WASD release is preserved when focus moves from game into Helper"
+        },
+        {
+          "file": "tests/helper-keyboard-boundary.test.cjs",
+          "name": "events outside Helper retain native shortcuts and the native editable-target guard"
+        },
+        {
+          "file": "tests/helper-keyboard-boundary.test.cjs",
+          "name": "dynamic controls, remounts and duplicate installation retain one boundary per root"
+        },
+        {
+          "file": "tests/helper-keyboard-boundary.test.cjs",
+          "name": "independent popup ShadowRoots and light-DOM dialog controls are contained"
+        },
+        {
+          "file": "tests/helper-keyboard-boundary.test.cjs",
+          "name": "actual Shift menu navigation handlers still run after the same-root keyboard boundary"
+        },
+        {
+          "file": "tests/helper-keyboard-boundary.test.cjs",
+          "name": "actual Shift menu slot guards preserve all 1-8 protections after the boundary"
+        },
+        {
+          "file": "tests/helper-keyboard-boundary.test.cjs",
+          "name": "actual Shift window capture handler cancels Escape before the Helper boundary"
+        },
+        {
+          "file": "tests/helper-keyboard-boundary.test.cjs",
+          "name": "actual Shift capture handler preserves ownership and replay checks without leaking Helper keys"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "G nace en INPUT dentro del ShadowRoot y llega al host como DIV para observadores externos.",
+          "expected": "No se activa galaxy-map, el handler local se ejecuta y el default de inserción simulado queda permitido.",
+          "regression": {
+            "file": "tests/helper-keyboard-boundary.test.cjs",
+            "name": "typing G in Helper shadow input does not trigger the native galaxy-map shortcut"
+          }
+        },
+        {
+          "scenario": "El panel principal, menú Shift, editor y oferta usan raíces independientes; hay dos diálogos adicionales.",
+          "expected": "Cada punto de montaje de producción instala la frontera correspondiente.",
+          "regression": {
+            "file": "tests/helper-keyboard-boundary.test.cjs",
+            "name": "production wiring installs at all four ShadowRoots and both Helper dialog roots"
+          }
+        },
+        {
+          "scenario": "INPUT, TEXTAREA, contenteditable, SELECT, BUTTON y DIV enfocable reciben letras, navegación y activación.",
+          "expected": "Se contiene keydown sin preventDefault; siguen ejecutándose handlers locales y callbacks de default simulados.",
+          "regression": {
+            "file": "tests/helper-keyboard-boundary.test.cjs",
+            "name": "all Helper control types contain keydown without suppressing target handlers or defaults"
+          }
+        },
+        {
+          "scenario": "Hay handlers de destino, formulario y raíz registrados antes y después de la frontera.",
+          "expected": "Conservan su orden y ejecución; no se usa stopImmediatePropagation ni preventDefault.",
+          "regression": {
+            "file": "tests/helper-keyboard-boundary.test.cjs",
+            "name": "stopPropagation preserves earlier and later same-root handlers and target-to-root order"
+          }
+        },
+        {
+          "scenario": "Un listener de captura anterior observa eventos retargeteados antes de la burbuja.",
+          "expected": "La prueba conserva esta limitación explícita: solo se contiene el atajo nativo conocido en burbuja.",
+          "regression": {
+            "file": "tests/helper-keyboard-boundary.test.cjs",
+            "name": "explicit limitation: arbitrary earlier capture handlers still observe Helper keyboard events"
+          }
+        },
+        {
+          "scenario": "Se alternan keypress, keyup, beforeinput, input, change y click en un campo Helper.",
+          "expected": "Solo keypress se contiene; liberación e input siguen observables fuera del Helper.",
+          "regression": {
+            "file": "tests/helper-keyboard-boundary.test.cjs",
+            "name": "keypress is contained but keyup and non-keyboard input events remain observable"
+          }
+        },
+        {
+          "scenario": "El usuario selecciona, copia, pega, borra o navega con Ctrl/Cmd y Shift.",
+          "expected": "La frontera permite callbacks simulados de edición y no altera el valor del control.",
+          "regression": {
+            "file": "tests/helper-keyboard-boundary.test.cjs",
+            "name": "Ctrl/Cmd editing chords, navigation and selection keep their default callbacks"
+          }
+        },
+        {
+          "scenario": "Una composición IME emite payloads y keydowns Process, Unidentified y g con keyCode 229.",
+          "expected": "Los payloads y flags permanecen intactos; se contiene keydown sin cancelar defaults.",
+          "regression": {
+            "file": "tests/helper-keyboard-boundary.test.cjs",
+            "name": "IME composition and input payloads pass unchanged while composing keydowns are contained"
+          }
+        },
+        {
+          "scenario": "Un arrastre Helper está activo y Escape nace dentro del campo protegido.",
+          "expected": "La función real de arrastre cancela en captura una sola vez y libera pointer capture.",
+          "regression": {
+            "file": "tests/helper-keyboard-boundary.test.cjs",
+            "name": "actual bindPointerDrag Escape cancellation survives the Helper bubble boundary"
+          }
+        },
+        {
+          "scenario": "Una tecla WASD se pulsa sobre el juego y se suelta después de enfocar el Helper.",
+          "expected": "keyup sale de la frontera y elimina la tecla del conjunto retenido de la fixture nativa.",
+          "regression": {
+            "file": "tests/helper-keyboard-boundary.test.cjs",
+            "name": "native WASD release is preserved when focus moves from game into Helper"
+          }
+        },
+        {
+          "scenario": "G o Escape nacen fuera del Helper, o en un editable nativo.",
+          "expected": "El juego conserva sus atajos y su guarda de editables; el aislamiento no se vuelve global.",
+          "regression": {
+            "file": "tests/helper-keyboard-boundary.test.cjs",
+            "name": "events outside Helper retain native shortcuts and the native editable-target guard"
+          }
+        },
+        {
+          "scenario": "Se crean campos dinámicos, se remonta el host y se solicita varias veces la instalación.",
+          "expected": "Cada raíz mantiene una sola frontera, cubre nuevos campos y no atrapa keyup.",
+          "regression": {
+            "file": "tests/helper-keyboard-boundary.test.cjs",
+            "name": "dynamic controls, remounts and duplicate installation retain one boundary per root"
+          }
+        },
+        {
+          "scenario": "Botones o inputs pertenecen a popups separados o a un diálogo Helper en DOM ligero.",
+          "expected": "Las raíces adicionales contienen sus keydowns sin depender de la raíz principal.",
+          "regression": {
+            "file": "tests/helper-keyboard-boundary.test.cjs",
+            "name": "independent popup ShadowRoots and light-DOM dialog controls are contained"
+          }
+        },
+        {
+          "scenario": "ArrowUp, ArrowDown, Home y End en el menú Shift con el handler real registrado después de la frontera.",
+          "expected": "Se conserva el foco y scroll local sin atajo nativo de burbuja.",
+          "regression": {
+            "file": "tests/helper-keyboard-boundary.test.cjs",
+            "name": "actual Shift menu navigation handlers still run after the same-root keyboard boundary"
+          }
+        },
+        {
+          "scenario": "Teclas 1–8 del menú Shift con handlers reales y listener posterior en la misma raíz.",
+          "expected": "El guard original sigue cancelando defaults y propagación inmediata; no se envía ninguna flota.",
+          "regression": {
+            "file": "tests/helper-keyboard-boundary.test.cjs",
+            "name": "actual Shift menu slot guards preserve all 1-8 protections after the boundary"
+          }
+        },
+        {
+          "scenario": "Escape con menú Shift abierto, listener real de captura anterior a la burbuja.",
+          "expected": "Se ejecuta la cancelación existente antes de la frontera, sin duplicarla.",
+          "regression": {
+            "file": "tests/helper-keyboard-boundary.test.cjs",
+            "name": "actual Shift window capture handler cancels Escape before the Helper boundary"
+          }
+        },
+        {
+          "scenario": "Captura Shift con foco dentro/fuera del menú y eventos de replay simulados.",
+          "expected": "Los controles de pertenencia/replay existentes permanecen operativos sin fuga de G al atajo nativo.",
+          "regression": {
+            "file": "tests/helper-keyboard-boundary.test.cjs",
+            "name": "actual Shift capture handler preserves ownership and replay checks without leaking Helper keys"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Brave/Violentmonkey y sesión real con Drive",
+          "reason": "No se ejecutó integración real ni acciones en la partida. El navegador cloud no pudo alcanzar localhost y la ruta data: fue rechazada por política; no se intentó eludir la restricción."
+        },
+        {
+          "scope": "IME, portapapeles, foco y defaults del sistema operativo",
+          "reason": "El harness offline simula la propagación y callbacks de defaults; no demuestra inserción real, composición del sistema, lectura de portapapeles ni accesibilidad de navegador."
+        },
+        {
+          "scope": "Captura nativa y futuros atajos",
+          "reason": "La guarda de burbuja no revierte listeners de captura anteriores. Nuevos atajos nativos en captura, acciones de keyup o portales adicionales requieren revisión."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Contrastar la fixture nativa con el bundle observado y su fase de registro; no atribuir a la sesión real del usuario una inspección que no se hizo.",
+        "Verificar que el caso de G falla por la acción galaxy-map con el mismo harness sobre los bytes anteriores, y pasa sobre el árbol final.",
+        "Inspeccionar todas las raíces y diálogos, handlers locales, captura previa y orden de registro; comprobar que no se cancela edición por defecto ni se bloquean atajos fuera del Helper.",
+        "Revisar especialmente la transición WASD juego → Helper → keyup y Escape durante arrastre; contener más fases sin esta revisión puede provocar movimiento retenido o romper cancelación.",
+        "Comprobar que los gaps de navegador/IME/Drive siguen explícitos y que los tests sintéticos no se presentan como QA de integración aprobada."
+      ]
+    },
+    {
+      "id": "feedback-to-regression-review",
+      "feedback": "El feedback debe mejorar también el proceso de review y control: una suite verde no obligaba a conservar la reproducción, cubrir límites ni enlazar los casos ejecutados con el fallo comunicado.",
+      "beforeFail": {
+        "revision": "7529a0d4f798ddf2995c4f8d6ddd41200916d974",
+        "command": "node --test --test-name-pattern='CLI fails closed on missing or malformed feedback' <temporary-fixture>/tests/release-validation.test.cjs",
+        "observedFailure": "El mismo test nuevo, ejecutado con el validate-release.cjs anterior, falla con 0 !== 1: el CLI anterior acepta una candidata sin docs/review-feedback.json. El experimento termina con exit 1.",
+        "evidence": "docs/release-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/release-validation.test.cjs",
+          "name": "CLI fails closed on missing or malformed feedback and regressions that did not execute"
+        },
+        {
+          "file": "tests/release-validation.test.cjs",
+          "name": "feedback after-pass evidence requires an exact executed test, not a suite, duplicate, or printed claim"
+        },
+        {
+          "file": "tests/release-validation.test.cjs",
+          "name": "feedback manifest rejects missing records, unknown fields and untracked regression or evidence links"
+        },
+        {
+          "file": "tests/release-validation.test.cjs",
+          "name": "CLI validates a recursive committed fixture and records all offline evidence"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Manifiesto ausente o malformado, o nombre de regresión que nunca se registra.",
+          "expected": "La candidata falla antes de ejecutar builders y no modifica el checkout.",
+          "regression": {
+            "file": "tests/release-validation.test.cjs",
+            "name": "CLI fails closed on missing or malformed feedback and regressions that did not execute"
+          }
+        },
+        {
+          "scenario": "El nombre existe solo como suite, en otro archivo, duplicado, omitido o como texto impreso que imita al reporter.",
+          "expected": "No se acredita una regresión aprobada sin un único evento real test:pass del caso enlazado.",
+          "regression": {
+            "file": "tests/release-validation.test.cjs",
+            "name": "feedback after-pass evidence requires an exact executed test, not a suite, duplicate, or printed claim"
+          }
+        },
+        {
+          "scenario": "Registro con campos desconocidos, evidencia no seguida, límites sin caso enlazado o criterios vacíos.",
+          "expected": "La validación del manifiesto rechaza el registro incompleto o ambiguo.",
+          "regression": {
+            "file": "tests/release-validation.test.cjs",
+            "name": "feedback manifest rejects missing records, unknown fields and untracked regression or evidence links"
+          }
+        },
+        {
+          "scenario": "Candidata válida con test anidado en un subdirectorio, evidencia seguida y nombre exacto ejecutado.",
+          "expected": "El gate pasa e informa límites, identidad de árbol y regresión aprobada sin atribuir aprobación independiente.",
+          "regression": {
+            "file": "tests/release-validation.test.cjs",
+            "name": "CLI validates a recursive committed fixture and records all offline evidence"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Veracidad histórica y calidad de revisión",
+          "reason": "El esquema comprueba presencia y vínculos; un revisor debe contrastar la reproducción documentada, el realismo de los límites y el diff. No se ejecutan comandos históricos del JSON."
+        },
+        {
+          "scope": "macOS",
+          "reason": "Los fixtures y limpieza de procesos se han probado en Linux con Node 24.19.0; macOS no se ha ejecutado aquí."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Contrastar la reproducción antes/después con el mismo harness y verificar que el fallo anterior proviene del comportamiento esperado, no de un error de preparación.",
+        "Comprobar que los enlaces exigen eventos reales del runner y que el manifiesto no sustituye los controles completos de suite, inventario, builders e integridad.",
+        "Revisar que los criterios y gaps no se presentan como aprobación independiente ni como prueba de integración real."
+      ]
+    }
+  ]
+}

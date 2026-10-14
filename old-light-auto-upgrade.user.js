@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.16.0
+// @version      1.16.1
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -2932,7 +2932,7 @@ return Object.freeze({create});
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.16.0';
+  const SCRIPT_VERSION = '1.16.1';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -4368,6 +4368,11 @@ return Object.freeze({create});
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.16.1', title: 'Teclado dentro del Helper', changes: [
+        'Escribir en los campos del Helper ya no propaga G y otros atajos al mapa. Cubre el panel, menús y diálogos propios sin cancelar la edición normal.',
+        'Conserva Tab, Enter, composición y atajos de edición. Soltar teclas sigue llegando al juego para liberar movimiento; Escape mantiene la cancelación del arrastre.',
+        'La revisión enlaza cada feedback con una reproducción, regresiones ejecutadas y límites explícitos. La comprobación real en Brave/Violentmonkey sigue pendiente.',
+      ] },
       { version: '1.16.0', title: 'Jugadores protegidos', changes: [
         'Añade una lista local por cuenta y galaxia para bloquear envíos automáticos hacia jugadores protegidos. Empieza sin configurar; no incluye a nadie al actualizar.',
         'Comprueba propietario y ámbito antes del clic final. Nombres sin ID o propiedad desconocida pausan envíos; Shift cancela saltos imperiales pendientes y el lector agrupa ráfagas sin retirar guardas.',
@@ -4494,12 +4499,29 @@ return Object.freeze({create});
   }
   // END HELPER CHANGELOG
 
+  // BEGIN HELPER KEYBOARD BOUNDARY
+  const helperKeyboardRoots = new WeakSet();
+  function installHelperKeyboardBoundary(root) {
+    if (helperKeyboardRoots.has(root)) return;
+    helperKeyboardRoots.add(root);
+    // Native global shortcuts see the DIV host, not the editable shadow target.
+    // Bubble only: preserve target handlers, browser editing defaults and the
+    // capture-phase interaction guards. Earlier capture listeners still run.
+    const contain = event => event.stopPropagation();
+    root.addEventListener('keydown', contain);
+    root.addEventListener('keypress', contain);
+    // Do not consume keyup: the native game uses it only to release held WASD.
+    // A game key pressed before focus entered Helper must still be released.
+  }
+  // END HELPER KEYBOARD BOUNDARY
+
   function mount() {
     if (host?.isConnected) return;
     if (!host) {
       host = document.createElement('div');
       host.id = HOST_ID;
       const shadow = host.attachShadow({ mode: 'open' });
+      installHelperKeyboardBoundary(shadow);
       shadow.innerHTML = `
         <style>
           :host { all:initial; position:fixed; right:12px; bottom:12px; z-index:2147483000; color-scheme:dark;
@@ -5608,7 +5630,7 @@ return Object.freeze({create});
     target.addEventListener('lostpointercapture', event => finish(false, event));
     document.addEventListener('keydown', event => {
       if (state && event.key === 'Escape') { event.preventDefault(); finish(false); }
-    });
+    }, true);
     document.addEventListener('visibilitychange', () => { if (document.hidden) finish(false); });
     window.addEventListener('blur', () => finish(false));
     return () => finish(false);
@@ -6930,6 +6952,7 @@ return Object.freeze({create});
       const host = document.createElement('div');
       host.id = MENU_ID;
       const shadow = host.attachShadow({ mode: 'open' });
+      installHelperKeyboardBoundary(shadow);
       shadow.innerHTML = `<style>
         :host{position:absolute;display:block;pointer-events:auto;width:236px;max-width:calc(100vw - 16px);box-sizing:border-box;border:1px solid var(--ol-border-strong,#456177);border-radius:var(--ol-radius,10px);background:var(--ol-bg,#0c141d);color:var(--ol-text,#e5eef6);box-shadow:0 12px 32px #0008;font:13px/1.45 system-ui,sans-serif;padding:10px;z-index:1;color-scheme:dark}
         *{box-sizing:border-box}h2{margin:0 0 8px;font-size:12px;color:var(--ol-muted,#a2b5c6);font-weight:600}
@@ -10552,6 +10575,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const focused = ui?.section.getRootNode().activeElement || document.activeElement;
     const dialog = document.createElement('dialog');
     dialog.id = 'oldlight-fleet-editor-dialog';
+    installHelperKeyboardBoundary(dialog);
     dialog.dataset.kind = kind;
     dialog.dataset.entityId = id;
     dialog.setAttribute('aria-label', kind === 'campaign' ? 'Editar flota de la campaña' : 'Editar flota de la misión');
@@ -10562,6 +10586,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const card = document.createElement('div');
     card.dataset.fleetEditorRoot = '';
     const root = card.attachShadow({ mode: 'open' });
+    installHelperKeyboardBoundary(root);
     root.innerHTML = `<style>
       :host{all:initial;display:block;font:13px/1.45 system-ui,sans-serif;color:#e5eef6;color-scheme:dark}
       *{box-sizing:border-box}form{margin:0;padding:16px}header{display:flex;align-items:center;justify-content:space-between;gap:10px}
@@ -10729,6 +10754,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     document.getElementById('oldlight-preset-shortage-dialog')?.remove();
     const dialog = document.createElement('dialog');
     dialog.id = 'oldlight-preset-shortage-dialog';
+    installHelperKeyboardBoundary(dialog);
     dialog.setAttribute('aria-label', 'Preparar misión pendiente');
     dialog.style.cssText = 'width:420px;max-width:calc(100vw - 24px);max-height:calc(100dvh - 24px);overflow:auto;'
       + 'box-sizing:border-box;padding:14px;border:1px solid #456177;border-radius:12px;background:#0c141d;color:#e5eef6;font:13px/1.45 system-ui,sans-serif;color-scheme:dark;box-shadow:0 16px 48px #0009';
@@ -10778,6 +10804,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const card = document.createElement('div');
     card.dataset.oldlightFleetOffer = '';
     const shadow = card.attachShadow({ mode: 'open' });
+    installHelperKeyboardBoundary(shadow);
     shadow.innerHTML = `<style>
       :host{display:block;margin:12px 0;color:var(--ol-text,#e5eef6);font:13px/1.45 system-ui,sans-serif;color-scheme:dark}
       *{box-sizing:border-box}.card{padding:14px;border:1px solid var(--ol-border,#2b4053);border-radius:var(--ol-radius,10px);background:var(--ol-surface,#131f2b)}

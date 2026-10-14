@@ -1,0 +1,35 @@
+<!doctype html><meta charset="utf-8"><title>Helper keyboard boundary: synthetic browser fixture</title>
+<style>body{font:16px system-ui;max-width:800px;margin:24px auto}button,input,textarea,select,[contenteditable]{font:inherit;margin:5px;padding:8px}output{display:block;white-space:pre-wrap;background:#eee;padding:12px}</style>
+<h1>Helper keyboard boundary</h1>
+<p>Offline synthetic controls. No game session. Native shortcut model: window bubble; editable target guard; keyup releases held movement.</p>
+<label><input type="checkbox" id="legacy"> Reproduce old unprotected boundary</label>
+<button id="remount">Remount Helper controls</button>
+<button id="game">Game area (G opens simulated map; W held movement)</button>
+<div id="mount"></div><output id="result" aria-live="polite">Loading production boundary…</output>
+<script>
+(async () => {
+ const source = await (await fetch('../old-light-auto-upgrade.user.js')).text();
+ const start=source.indexOf('  // BEGIN HELPER KEYBOARD BOUNDARY'),end=source.indexOf('  // END HELPER KEYBOARD BOUNDARY');
+ if(start<0||end<=start)throw Error('Missing production boundary');
+ const install=new Function(source.slice(start,end)+';return installHelperKeyboardBoundary;')();
+ const result=document.getElementById('result'),legacy=document.getElementById('legacy'),mount=document.getElementById('mount');
+ let map=0,other=0,targetKeys=0,captures=0,activations=0;const held=new Set();
+ function render(){result.textContent=JSON.stringify({mode:legacy.checked?'legacy':'fixed',map,other,targetKeys,captures,activations,held:[...held],active:document.activeElement?.shadowRoot?.activeElement?.id||document.activeElement?.id},null,2)}
+ // Registered before creating Helper boundary. Retargeting is done by Chromium.
+ window.addEventListener('keydown',e=>{const t=e.target;if(['INPUT','TEXTAREA'].includes(t.tagName)||t.isContentEditable)return;
+  if(e.ctrlKey||e.metaKey||e.altKey)return;const key=e.key.toLowerCase();if(key==='g'&&!e.repeat){map++;e.preventDefault();}if('wasd'.includes(key)&&key.length===1)held.add(key);if(['q','e','`'].includes(key))other++;render()});
+ window.addEventListener('keyup',e=>{held.delete(e.key.toLowerCase());render()});
+ document.addEventListener('keydown',()=>{captures++;render()},true);
+ function build(){map=other=targetKeys=captures=activations=0;held.clear();mount.replaceChildren();
+  const host=document.createElement('div');host.id='fixture-helper-host';const root=host.attachShadow({mode:'open'});
+  root.innerHTML='<style>:host{display:block;border:2px solid #237;padding:10px}input,textarea,select,button,[contenteditable]{display:block;margin:8px;padding:8px;font:inherit}</style><label>Name<input id="name" aria-label="Protected player name" placeholder="Exact name"></label><label>Notes<textarea id="notes" aria-label="Helper notes"></textarea></label><div id="rich" contenteditable="true" role="textbox" aria-label="Editable Helper notes">Draft</div><label>Role<select id="role" aria-label="Helper role"><option>Balanced</option><option>Industry</option></select></label><button id="action">Helper action</button><button id="add">Add new field</button>';
+  if(!legacy.checked)install(root);
+  root.addEventListener('keydown',()=>{targetKeys++;render()});
+  root.getElementById('action').onclick=()=>{activations++;render()};
+  root.getElementById('add').onclick=()=>{const input=document.createElement('input');input.id='dynamic';input.setAttribute('aria-label','Dynamic Helper field');root.append(input);input.focus();render()};
+  for(const type of ['input','change','focusin','focusout'])root.addEventListener(type,render);
+  mount.append(host);root.getElementById('name').focus();render();
+ }
+ legacy.onchange=build;document.getElementById('remount').onclick=build;build();
+})().catch(error=>document.getElementById('result').textContent='Fixture error: '+error.message);
+</script>

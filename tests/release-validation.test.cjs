@@ -8,7 +8,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync, spawn } = require('node:child_process');
-const { parseTests } = require('../validate-release.cjs');
+const { parseTests, parseFeedback } = require('../validate-release.cjs');
 const gateSource = fs.readFileSync(path.join(__dirname, '..', 'validate-release.cjs'));
 const builders = ['sync', 'empire', 'drive', 'metrics'].map(name => `build-${name}.cjs`);
 const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
@@ -22,6 +22,17 @@ function git(root, ...args) {
   assert.equal(result.status, 0, result.stderr);
   return result.stdout.trim();
 }
+function fixtureFeedback(name = 'fixture passes') {
+  const regression = { file: 'tests/nested/sample.test.cjs', name };
+  return { schemaVersion: 1, entries: [{ id: 'fixture-feedback', feedback: 'Fixture for the required review record.',
+    beforeFail: { revision: 'a'.repeat(40), command: 'node --test tests/nested/sample.test.cjs',
+      observedFailure: 'Recorded fixture failure before its correction.', evidence: 'docs/release-evidence.md' },
+    regressions: [regression],
+    boundaries: [{ scenario: 'Fixture boundary condition', expected: 'The asserted condition holds.', regression }],
+    qaGaps: [{ scope: 'Real browser', reason: 'This fixture executes only Node tests.' }],
+    independentReviewCriteria: ['Check the recorded failure and the behavior outside the corrected condition.'],
+  }] };
+}
 function fixture(t, edits = {}) {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'oldlight-gate-fixture-'));
   const root = path.join(parent, 'repo');
@@ -29,6 +40,8 @@ function fixture(t, edits = {}) {
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   const files = {
     'validate-release.cjs': gateSource,
+    'docs/review-feedback.json': JSON.stringify(fixtureFeedback()),
+    'docs/release-evidence.md': 'Synthetic fixture record. Not evidence for a real release.\n',
     'old-light-auto-upgrade.user.js': '// ==UserScript==\n// @version 1.15.1\n// ==/UserScript==\nconst SCRIPT_VERSION = \'1.15.1\';\nfunction helperChangelogEntries() { return [{ version: \'1.15.1\' }]; }\n',
     'old-light-auto-upgrade.meta.js': '// ==UserScript==\n// @version 1.15.1\n// ==/UserScript==\n',
     'tests/nested/sample.test.cjs': "const test = require('node:test'); test('fixture passes', () => {});\n",
@@ -78,6 +91,9 @@ test('CLI validates a recursive committed fixture and records all offline eviden
   assert.ok(report.input.files.every(file => /^[a-f0-9]{64}$/.test(file.sha256)));
   assert.deepEqual(report.stages.tests.files.map(file => file.path), ['tests/nested/sample.test.cjs']);
   assert.equal(report.stages.tests.counts.tests, 1);
+  assert.equal(report.stages.feedbackManifest.scope, 'schema-and-tracked-links-only');
+  assert.equal(report.stages.feedbackManifest.independentReview, 'required-separately');
+  assert.deepEqual(report.stages.tests.regressionPasses, [{ file: 'tests/nested/sample.test.cjs', name: 'fixture passes', status: 'passed' }]);
   assert.equal(report.stages.syntax.count, 10);
   assert.equal(report.stages.builders.runs.length, 8);
   assert.deepEqual(report.stages.builders.runs.map(run => run.builder), [...builders, ...builders]);
@@ -220,8 +236,10 @@ test('tracked symlinks and replacement directory symlinks are rejected', t => {
 
 test('source and Node environment overrides and focused CLI arguments are refused', t => {
   const { root } = fixture(t);
-  for (const name of ['QA_ATTACK_RETRY_SOURCE', 'OLD_LIGHT_PIPELINE_RUNTIME', 'NODE_OPTIONS', 'NODE_PATH', 'NODE_TEST_CONTEXT']) {
-    fails(root, /Unsafe inherited environment/, [], { [name]: name === 'NODE_OPTIONS' ? '--no-warnings' : 'unsafe-source' });
+  for (const name of ['QA_ATTACK_RETRY_SOURCE', 'QA_HELPER_KEYBOARD_SOURCE', 'OLD_LIGHT_PIPELINE_RUNTIME', 'NODE_OPTIONS', 'NODE_PATH', 'NODE_TEST_CONTEXT']) {
+    const report = fails(root, /Unsafe inherited environment/, [], { [name]: name === 'NODE_OPTIONS' ? '--no-warnings' : 'unsafe-source' });
+    assert.deepEqual(report.environment.rejectedNames, [name]);
+    assert.equal(JSON.stringify(report).includes('unsafe-source'), false, 'Rejected source values must not leak into the report');
   }
   for (const args of [['--test-only'], ['--test-name-pattern=one'], ['tests/nested/sample.test.cjs'], ['--report', '/tmp/example.json', '--test-only']]) {
     fails(root, /Only --report PATH/, args);
@@ -266,7 +284,8 @@ test('report parent replacement during checks cannot write into the input tree o
 
 test('benign diagnostic prose is allowed and executable metadata tails are refused', t => {
   const { root } = fixture(t, { 'tests/nested/sample.test.cjs':
-    "const t=require('node:test');t('diagnostic',context=>context.diagnostic('This fixture supports only one user.'));" });
+    "const t=require('node:test');t('diagnostic',context=>context.diagnostic('This fixture supports only one user.'));",
+    'docs/review-feedback.json': JSON.stringify(fixtureFeedback('diagnostic')) });
   const { result, report } = invoke(root);
   assert.equal(result.status, 0, JSON.stringify(report));
   const other = fixture(t, { 'old-light-auto-upgrade.meta.js':
@@ -406,4 +425,75 @@ test('structured report validation rejects duplicates, inconsistent totals and m
     assert.throws(() => parse(records), /Incomplete test report/);
   }
   assert.throws(() => parseTests('not JSON', [], '/snapshot'), SyntaxError);
+});
+
+
+test('feedback manifest rejects missing records, unknown fields and untracked regression or evidence links', () => {
+  const names = ['tests/nested/sample.test.cjs', 'docs/release-evidence.md'];
+  const parse = value => parseFeedback(value, names, ['tests/nested/sample.test.cjs']);
+  assert.equal(parse(fixtureFeedback()).regressions.length, 1);
+  const changes = [
+    value => { value.schemaVersion = 2; },
+    value => { value.entries = []; },
+    value => { value.extra = 'unknown schema field'; },
+    value => { value.entries.push(structuredClone(value.entries[0])); },
+    value => { value.entries[0].feedback = ' '; },
+    value => { value.entries[0].beforeFail.revision = 'short-hash'; },
+    value => { value.entries[0].beforeFail.command = ''; },
+    value => { value.entries[0].beforeFail.observedFailure = ''; },
+    value => { value.entries[0].beforeFail.evidence = 'missing.md'; },
+    value => { value.entries[0].beforeFail.evidence = '../outside.md'; },
+    value => { value.entries[0].regressions = []; },
+    value => { value.entries[0].regressions[0].file = 'tests/missing.test.cjs'; },
+    value => { value.entries[0].regressions[0].file = 'docs/release-evidence.md'; },
+    value => { value.entries[0].regressions[0].name = ''; },
+    value => { value.entries[0].regressions.push({ ...value.entries[0].regressions[0] }); },
+    value => { value.entries[0].boundaries = []; },
+    value => { value.entries[0].boundaries[0].scenario = ''; },
+    value => { value.entries[0].boundaries[0].expected = ''; },
+    value => { value.entries[0].boundaries[0].regression = { file: names[0], name: 'unlinked case' }; },
+    value => { delete value.entries[0].qaGaps; },
+    value => { value.entries[0].qaGaps = [{ scope: 'browser', reason: '' }]; },
+    value => { value.entries[0].independentReviewCriteria = []; },
+    value => { value.entries[0].independentReviewCriteria = ['']; },
+  ];
+  for (const change of changes) {
+    const value = fixtureFeedback(); change(value);
+    assert.throws(() => parse(value), /feedback|Feedback|tracked path/);
+  }
+  const noKnownGaps = fixtureFeedback(); noKnownGaps.entries[0].qaGaps = [];
+  assert.equal(parse(noKnownGaps).manifest.entries[0].qaGaps.length, 0);
+});
+
+test('CLI fails closed on missing or malformed feedback and regressions that did not execute', t => {
+  for (const [contents, pattern] of [[null, /Required tracked feedback manifest missing/],
+    ['{malformed', /JSON|property name/],
+    [JSON.stringify(fixtureFeedback('never registered')), /Feedback regression must execute exactly once and pass/]]) {
+    const { root } = fixture(t, { 'docs/review-feedback.json': contents });
+    const report = fails(root, pattern);
+    assert.equal(report.stages.builders.status, 'not-run');
+    assert.equal(git(root, 'status', '--porcelain'), '');
+  }
+});
+
+test('feedback after-pass evidence requires an exact executed test, not a suite, duplicate, or printed claim', t => {
+  const counts = { tests: 1, passed: 1, failed: 0, cancelled: 0, skipped: 0, todo: 0, suites: 0, topLevel: 1 };
+  const regression = { file: 'tests/nested/sample.test.cjs', name: 'fixture passes' };
+  const event = { type: 'test:pass', data: { name: regression.name, file: '/snapshot/' + regression.file,
+    details: { type: 'test' } } };
+  const summary = { type: 'test:summary', data: { success: true, counts, file: event.data.file } };
+  const global = { type: 'test:summary', data: { success: true, counts } };
+  const parse = events => parseTests([...events, summary, global].map(value => JSON.stringify(value)).join('\n'),
+    [regression.file], '/snapshot', [regression]);
+  assert.equal(parse([event]).regressionPasses[0].status, 'passed');
+  for (const events of [[], [event, event],
+    [{ ...event, data: { ...event.data, name: 'different test' } }],
+    [{ ...event, data: { ...event.data, file: '/snapshot/other.test.cjs' } }],
+    [{ ...event, data: { ...event.data, details: { type: 'suite' } } }],
+    [{ ...event, data: { ...event.data, skip: true } }]]) {
+    assert.throws(() => parse(events), /Feedback regression must execute exactly once and pass/);
+  }
+  const printed = `const t=require('node:test');t('other test',()=>{console.log(${JSON.stringify(JSON.stringify(event))});});`;
+  const { root } = fixture(t, { 'tests/nested/sample.test.cjs': printed });
+  fails(root, /Feedback regression must execute exactly once and pass/);
 });
