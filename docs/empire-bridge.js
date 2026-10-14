@@ -30,13 +30,13 @@ function create({realm=globalThis,document=realm.document,observer,observerSourc
   }
   function inject(){
     if(stopped||failed||installed||container)return;
-    if(document.readyState!=='loading'){fail('observer-started-late');return;}
+    if(!['loading','interactive','complete'].includes(document.readyState)){fail('observer-injection-unavailable');return;}
     const parent=document.documentElement||document.head;if(!parent)return;
     container=document.createElement('div');container.hidden=true;container.addEventListener(eventName,handshake);
     // GM_addElement executes static page code, never a privileged closure. Its
     // synchronous return happens AFTER execution, so the listener must already
     // exist. A bounded ACK also tolerates delayed insertion without guessing.
-    const textContent=`(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected||document.readyState!=='loading')return;target.remove();${observerSource}\nconst api=globalThis.OldLightEmpireObserver;const channel=${JSON.stringify(channel)};\nconst pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;\ntry{handle=api.installPageObserver({channel,emit:value=>{const data=JSON.stringify(value.snapshot);if(ready)send(data);else pending=data;}});\ntarget.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);\n}catch(_){try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();}})();`;
+    const textContent=`(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected||!['loading','interactive','complete'].includes(document.readyState))return;target.remove();${observerSource}\nconst api=globalThis.OldLightEmpireObserver;const channel=${JSON.stringify(channel)};\nconst pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;\ntry{handle=api.installPageObserver({channel,emit:value=>{const data=JSON.stringify(value.snapshot);if(ready)send(data);else pending=data;}});\ntarget.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);\n}catch(_){try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();}})();`;
     try{
       parent.appendChild(container);
       ackTimer=realm.setTimeout(()=>{ackTimer=null;if(!installed&&!stopped)fail('observer-injection-unavailable');},2000);

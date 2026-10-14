@@ -300,12 +300,12 @@ test('a delayed document root installs once while still loading and updates live
   assert.deepEqual(h.violations, []); assert.deepEqual(h.gameActions, []);
 });
 
-test('a root first observed after loading cannot install a late passive hook', () => {
+test('a root first observed after parsing installs a passive hook without a fabricated census', () => {
   const h = harness({ rootAvailable: false });
   h.mountRoot('interactive'); h.mountRoot('complete');
-  assert.equal(h.gmCalls.length, 0); assert.equal(h.app.status().installed, false);
-  assert.equal(h.app.snapshot(), null); assert.equal(h.sockets.length, 0);
-  assert.equal(h.app.status().reason, 'observer-started-late');
+  assert.equal(h.gmCalls.length, 1); assert.equal(h.app.status().installed, true);
+  assert.equal(h.app.snapshot().complete, false); assert.equal(h.sockets.length, 0);
+  assert.equal(h.app.status().connected, false);
   assert.deepEqual(h.violations, []); assert.deepEqual(h.gameActions, []);
 });
 
@@ -318,20 +318,21 @@ test('a privileged insertion executing after ACK timeout cannot revive observati
   assert.equal(h.sockets.length, 0); assert.deepEqual(h.violations, []); assert.deepEqual(h.gameActions, []);
 });
 
-test('delayed privileged script execution after document loading never installs page hooks', () => {
+test('delayed privileged script execution after parsing installs passive page hooks before its deadline', () => {
   const h = harness({ suppressPrivilegedExecution: true });
   h.document.readyState = 'interactive'; h.executeInsertedScript(); h.flush();
-  assert.equal(h.app.status().installed, false); assert.equal(h.app.snapshot(), null);
-  assert.equal(h.page.WebSocket, h.NativeWebSocket); assert.equal(h.handoffs.length, 0);
+  assert.equal(h.app.status().installed, true); assert.equal(h.app.snapshot().complete, false);
+  assert.notEqual(h.page.WebSocket, h.NativeWebSocket); assert.equal(h.handoffs.length, 1);
   assert.equal(h.sockets.length, 0); assert.deepEqual(h.violations, []); assert.deepEqual(h.gameActions, []);
 });
 
-test('late initial bootstrap skips the grant and leaves its diagnostic immutable', () => {
+test('post-parse initial bootstrap installs passively and leaves its timing diagnostic immutable', () => {
   for (const readyState of ['interactive', 'complete']) {
-    const h = harness({ readyState, embeddedOnly: true });
-    assert.equal(h.app, undefined); assert.equal(h.gmCalls.length, 0);
-    assert.equal(h.diagnostic().phase, 'late-start'); assert.equal(Object.isFrozen(h.diagnostic()), true);
-    assert.equal(h.sockets.length, 0); assert.deepEqual(h.violations, []);
+    const h = harness({ readyState, embeddedOnly: true }); h.flush();
+    assert.equal(h.app.status().installed, true); assert.equal(h.gmCalls.length, 1);
+    assert.equal(h.diagnostic().phase, 'attempted'); assert.equal(Object.isFrozen(h.diagnostic()), true);
+    assert.equal(h.app.snapshot().complete, false); assert.equal(h.app.status().connected, false);
+    assert.equal(h.sockets.length, 0); assert.deepEqual(h.violations, []); assert.deepEqual(h.gameActions, []);
   }
 });
 

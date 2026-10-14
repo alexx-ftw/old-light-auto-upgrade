@@ -216,28 +216,27 @@ test('grant review: bootstrap passes only the explicit permission and static obs
   assert.equal(supplied.realm.document, context.document);
 });
 
-test('grant review: late bootstrap never reads or calls the privileged insertion API', () => {
+test('grant review: post-parse bootstrap passes the approved insertion capability privately', () => {
   for (const readyState of ['interactive', 'complete']) {
-    const win = {}; win.top = win; win.self = win;
-    const context = { window: win, location: { pathname: '/game/galaxy/alpha' }, document: { readyState },
-      OldLightEmpireBridgeFactory: { create() { throw new Error('Unexpected late bridge'); } } };
-    Object.defineProperty(context, 'GM_addElement', { get() { throw new Error('Unexpected late grant access'); } });
+    const win = {}; win.top = win; win.self = win; let calls = 0;
+    const granted = () => {};
+    const context = { window: win, location: { pathname: '/game/galaxy/alpha' }, document: { readyState }, GM_addElement: granted,
+      OldLightEmpireBridgeFactory: { create(options) { calls++; assert.equal(options.addElement, granted); return {}; } } };
     vm.runInNewContext(builtBootstrap(), context);
-    assert.equal(context.OldLightEmpireBridge, undefined);
-    assert.equal(context.OldLightEmpireBootstrapStatus().phase, 'late-start');
+    assert.equal(calls, 1); assert.ok(context.OldLightEmpireBridge);
+    assert.equal(context.OldLightEmpireBootstrapStatus().phase, 'attempted');
   }
 });
 
-
-test('grant review: a root discovered after parsing never installs a late observer', () => {
+test('grant review: a root discovered after parsing can install a passive observer', () => {
   const h = fixture({ rootAvailable: false }); h.document.readyState = 'interactive'; h.mountRoot();
-  assert.equal(h.grantCalls.length, 0); assert.equal(h.app.status().installed, false);
-  assert.equal(h.app.status().reason, 'observer-started-late'); assert.equal(h.app.snapshot(), null);
+  assert.equal(h.grantCalls.length, 1); assert.equal(h.app.status().installed, true);
+  assert.equal(h.app.snapshot(), null); assert.equal(h.app.status().connected, false);
 });
 
-test('grant review: delayed page execution after parsing never hooks a late socket', () => {
+test('grant review: delayed page execution after parsing can install but grants no census', () => {
   const h = fixture({ mode: 'deferred' }); h.document.readyState = 'complete'; h.executeDelayed(); h.advance(2001);
-  assert.equal(h.page.installCount, undefined); assert.equal(h.app.status().installed, false);
+  assert.equal(h.page.installCount, 1); assert.equal(h.app.status().installed, true);
   assert.equal(h.app.snapshot(), null); assert.equal(h.grantCalls[0].parent.isConnected, false);
 });
 

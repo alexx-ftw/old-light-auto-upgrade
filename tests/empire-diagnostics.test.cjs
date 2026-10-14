@@ -65,11 +65,12 @@ test('builder records an immutable content-realm diagnostic without claiming a c
   assert.equal(h.diagnostic.installed, undefined);
 });
 
-test('interactive and complete startup remain late and never install an observer', () => {
+test('interactive and complete startup attempt passive observation without claiming a socket', () => {
   for (const readyState of ['interactive', 'complete']) {
-    const h = boot(readyState, () => { throw new Error('Late hook must not run'); });
-    assert.equal(h.calls, 0); assert.equal(h.sandbox.OldLightEmpireBridge, undefined);
-    assert.deepEqual(JSON.parse(JSON.stringify(h.diagnostic)), { readyState, phase: 'late-start', error: '' });
+    const h = boot(readyState);
+    assert.equal(h.calls, 1); assert.ok(h.sandbox.OldLightEmpireBridge);
+    assert.deepEqual(JSON.parse(JSON.stringify(h.diagnostic)), { readyState, phase: 'attempted', error: '' });
+    assert.equal(h.diagnostic.connected, undefined);
   }
 });
 
@@ -94,12 +95,12 @@ test('bootstrap keeps the existing game-route guard', () => {
   assert.equal(h.calls, 0); assert.equal(h.diagnostic, undefined); assert.equal(h.sandbox.OldLightEmpireBridge, undefined);
 });
 
-test('adapter distinguishes unavailable injection and late startup', () => {
+test('adapter distinguishes unavailable injection from an unconfirmed post-parse installation', () => {
   for (const value of [
     { bootstrap: bootstrap('unavailable', 'loading', 'bridge-create-failed') },
     status('observer-injection-unavailable', { installed: false, observed: false }),
   ]) assert.match(fixture(value).app.getStatus(), /No se pudo instalar/);
-  assert.match(fixture({ bootstrap: bootstrap('late-start', 'complete') }).app.getStatus(), /arrancó después.*Recarga/);
+  assert.match(fixture({ installed: false, bootstrap: bootstrap('attempted', 'complete') }).app.getStatus(), /no se ha confirmado su instalación/);
   assert.match(fixture({ installed: false, bootstrap: bootstrap('attempted') }).app.getStatus(), /no se ha confirmado su instalación/);
 });
 
@@ -172,7 +173,7 @@ test('adapter reports its own rejected, regressing and contradictory snapshots a
 });
 
 test('diagnostics cannot override a verified census or survive disposal as a ready state', () => {
-  const h = fixture({ bootstrap: bootstrap('late-start', 'complete') }, validWorld());
+  const h = fixture({ bootstrap: bootstrap('attempted', 'complete') }, validWorld());
   assert.equal(h.app.isAvailable(), true); assert.doesNotMatch(h.app.getStatus(), /arrancó después/);
   h.app.dispose(); assert.equal(h.app.isAvailable(), false); assert.match(h.app.getStatus(), /detenido/);
 });

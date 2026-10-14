@@ -10,11 +10,12 @@ const bootstrap = `(() => {
   'use strict';
   if (window.top !== window.self || !/^\\/game\\/galaxy\\/[A-Za-z0-9_-]{1,64}(?:\\/|$)/.test(location.pathname)) return;
   // Privileged Helper and Drive stay in the isolated content realm. Only the
-  // passive observer's static source enters the page, before native boot.
-  // Late/CSP-blocked injection never opens another socket or enables actions.
+  // passive observer's static source enters the page. Document readiness is
+  // not socket readiness: deferred modules run after the HTML is parsed.
+  // A complete validated native census, never timing, authorizes the adapter.
   const observedReadyState = document.readyState;
   const readyState = ['loading', 'interactive', 'complete'].includes(observedReadyState) ? observedReadyState : 'unknown';
-  let phase = readyState === 'loading' ? 'attempted' : readyState === 'unknown' ? 'unavailable' : 'late-start';
+  let phase = readyState === 'unknown' ? 'unavailable' : 'attempted';
   let error = readyState === 'unknown' ? 'ready-state-unavailable' : '';
   // This reader stays in the isolated realm. Only fixed diagnostic categories
   // are retained, never exception text, URLs, page objects or credentials.
@@ -22,7 +23,7 @@ const bootstrap = `(() => {
     Object.defineProperty(globalThis, 'OldLightEmpireBootstrapStatus', { configurable: false,
       value: () => Object.freeze({ readyState, phase, error }) });
   } catch (_) { /* A diagnostic registration failure must not break the Helper. */ }
-  if (readyState !== 'loading') return;
+  if (readyState === 'unknown') return;
   try {
     const bridge = globalThis.OldLightEmpireBridgeFactory.create({ realm: globalThis, document,
       observer: globalThis.OldLightEmpireObserver, addElement: typeof GM_addElement === 'function' ? GM_addElement : null, observerSource: ${JSON.stringify(sources.observer)} });

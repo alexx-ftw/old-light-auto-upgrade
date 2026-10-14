@@ -43,14 +43,18 @@ test('document-start loads only passive modules and defers the legacy Helper unt
   assert.equal(typeof events[0].fn,'function');assert.equal(watches,1);
   assert.equal(context.OldLightEmpireBridge.status().observed,false);
 });
-test('late observer bootstrap leaves the imperial bridge absent rather than opening a socket',()=>{
+test('post-parse observer bootstrap attempts the bridge without opening a socket',()=>{
   const marker=source.indexOf('// Privileged Helper and Drive stay');
   const start=source.lastIndexOf('(() => {',marker), end=source.indexOf('})();',marker)+5;
-  const win={};win.top=win;win.self=win;
+  const win={};win.top=win;win.self=win;let attempts=0;
   const context={window:win,location:{pathname:'/game/galaxy/alpha'},document:{readyState:'complete'},
-    OldLightEmpireBridgeFactory:{create(){throw new Error('Late injection must not run');}}};
-  vm.runInNewContext(source.slice(start,end),context);assert.equal(context.OldLightEmpireBridge,undefined);
+    WebSocket(){throw new Error('The bootstrap must not create a socket');},
+    OldLightEmpireBridgeFactory:{create(){attempts++;return {};}}};
+  vm.runInNewContext(source.slice(start,end),context);
+  assert.equal(attempts,1);assert.ok(context.OldLightEmpireBridge);
+  assert.equal(context.OldLightEmpireBootstrapStatus().phase,'attempted');
 });
+
 test('in-flight mission permission is independent of its own modal/busy navigation guard',()=>{
   const start=source.indexOf('  function empireMissionPermission('),end=source.indexOf('  function canNavigateEmpire(',start);
   let current={context:{scope:'alpha/me',owned:true,settled:true,selectionCount:1,systemId:'star'},snapshot:{scope:'alpha/me',systemId:'star',owned:true,observedAt:1000}};

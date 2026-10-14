@@ -31,10 +31,9 @@
   const coordKey = (q, r) => `${q},${r}`;
   const OBSERVATION_REASONS = Object.freeze(['', 'awaiting-native-init', 'awaiting-init', 'connection-lost', 'stopped',
     'malformed', 'session-lost', 'missing-init', 'eliminated', 'incomplete-data', 'observer-injection-unavailable',
-    'invalid-observation', 'out-of-order-observation', 'observer-permission-unavailable', 'observer-started-late']);
+    'invalid-observation', 'out-of-order-observation', 'observer-permission-unavailable']);
   const OBSERVATION_MESSAGES = Object.freeze({
     'observer-permission-unavailable': 'El gestor no ofrece GM_addElement. Actualiza el Helper, acepta el permiso de inserción y recarga el juego.',
-    'observer-started-late': 'El lector arrancó después de la carga inicial. Recarga Old Light para observar la conexión nativa desde el inicio.',
     'observer-injection-unavailable': 'No se pudo instalar el observador nativo en la página. No hay un censo verificado.',
     'connection-lost': 'Se perdió la conexión nativa del juego. Esperando una nueva conexión y su estado inicial.',
     'session-lost': 'La sesión nativa dejó de estar disponible. Esperando un nuevo estado inicial de la cuenta.',
@@ -66,7 +65,7 @@
       const bootstrap = get(raw, 'bootstrap');
       if (bootstrap !== undefined && bootstrap !== null) {
         const phase = get(bootstrap, 'phase'), readyState = get(bootstrap, 'readyState'), error = get(bootstrap, 'error');
-        if (!['late-start', 'attempted', 'unavailable'].includes(phase)
+        if (!['attempted', 'unavailable'].includes(phase)
           || !['loading', 'interactive', 'complete', 'unknown'].includes(readyState)
           || !['', 'bridge-create-failed', 'ready-state-unavailable'].includes(error)) return null;
         out.bootstrap = { phase, readyState, error };
@@ -176,7 +175,7 @@
     return out;
   }
   /**
-   * @typedef {{phase:'late-start'|'attempted'|'unavailable',
+   * @typedef {{phase:'attempted'|'unavailable',
    * readyState:'loading'|'interactive'|'complete'|'unknown',
    * error:''|'bridge-create-failed'|'ready-state-unavailable'}} BootstrapDiagnostic
    * @typedef {''|'awaiting-native-init'|'awaiting-init'|'connection-lost'|'stopped'|
@@ -269,9 +268,6 @@
       if (current) return OBSERVATION_MESSAGES['incomplete-data'];
       if (['out-of-order-observation', 'contradictory-observation'].includes(worldIssue)) return OBSERVATION_MESSAGES[worldIssue];
       const diagnostic = observationStatus(options.getObservationStatus);
-      if (diagnostic?.bootstrap?.phase === 'late-start') {
-        return 'El helper arrancó después de la carga inicial de la página; el observador nativo no se instaló. Recarga la página con el userscript activado.';
-      }
       if (diagnostic?.bootstrap?.phase === 'unavailable') return OBSERVATION_MESSAGES['observer-injection-unavailable'];
       if (diagnostic && own(OBSERVATION_MESSAGES, diagnostic.reason)) return OBSERVATION_MESSAGES[diagnostic.reason];
       if (diagnostic?.installed === true) {
@@ -282,7 +278,7 @@
           return 'Canal del observador instalado; esperando los primeros datos del observador nativo.';
         }
         if (diagnostic.connected === false && observationGeneration === 0) {
-          return 'Canal del observador instalado; esperando la conexión nativa del juego.';
+          return 'Canal del observador instalado; esperando la conexión nativa del juego. Si ya estaba abierta al arrancar el lector, su estado inicial pudo quedar fuera de observación.';
         }
         if (diagnostic.connected === false && diagnostic.reason === 'awaiting-init') {
           return 'Canal del observador instalado; esperando el estado inicial de la cuenta.';
