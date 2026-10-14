@@ -388,7 +388,11 @@ function build(source) {
       if (name === 'node:path') return path;
       assert.equal(name, 'node:fs');
       return {
-        readFileSync(file) { return file.endsWith('metrics-core.js') ? 'const testMetricsCore = true;\n' : source; },
+        readFileSync(file) {
+          if (file.endsWith('metrics-core.js')) return 'const testMetricsCore = true;\n';
+          if (file.endsWith('telemetry-core.js')) return 'const testTelemetryCore = true;\n';
+          return source;
+        },
         writeFileSync(file, content) { assert.equal(file, '/project/old-light-auto-upgrade.user.js'); written = content; },
       };
     },

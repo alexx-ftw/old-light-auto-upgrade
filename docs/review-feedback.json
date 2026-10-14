@@ -1845,6 +1845,338 @@
         "Confirmar coincidencia de versión visible del README, sección reciente, metadatos, constante y changelog.",
         "Comprobar que la comparación detecta una versión antigua sin exigir que las notas históricas se renumeren."
       ]
+    },
+    {
+      "id": "metrics-delayed-tab-write-recovery",
+      "feedback": "Una escritura válida retrasada de otra pestaña puede coincidir con beforeState y apagar permanentemente la medición como write-unverified, aunque el almacenamiento no haya fallado.",
+      "beforeFail": {
+        "revision": "4afdd3d8c5ea4db8179e76096bc72b89ee1c19cf",
+        "command": "node --test tests/metrics-contention.test.cjs tests/metrics-contention-review.test.cjs",
+        "observedFailure": "Mismos 27 casos finales sobre la base: 8 aprobados y 19 fallidos; el caso causal del escritor retrasado devuelve false y apaga A. Candidata: 27/27. Los demás fallos incluyen expectativas nuevas de retry, no filtraciones demostradas.",
+        "evidence": "docs/metrics-contention-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/metrics-contention.test.cjs",
+          "name": "metrics contention: a delayed valid tab write cannot permanently stop another tab"
+        },
+        {
+          "file": "tests/metrics-contention.test.cjs",
+          "name": "metrics contention: two silently ignored writes still stop collection"
+        },
+        {
+          "file": "tests/metrics-contention.test.cjs",
+          "name": "metrics contention: off then on cannot replay an old event into new consent"
+        },
+        {
+          "file": "tests/metrics-contention-review.test.cjs",
+          "name": "consent revocation during the fresh retry read prevents the retry write"
+        },
+        {
+          "file": "tests/metrics-contention-review.test.cjs",
+          "name": "revocation during retry write stays isolated: off"
+        },
+        {
+          "file": "tests/metrics-contention-review.test.cjs",
+          "name": "revocation during retry write stays isolated: off-on"
+        },
+        {
+          "file": "tests/metrics-contention-review.test.cjs",
+          "name": "a newer snapshot restoring the original event must not cause a duplicate retry"
+        },
+        {
+          "file": "tests/metrics-contention-review.test.cjs",
+          "name": "a real second-write failure (malformed) cannot get a third attempt"
+        },
+        {
+          "file": "tests/metrics-contention-review.test.cjs",
+          "name": "retry dominance respects UTC retention without adding the event on the new day"
+        },
+        {
+          "file": "tests/metrics-contention.test.cjs",
+          "name": "metrics contention: an explicit or asynchronous storage failure is never retried"
+        },
+        {
+          "file": "tests/metrics-contention.test.cjs",
+          "name": "metrics contention: saturated counters are already verified and need no retry"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Escritor B retrasado restaura exactamente el estado previo de A.",
+          "expected": "Un reintento máximo mantiene medición activa; recuento sigue orientativo.",
+          "regression": {
+            "file": "tests/metrics-contention.test.cjs",
+            "name": "metrics contention: a delayed valid tab write cannot permanently stop another tab"
+          }
+        },
+        {
+          "scenario": "Ambos intentos no guardan nada.",
+          "expected": "La medición se detiene con write-unverified tras dos escrituras máximas.",
+          "regression": {
+            "file": "tests/metrics-contention.test.cjs",
+            "name": "metrics contention: two silently ignored writes still stop collection"
+          }
+        },
+        {
+          "scenario": "Desactivar y activar entre verificación inicial y nueva lectura.",
+          "expected": "El evento viejo no entra en la generación nueva.",
+          "regression": {
+            "file": "tests/metrics-contention.test.cjs",
+            "name": "metrics contention: off then on cannot replay an old event into new consent"
+          }
+        },
+        {
+          "scenario": "Revocación durante lectura fresca.",
+          "expected": "No hay segunda escritura de contadores.",
+          "regression": {
+            "file": "tests/metrics-contention-review.test.cjs",
+            "name": "consent revocation during the fresh retry read prevents the retry write"
+          }
+        },
+        {
+          "scenario": "Revocación durante segunda escritura.",
+          "expected": "Permanece apagado y se borran bytes antiguos de la mejor forma posible.",
+          "regression": {
+            "file": "tests/metrics-contention-review.test.cjs",
+            "name": "revocation during retry write stays isolated: off"
+          }
+        },
+        {
+          "scenario": "Desactivar y activar durante segunda escritura.",
+          "expected": "La generación antigua queda aislada y no se reproduce el evento.",
+          "regression": {
+            "file": "tests/metrics-contention-review.test.cjs",
+            "name": "revocation during retry write stays isolated: off-on"
+          }
+        },
+        {
+          "scenario": "Tercer escritor devuelve un snapshot con el incremento original.",
+          "expected": "No se incrementa otra vez; se conserva el resto de contadores.",
+          "regression": {
+            "file": "tests/metrics-contention-review.test.cjs",
+            "name": "a newer snapshot restoring the original event must not cause a duplicate retry"
+          }
+        },
+        {
+          "scenario": "Segundo intento produce estado no canónico.",
+          "expected": "Se detiene sin un tercer intento ni exportación de campos privados.",
+          "regression": {
+            "file": "tests/metrics-contention-review.test.cjs",
+            "name": "a real second-write failure (malformed) cannot get a third attempt"
+          }
+        },
+        {
+          "scenario": "Cruce UTC con día más antiguo expirado y snapshot restaurado.",
+          "expected": "La dominancia respeta retención y no duplica el evento en el día nuevo.",
+          "regression": {
+            "file": "tests/metrics-contention-review.test.cjs",
+            "name": "retry dominance respects UTC retention without adding the event on the new day"
+          }
+        },
+        {
+          "scenario": "Escritura devuelve false, lanza o devuelve una promesa rechazada.",
+          "expected": "Falla cerrado sin reintentar ni filtrar el texto del error.",
+          "regression": {
+            "file": "tests/metrics-contention.test.cjs",
+            "name": "metrics contention: an explicit or asynchronous storage failure is never retried"
+          }
+        },
+        {
+          "scenario": "Contador ya saturado al límite.",
+          "expected": "Una escritura verificada basta; no hay retry.",
+          "regression": {
+            "file": "tests/metrics-contention.test.cjs",
+            "name": "metrics contention: saturated counters are already verified and need no retry"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Brave/Violentmonkey con varias pestañas y Drive reales",
+          "reason": "Solo adaptadores/VM sintéticos; no se abre una partida ni se envían órdenes."
+        },
+        {
+          "scope": "Precisión contable y borrado fallido tras recarga",
+          "reason": "Sin CAS pueden perderse incrementos. Un fallo de borrado puede dejar bytes locales con consentimiento apagado; el aviso de esa instancia no persiste."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Reproducir la intercalación B pendiente, A 0→1→2, B 1 antes de verificación, y distinguirla de una escritura no-op persistente.",
+        "Comprobar máximo un retry, lectura fresca, comparación con consentimiento original antes de escribir y ausencia de replay tras off→on.",
+        "Comprobar dominancia del estado restaurado y retención al cambiar de día para impedir sumar dos veces; conservar otros contadores.",
+        "Verificar cero campos/claves/eventos/permisos/transporte nuevos, propagación exacta al userscript y gate completo sobre el commit final limpio."
+      ]
+    },
+    {
+      "id": "telemetry-offline-consent-boundary",
+      "feedback": "Se pidió telemetría compartida activada para la instalación del propietario. No se verificó aún el destino ni se accedió a esa instalación. Preparar el adaptador sin simular una conexión, heredar consentimiento local o activar a otros usuarios.",
+      "beforeFail": {
+        "revision": "d2cad77d4c4caf7b4b598397da075b35f6e146b8",
+        "command": "git show d2cad77d4c4caf7b4b598397da075b35f6e146b8:old-light-auto-upgrade.user.js | node -e \"let s='';process.stdin.on('data',b=>s+=b);process.stdin.on('end',()=>require('node:assert/strict').ok(s.includes('function createTelemetry()')));\"",
+        "observedFailure": "Exit 1: la base no contiene createTelemetry ni panel remoto. Es ausencia de funcionalidad, no un fallo de privacidad; se conserva su elección local.",
+        "evidence": "docs/telemetry-offline-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/telemetry-integration.test.cjs",
+          "name": "telemetry public installation remains inert despite local opt-in and attempted remote toggle"
+        },
+        {
+          "file": "tests/telemetry-core.test.cjs",
+          "name": "telemetry payload only carries fixed counts, buckets, schema and numeric helper version"
+        },
+        {
+          "file": "tests/telemetry-core.test.cjs",
+          "name": "telemetry performance uses fixed histogram boundaries and rejects arbitrary names/values"
+        },
+        {
+          "file": "tests/telemetry-core.test.cjs",
+          "name": "telemetry other-tab revocation aborts pending transport even if it never settles"
+        },
+        {
+          "file": "tests/telemetry-core.test.cjs",
+          "name": "telemetry old generation cannot survive off-on in another tab or count a late response"
+        },
+        {
+          "file": "tests/telemetry-core.test.cjs",
+          "name": "telemetry rechecks consent immediately before transport after setup"
+        },
+        {
+          "file": "tests/telemetry-core.test.cjs",
+          "name": "telemetry limits repeated flushes to twelve attempts per hour per instance"
+        },
+        {
+          "file": "tests/telemetry-core.test.cjs",
+          "name": "telemetry timeout terminates a transport that ignores abort without blocking later observations"
+        },
+        {
+          "file": "tests/telemetry-integration.test.cjs",
+          "name": "telemetry fake clicks cannot change configured consent and local metrics remain separate"
+        },
+        {
+          "file": "tests/telemetry-integration.test.cjs",
+          "name": "telemetry performance clock is not read with inactive remote collection"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Instalación pública sin destino, aun con permiso local activo y clic de activación remoto.",
+          "expected": "Cero red, timers, acceso privado o cola remota; panel deshabilitado y transparente.",
+          "regression": {
+            "file": "tests/telemetry-integration.test.cjs",
+            "name": "telemetry public installation remains inert despite local opt-in and attempted remote toggle"
+          }
+        },
+        {
+          "scenario": "Revocación o nueva generación mientras el transporte está pendiente.",
+          "expected": "Abortar sin bloqueo, no contar respuesta tardía ni reproducir datos viejos.",
+          "regression": {
+            "file": "tests/telemetry-core.test.cjs",
+            "name": "telemetry old generation cannot survive off-on in another tab or count a late response"
+          }
+        },
+        {
+          "scenario": "Objetos privados en argumentos y rendimiento arbitrario.",
+          "expected": "Solo categorías cerradas, versión acotada e histograma fijo sin contenidos ni identificadores.",
+          "regression": {
+            "file": "tests/telemetry-core.test.cjs",
+            "name": "telemetry payload only carries fixed counts, buckets, schema and numeric helper version"
+          }
+        },
+        {
+          "scenario": "Transporte nunca termina.",
+          "expected": "Timeout acotado y sin retry del lote ambiguo.",
+          "regression": {
+            "file": "tests/telemetry-core.test.cjs",
+            "name": "telemetry timeout terminates a transport that ignores abort without blocking later observations"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Destino PostHog, ingestión sintética y activación en navegador del propietario",
+          "reason": "Lectura remota cancelada antes de verificar proyecto; sin tokens, cambios de acceso, transporte configurado ni almacenamiento del navegador."
+        },
+        {
+          "scope": "Brave/Violentmonkey, Drive real y QA visual",
+          "reason": "DOM sintético sí; Chromium local no pudo arrancar por restricciones del entorno. No se abrió partida real."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Verificar destino y consentimiento remoto ausentes en producción y ningún aumento de permisos; no convertir permiso local o actualización en autorización de terceros.",
+        "Revisar alcance de payload, límites de memoria y tasa, escrituras de consentimiento verificadas, revocación/generaciones en todas las fases asíncronas y ausencia de retries ambiguos.",
+        "Comprobar panel compacto y transparente, aislamiento de instrumentación del bucle, builder determinista, corrección local intacta y full gate sobre los bytes finales."
+      ]
+    },
+    {
+      "id": "telemetry-reentrant-revocation",
+      "feedback": "La revisión independiente detectó que abort() ejecuta listeners síncronos antes de que setEnabled cierre el permiso. Podían añadir observaciones a la generación nueva o iniciar transporte durante la revocación en el adaptador sintético.",
+      "beforeFail": {
+        "revision": "6dcb5a093f3e3c7baa5c019c3b86b4e9c609d518",
+        "command": "node --test tests/telemetry-revocation-review.test.cjs sobre docs/telemetry-core.js extraído de 6dcb5a0",
+        "observedFailure": "14 casos idénticos sobre el núcleo anterior: 9 pasan y 5 fallan, sin skips. Las dos reproducciones originales muestran dato trasladado a nueva generación y transporte iniciado durante revocación; se amplían a rotación observada y abort que lanza. La integración pública permanece desconfigurada.",
+        "evidence": "docs/telemetry-offline-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/telemetry-revocation-review.test.cjs",
+          "name": "reentrant abort handlers cannot carry previous-generation observations into opt-in"
+        },
+        {
+          "file": "tests/telemetry-revocation-review.test.cjs",
+          "name": "revocation blocks reentrant transmission before abort notification"
+        },
+        {
+          "file": "tests/telemetry-revocation-review.test.cjs",
+          "name": "observed generation rotation cannot accept callbacks from the discarded request"
+        },
+        {
+          "file": "tests/telemetry-revocation-review.test.cjs",
+          "name": "throwing abort cleanup still settles pending operation and leaves consent revoked"
+        },
+        {
+          "file": "tests/telemetry-revocation-review.test.cjs",
+          "name": "throwing timeout abort still settles without acceptance or leftover timers"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Listener de abort intenta record o setEnabled en mitad de purga.",
+          "expected": "Sin registro, activación ni transmisión reentrantes; generación nueva limpia.",
+          "regression": {
+            "file": "tests/telemetry-revocation-review.test.cjs",
+            "name": "reentrant abort handlers cannot carry previous-generation observations into opt-in"
+          }
+        },
+        {
+          "scenario": "Revocación con rate limit ya vencido y callback que intenta flush.",
+          "expected": "No iniciar un segundo transporte.",
+          "regression": {
+            "file": "tests/telemetry-revocation-review.test.cjs",
+            "name": "revocation blocks reentrant transmission before abort notification"
+          }
+        },
+        {
+          "scenario": "Adaptador abort lanza durante timeout.",
+          "expected": "Resolver false, no contar aceptación y limpiar timers.",
+          "regression": {
+            "file": "tests/telemetry-revocation-review.test.cjs",
+            "name": "throwing timeout abort still settles without acceptance or leftover timers"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Transporte y proveedor reales",
+          "reason": "No configurados ni ejercitados; todas las reproducciones usan transportes falsos y timers controlados."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Volver a ejecutar los probes originales y revisar que forcedOff precede al abort; toda purga bloquea reentrada también al detectar cambio de generación.",
+        "Comprobar que timeout/revocación resuelven aun cuando abort lanza y no permiten contabilizar respuestas antiguas.",
+        "Repetir full gate y verificar árbol congelado corregido; los gates verdes de la primera candidata no bastan."
+      ]
     }
   ]
 }

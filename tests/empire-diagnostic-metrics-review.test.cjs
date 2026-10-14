@@ -129,7 +129,7 @@ function metricsHarness(sharedStorage = new Map(), options = {}) {
       setItem: (key, value) => { writes.push(key); sharedStorage.set(key, value); },
       removeItem: key => sharedStorage.delete(key) } });
   vm.runInContext(fs.readFileSync(path.join(root, 'docs/metrics-core.js'), 'utf8'), context);
-  const begin = userscript.indexOf('  function createLocalMetrics()');
+  const begin = userscript.indexOf('  function createLocalMetrics(');
   const end = userscript.indexOf('  function installMetricsPanel(', begin);
   assert.ok(begin > 0 && end > begin);
   const metrics = vm.runInContext(userscript.slice(begin, end) + '\ncreateLocalMetrics();', context);

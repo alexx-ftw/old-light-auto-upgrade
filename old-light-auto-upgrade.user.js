@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.16.6
+// @version      1.16.7
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -2378,7 +2378,7 @@ return Object.freeze({create});
       } catch (_) { fail('invalid-state'); return { ok: false, state, permission }; }
     }
 
-    function writeVerified(state, recordDay, beforeState) {
+    function writeVerified(state, recordDay, beforeState, canRetry = false) {
       let failed = false;
       try {
         if (typeof config.write !== 'function') { fail('write-failed'); return false; }
@@ -2404,6 +2404,10 @@ return Object.freeze({create});
               // permanently stop this instance over an approximate lost count.
               if (dominates(actual, state)) return true;
               if (actual.generation === state.generation && actual.version === state.version && beforeState && matches(actual, beforeState)) {
+                // A delayed tab can restore exactly our previous counters. This
+                // is indistinguishable from one ignored write, so allow one
+                // fresh, consent-bound attempt before declaring broken storage.
+                if (canRetry) return 'retry';
                 fail('write-unverified');
               }
               return false;
@@ -2472,15 +2476,27 @@ return Object.freeze({create});
 
     function record(name) {
       if (typeof name !== 'string' || !EVENT_SET.has(name) || forcedOff) return false;
+      return recordAttempt(name, true);
+    }
+
+    function recordAttempt(name, canRetry, expectedPermission, expectedState) {
       const current = readState();
-      if (!current.ok || !current.permission.enabled || forcedOff) return false;
+      if (!current.ok || !current.permission.enabled || forcedOff ||
+          expectedPermission && !sameConsent(expectedPermission, current.permission)) return false;
       const beforeState = JSON.parse(JSON.stringify(current.state));
-      const date = new Date(current.today * DAY_MS).toISOString().slice(0, 10);
-      let row = current.state.days.find(item => item.date === date);
-      if (!row) { row = { date, counts: {} }; current.state.days.push(row); }
-      row.counts[name] = Math.min(MAX_COUNT, (row.counts[name] || 0) + 1);
+      // Another writer may restore the first attempt before our fresh read.
+      // Preserve that aggregate instead of blindly counting the event twice.
+      const alreadyPresent = expectedState && dominates(current.state,
+        sanitize(expectedState, version, current.permission.generation, current.today).state);
+      if (!alreadyPresent) {
+        const date = new Date(current.today * DAY_MS).toISOString().slice(0, 10);
+        let row = current.state.days.find(item => item.date === date);
+        if (!row) { row = { date, counts: {} }; current.state.days.push(row); }
+        row.counts[name] = Math.min(MAX_COUNT, (row.counts[name] || 0) + 1);
+      }
       if (!sameConsent(current.permission, consent())) return false;
-      if (!writeVerified(current.state, current.today, beforeState)) return false;
+      const written = writeVerified(current.state, current.today, beforeState, canRetry);
+      if (!written) return false;
       const latest = consent();
       if (!sameConsent(current.permission, latest)) {
         // A write that raced with opt-out is already invalidated by its old
@@ -2488,6 +2504,7 @@ return Object.freeze({create});
         if (latest.ok && !latest.enabled) erase(latest.generation);
         return false;
       }
+      if (written === 'retry') return recordAttempt(name, false, current.permission, current.state);
       reset();
       return true;
     }
@@ -2522,6 +2539,235 @@ return Object.freeze({create});
   return Object.freeze({ create, EVENTS, SCHEMA, RETENTION_DAYS, MAX_COUNT });
 });
 // END EMBEDDED METRICS CORE
+
+// BEGIN EMBEDDED TELEMETRY CORE
+/* Provider-independent, explicit telemetry. This module contains no network client. */
+(function (root, factory) {
+  'use strict';
+  const api = factory();
+  if (typeof module === 'object' && module && module.exports) module.exports = api;
+  if (root) Object.defineProperty(root, 'OldLightTelemetryCore', { configurable: true, value: api });
+})(typeof globalThis === 'object' ? globalThis : this, function () {
+  'use strict';
+  const SCHEMA = 1, POLICY = 1, INTERVAL = 300000, TIMEOUT = 8000, WATCH = 250;
+  const HOUR = 3600000, MAX_REQUESTS = 12, MAX_COUNT = 1000000, MAX_BYTES = 8192;
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const OFF = '00000000-0000-4000-8000-000000000000';
+  const EVENTS = Object.freeze([
+    'helper.loaded', 'ui.tab.empire', 'ui.tab.buildings', 'ui.tab.fleet', 'ui.tab.notifications', 'ui.tab.data',
+    'ui.fleet.minimums', 'ui.fleet.campaigns', 'ui.fleet.missions', 'settings.changed',
+    'backup.exported', 'backup.imported', 'backup.failed', 'automation.sent', 'automation.confirmed',
+    'automation.unconfirmed', 'automation.failed', 'automation.rejected', 'automation.paused',
+    'mission.sent', 'mission.uncertain', 'drive.connected', 'drive.synced', 'drive.retry', 'drive.error',
+    'error.runtime', 'error.storage',
+    'empire.observer.installation_failed', 'empire.observer.socket_unobserved',
+    'empire.observer.awaiting_init', 'empire.observer.missing_init',
+    'empire.observer.format_rejected', 'empire.observer.observation_rejected',
+    'empire.observer.census_received', 'empire.observer.connection_lost', 'empire.observer.incomplete',
+  ]);
+  const EVENT_SET = new Set(EVENTS);
+  const BUCKETS = Object.freeze(['lt_1ms', '1_4ms', '4_16ms', '16_50ms', '50_200ms', '200_1000ms', 'gte_1000ms']);
+  const BOUNDS = [1, 4, 16, 50, 200, 1000, Infinity];
+  const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+  function get(value, key) {
+    if (!value || typeof value !== 'object') return undefined;
+    const d = Object.getOwnPropertyDescriptor(value, key);
+    return d && own(d, 'value') ? d.value : undefined;
+  }
+  function plain(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const p = Object.getPrototypeOf(value);
+    return p === null || p === Object.prototype;
+  }
+  function asynchronous(value) {
+    if (!value || (typeof value !== 'object' && typeof value !== 'function')) return false;
+    try { Promise.prototype.then.call(value, () => {}, () => {}); return true; } catch (_) { /* Not a promise. */ }
+    return typeof get(value, 'then') === 'function';
+  }
+  function version(value) { return typeof value === 'string' && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(value) ? value : 'unknown'; }
+  function destination(value) {
+    try {
+      const id = get(value, 'id');
+      return plain(value) && get(value, 'verified') === true && typeof id === 'string'
+        && /^[a-z][a-z0-9_-]{0,39}$/.test(id) ? Object.freeze({ id }) : null;
+    } catch (_) { return null; }
+  }
+  /**
+   * destination is trusted application configuration, NOT a storage/UI flag:
+   * the integrator must verify it before constructing this adapter. transport
+   * is supplied by that same integrator. This module neither verifies a server
+   * nor implements a provider protocol. The released integration supplies neither.
+   * Consent must use private installation storage, separate from local metrics,
+   * settings, backups and Drive. It is bound to destination + policy + generation.
+   */
+  function create(input = {}) {
+    const options = input && typeof input === 'object' ? input : {};
+    const target = destination(options.destination), release = version(options.version);
+    const now = typeof options.now === 'function' ? options.now : Date.now;
+    const later = typeof options.setTimeout === 'function' ? options.setTimeout : setTimeout;
+    const cancel = typeof options.clearTimeout === 'function' ? options.clearTimeout : clearTimeout;
+    let counts = {}, buckets = {}, generation = null, timer = null, active = null, destroyed = false;
+    let state = 'unconfigured', forcedOff = false, purging = false, requests = [], lastAttempt = -Infinity;
+    let accepted = 0, dropped = 0, listener = null;
+    const configured = () => !!target && typeof options.transport === 'function'
+      && typeof options.readConsent === 'function' && typeof options.writeConsent === 'function';
+    function changed() { try { listener?.(); } catch (_) { /* Presentation never controls collection. */ } }
+    function total() { return Object.values(counts).reduce((a, b) => a + b, 0) + Object.values(buckets).reduce((a, b) => a + b, 0); }
+    function safeCancel(id) { try { if (id !== null) cancel(id); } catch (_) { /* Cleanup remains fail-closed. */ } }
+    function stopTimer() { if (timer !== null) { const old = timer; timer = null; safeCancel(old); } }
+    function purge() {
+      // Abort dispatches listeners synchronously. No callback may collect,
+      // enable or start another delivery while an old generation is discarded.
+      if (purging) return;
+      purging = true;
+      try {
+        counts = {}; buckets = {}; stopTimer();
+        if (active) {
+          const request = active; active = null;
+          safeCancel(request.timeout); safeCancel(request.watch);
+          try { request.controller.abort(); } catch (_) { /* Still settle our operation. */ }
+          request.finish(false);
+        }
+      } finally { purging = false; }
+    }
+    function consent() {
+      const raw = options.readConsent();
+      if (asynchronous(raw)) throw new Error('Asynchronous consent is not accepted');
+      if (raw === null || raw === undefined) return { enabled: false, generation: null };
+      if (!plain(raw) || get(raw, 'schema') !== SCHEMA || get(raw, 'policy') !== POLICY
+        || get(raw, 'destinationId') !== target.id || typeof get(raw, 'enabled') !== 'boolean'
+        || typeof get(raw, 'generation') !== 'string' || !UUID.test(get(raw, 'generation'))) throw new Error('Invalid consent');
+      return { enabled: get(raw, 'enabled'), generation: get(raw, 'generation') };
+    }
+    function permission() {
+      if (purging) return null;
+      if (destroyed || forcedOff || !configured()) {
+        purge(); generation = null;
+        if (!forcedOff) state = destroyed ? 'disabled' : 'unconfigured';
+        return null;
+      }
+      try {
+        const value = consent();
+        if (!value.enabled) { purge(); generation = null; state = 'disabled'; return null; }
+        if (value.generation !== generation) { purge(); generation = value.generation; state = 'ready'; }
+        return value;
+      } catch (_) { forcedOff = true; purge(); generation = null; state = 'storage_error'; return null; }
+    }
+    function scheduleFlush(delay = INTERVAL) {
+      if (timer !== null || active || !total() || destroyed || forcedOff) return;
+      timer = later(() => { timer = null; void flush(); }, delay);
+    }
+    function record(name) {
+      try {
+        if (typeof name !== 'string' || !EVENT_SET.has(name) || !permission()) return false;
+        counts[name] = Math.min(MAX_COUNT, (counts[name] || 0) + 1); scheduleFlush(); return true;
+      } catch (_) { return false; }
+    }
+    function duration(name, milliseconds) {
+      try {
+        if (name !== 'helper.step' || typeof milliseconds !== 'number' || !Number.isFinite(milliseconds)
+          || milliseconds < 0 || milliseconds > 60000 || !permission()) return false;
+        const key = BUCKETS[BOUNDS.findIndex(upper => milliseconds < upper)];
+        buckets[key] = Math.min(MAX_COUNT, (buckets[key] || 0) + 1); scheduleFlush(); return true;
+      } catch (_) { return false; }
+    }
+    function payload() {
+      return { schema: SCHEMA, helper_version: release, counts: { ...counts }, duration_buckets: { helper_step: { ...buckets } } };
+    }
+    function snapshot() { permission(); return payload(); }
+    function setEnabled(enabled) {
+      if (typeof enabled !== 'boolean' || destroyed || purging) return false;
+      // Revocation takes effect locally before attempting any persistence.
+      forcedOff = true; generation = null; state = 'disabled'; purge();
+      if (!configured()) { state = 'unconfigured'; changed(); return false; }
+      try {
+        let old = null;
+        try { old = consent(); } catch (_) { /* Invalid storage cannot block local revocation. */ }
+        let next = old?.generation || OFF;
+        if (enabled) {
+          next = typeof options.randomUUID === 'function' ? options.randomUUID() : globalThis.crypto?.randomUUID?.();
+          if (typeof next !== 'string' || !UUID.test(next) || next === OFF || next === old?.generation) throw new Error('Fresh generation unavailable');
+        }
+        const result = options.writeConsent({ schema: SCHEMA, policy: POLICY, destinationId: target.id, enabled, generation: next });
+        if (result === false || asynchronous(result)) throw new Error('Consent write failed');
+        const confirmed = consent();
+        if (confirmed.enabled !== enabled || confirmed.generation !== next) throw new Error('Consent write unverified');
+        forcedOff = false; state = enabled ? 'ready' : 'disabled';
+        if (enabled) generation = next;
+        changed(); return true;
+      } catch (_) { state = 'storage_error'; changed(); return false; }
+    }
+    async function flush() {
+      let request = null;
+      try {
+        const allowed = permission();
+        if (!allowed || active || !total()) return false;
+        const stamp = now();
+        if (typeof stamp !== 'number' || !Number.isFinite(stamp) || stamp < 0 || stamp < lastAttempt) {
+          forcedOff = true; purge(); state = 'clock_error'; return false;
+        }
+        requests = requests.filter(value => stamp - value < HOUR);
+        const wait = Math.max(0, INTERVAL - (stamp - lastAttempt),
+          requests.length >= MAX_REQUESTS ? HOUR - (stamp - requests[0]) : 0);
+        if (wait > 0) { stopTimer(); scheduleFlush(wait); return false; }
+        if (typeof options.AbortController !== 'function') { purge(); state = 'transport_unavailable'; return false; }
+        const batch = payload(), size = total();
+        // The payload alphabet is ASCII and its shape is fixed; character count
+        // therefore bounds its UTF-8 bytes. No user strings can enter it.
+        if (JSON.stringify(batch).length > MAX_BYTES) { purge(); state = 'payload_error'; return false; }
+        const latest = permission();
+        if (!latest || latest.generation !== allowed.generation) return false;
+        counts = {}; buckets = {}; stopTimer();
+        let finish;
+        const completed = new Promise(resolve => { finish = resolve; });
+        request = { generation: allowed.generation, controller: new options.AbortController(), timeout: null, watch: null, finish, size };
+        active = request; lastAttempt = stamp; requests.push(stamp); state = 'sending';
+        request.timeout = later(() => {
+          if (active === request) {
+            try { request.controller.abort(); } catch (_) { /* Timeout must still settle. */ }
+            request.finish(false);
+          }
+        }, TIMEOUT);
+        const watch = () => {
+          if (active !== request || !permission()) return;
+          request.watch = later(watch, WATCH);
+        };
+        request.watch = later(watch, WATCH);
+        // Recheck after setup as supplied adapters may cause reentrant revocation.
+        if (!permission() || active !== request || generation !== request.generation) return false;
+        Promise.resolve(options.transport(batch, { signal: request.controller.signal, destinationId: target.id }))
+          .then(result => {
+            try { request.finish(!!result && get(result, 'accepted') === true); }
+            catch (_) { request.finish(false); }
+          }, () => request.finish(false));
+        const ok = await completed;
+        if (!permission() || active !== request || generation !== request.generation) return false;
+        if (ok) { accepted += size; state = 'accepted'; } else { dropped += size; state = 'send_failed'; }
+        return ok;
+      } catch (_) {
+        if (request && active === request) { dropped += request.size; state = 'send_failed'; }
+        return false;
+      } finally {
+        if (request) { safeCancel(request.timeout); safeCancel(request.watch); }
+        if (request && active === request) active = null;
+        if (total()) scheduleFlush();
+        changed();
+      }
+    }
+    function getStatus() {
+      const allowed = permission();
+      return { configured: configured(), enabled: !!allowed, state, queued: total(), accepted, dropped,
+        inFlight: active !== null, destinationId: target?.id || null };
+    }
+    return Object.freeze({ record, duration, snapshot, setEnabled, flush, getStatus,
+      isEnabled: () => !!permission(), sync() { permission(); changed(); },
+      onChange(callback) { listener = typeof callback === 'function' ? callback : null; },
+      destroy() { destroyed = true; purge(); generation = null; state = 'disabled'; changed(); },
+    });
+  }
+  return Object.freeze({ create, EVENTS, BUCKETS, SCHEMA, POLICY, INTERVAL, TIMEOUT, WATCH, MAX_REQUESTS, MAX_COUNT, MAX_BYTES });
+});
+// END EMBEDDED TELEMETRY CORE
 
 // BEGIN EMBEDDED SYNC CORE
 (function (root, factory) {
@@ -3181,7 +3427,7 @@ return Object.freeze({create});
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.16.6';
+  const SCRIPT_VERSION = '1.16.7';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -3218,7 +3464,8 @@ return Object.freeze({create});
 
   if (window.top !== window.self || document.getElementById(HOST_ID)) return;
 
-  const metrics = createLocalMetrics();
+  const telemetry = createTelemetry();
+  const metrics = createLocalMetrics(telemetry);
   metrics.record('helper.loaded');
   let settings = readSettings();
   let missionAdapter = null;
@@ -3338,7 +3585,7 @@ return Object.freeze({create});
   }
 
   // BEGIN LOCAL METRICS INTEGRATION
-  function createLocalMetrics() {
+  function createLocalMetrics(remote = null) {
     const key = 'old-light-auto-upgrade:metrics:v1';
     const consentKey = 'old-light-auto-upgrade:metrics-consent:v1';
     const core = globalThis.OldLightMetricsCore.create({ version: SCRIPT_VERSION,
@@ -3362,6 +3609,7 @@ return Object.freeze({create});
     let onChange = null;
     function record(name) {
       const result = core.record(name);
+      try { remote?.record(name); } catch (_) { /* Optional telemetry cannot interrupt local metrics. */ }
       try { onChange?.(); } catch (_) { /* Metrics UI cannot affect the helper. */ }
       return result;
     }
@@ -3400,7 +3648,15 @@ return Object.freeze({create});
       lastEmpireCode = code;
       record('empire.observer.' + code);
     }
-    return { ...core, record, observeHelperEvent, observeDriveStatus, observeEmpireStatus,
+    function startTiming() {
+      try { return remote?.isEnabled() && typeof performance?.now === 'function' ? performance.now() : null; }
+      catch (_) { return null; }
+    }
+    function finishTiming(start) {
+      try { if (typeof start === 'number') remote?.duration('helper.step', performance.now() - start); }
+      catch (_) { /* Performance measurement cannot affect the game loop. */ }
+    }
+    return { ...core, record, observeHelperEvent, observeDriveStatus, observeEmpireStatus, startTiming, finishTiming,
       onChange: listener => { onChange = typeof listener === 'function' ? listener : null; } };
   }
 
@@ -3492,6 +3748,75 @@ return Object.freeze({create});
     refresh();
   }
   // END LOCAL METRICS INTEGRATION
+
+  // BEGIN REMOTE TELEMETRY INTEGRATION
+  function createTelemetry() {
+    // Deliberately inert: no project, provider, token, consent store or transport
+    // has been verified/configured. Public installation never grants consent.
+    return globalThis.OldLightTelemetryCore.create({ version: SCRIPT_VERSION,
+      destination: null, transport: null,
+    });
+  }
+
+  function installTelemetryPanel(shadow, remote) {
+    const el = (tag, text, className) => {
+      const node = document.createElement(tag);
+      if (text !== undefined) node.textContent = text;
+      if (className) node.className = className;
+      return node;
+    };
+    const box = el('section', undefined, 'backup-card'); box.dataset.field = 'remote-telemetry';
+    const heading = el('h3', 'Telemetría compartida'); heading.id = 'oldlight-telemetry-heading';
+    box.setAttribute('aria-labelledby', heading.id);
+    const status = el('p', '', 'backup-status'); status.dataset.field = 'telemetry-status';
+    status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+    const label = el('label', undefined, 'count-away');
+    const toggle = el('input'); toggle.type = 'checkbox'; toggle.dataset.action = 'telemetry-toggle';
+    label.append(toggle, el('span', 'Compartir uso, errores y rendimiento de esta instalación'));
+    const details = el('details'); details.dataset.field = 'telemetry-details';
+    details.append(el('summary', 'Qué se mediría y cómo se controla'));
+    details.append(el('p', 'Esta versión solo prepara el adaptador: PostHog no está conectado y no se envía telemetría. Falta verificar y configurar el destino. Las métricas locales conservan su propio interruptor.', 'hint'));
+    details.append(el('p', 'Solo categorías fijas de uso y errores del helper, su versión y recuentos por intervalos de duración del bucle. No se incluyen cuentas, jugadores, sistemas, coordenadas, flotas, mensajes, direcciones web, trazas ni credenciales. No se graban sesiones ni se capturan clics generales.', 'hint'));
+    details.append(el('p', 'El permiso de compartir será propio de esta instalación y del destino verificado. No se deduce del permiso local, no viaja por Drive o copias y no se aplica a otras personas. Desactivar vacía la cola y detiene los siguientes envíos; no puede retirar datos ya entregados. El proveedor podría ver información técnica de la conexión.', 'hint'));
+    details.append(el('p', 'Cola solo en memoria y sin historial anterior: lotes como máximo cada cinco minutos por pestaña, hasta doce intentos por hora. Los fallos no se reintentan automáticamente. La aceptación del transporte no confirma que los datos hayan aparecido en el proveedor.', 'hint'));
+    const preview = el('textarea'); preview.readOnly = true; preview.rows = 5;
+    preview.setAttribute('aria-label', 'Agregado pendiente de telemetría en JSON');
+    preview.dataset.field = 'telemetry-preview'; preview.style.cssText = 'width:100%;max-width:100%;box-sizing:border-box;resize:vertical';
+    details.append(preview);
+    const clear = el('button', 'Vaciar y desactivar'); clear.type = 'button'; clear.dataset.action = 'telemetry-clear';
+    details.append(clear); box.append(heading, status, label, details);
+    shadow.querySelector('[data-page="data"]').append(box);
+    function refresh() {
+      const current = remote.getStatus();
+      toggle.disabled = !current.configured; toggle.checked = current.enabled;
+      clear.disabled = !current.configured;
+      const messages = {
+        unconfigured: 'Sin configurar. No se recopila ni se envía telemetría compartida.',
+        disabled: 'Desactivada. No se recopila ni se envía telemetría compartida.',
+        ready: 'Activada para el destino configurado. Agregados pendientes en memoria.',
+        sending: 'Envío en curso al destino configurado.',
+        accepted: 'El transporte aceptó el último lote; recepción en el proveedor sin verificar.',
+        send_failed: 'El último envío no se confirmó y se descartó; no se reintentará.',
+        storage_error: 'No se pudo verificar el permiso. Telemetría detenida en esta pestaña.',
+        clock_error: 'Reloj no válido. Telemetría detenida en esta pestaña.',
+        transport_unavailable: 'Transporte no disponible. No se ha enviado el agregado.',
+        payload_error: 'Agregado fuera de límites. Se ha descartado sin enviarlo.',
+      };
+      status.textContent = messages[current.state] || 'Telemetría no disponible.';
+      if (details.open) preview.value = JSON.stringify(remote.snapshot(), null, 2);
+    }
+    toggle.addEventListener('change', event => {
+      if (event.isTrusted && !toggle.disabled) remote.setEnabled(toggle.checked);
+      refresh();
+    });
+    clear.addEventListener('click', event => {
+      if (event.isTrusted && !clear.disabled) remote.setEnabled(false);
+      refresh();
+    });
+    details.addEventListener('toggle', () => { if (details.open) refresh(); else preview.value = ''; });
+    remote.onChange(refresh); refresh();
+  }
+  // END REMOTE TELEMETRY INTEGRATION
 
   function normalizeOrder(order, defaults = DEFAULT_ORDER) {
     const known = Array.isArray(order) ? order.filter(id => defaults.includes(id)) : [];
@@ -4631,6 +4956,11 @@ return Object.freeze({create});
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.16.7', title: 'Métricas locales fiables y preparación de telemetría', changes: [
+        'Las métricas locales recuperan una escritura cruzada entre pestañas una sola vez, sin duplicar el incremento ni reactivar un permiso revocado.',
+        'Nuevo panel compacto de telemetría compartida, todavía sin destino configurado ni envíos a PostHog.',
+        'Adaptador preparado para categorías fijas e intervalos de rendimiento; el permiso remoto es independiente y por instalación.',
+      ] },
       { version: '1.16.6', title: 'Recuperación guiada del lector imperial', changes: [
         'Aviso breve cuando el lector no observa la conexión. Cómo recuperar el lector muestra los pasos solo al desplegarlo.',
         'Distingue conexión no observada, espera del estado inicial y conexión perdida. Explica cómo pausar, recargar y comprobar el censo antes de reanudar.',
@@ -5352,6 +5682,7 @@ return Object.freeze({create});
       installPriorityDragging();
       installLocalBackups();
       installMetricsPanel(shadow);
+      installTelemetryPanel(shadow, telemetry);
       ui.conditionsDetails.addEventListener('toggle', () => {
         if (settings.conditionsExpanded === ui.conditionsDetails.open) return;
         settings.conditionsExpanded = ui.conditionsDetails.open;
@@ -6242,7 +6573,9 @@ return Object.freeze({create});
     const run = () => {
       scheduled = false;
       lastEmpireStepAt = Date.now();
+      const timing = metrics.startTiming?.();
       try { step(); } catch (cause) { metrics.record('error.runtime'); throw cause; }
+      finally { metrics.finishTiming?.(timing); }
     };
     if (empireController?.isEnabled()) {
       const delay = Math.max(0, Math.min(50, 50 - (Date.now() - lastEmpireStepAt)));

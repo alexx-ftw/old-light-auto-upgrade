@@ -27,5 +27,17 @@ if (begins.length === 1 && ends.length === 1 && begins[0].index >= offset && end
 } else {
   throw new Error('Embedded metrics markers are incomplete, duplicated, reversed, or inside metadata.');
 }
+const remoteBegin = '// BEGIN EMBEDDED TELEMETRY CORE';
+const remoteEnd = '// END EMBEDDED TELEMETRY CORE';
+const remote = fs.readFileSync(path.join(__dirname, 'docs/telemetry-core.js'), 'utf8').trim();
+const remoteBegins = occurrences(remoteBegin), remoteEnds = occurrences(remoteEnd);
+const remoteEmbedded = remoteBegin + '\n' + remote + '\n' + remoteEnd;
+if (remoteBegins.length === 1 && remoteEnds.length === 1 && remoteBegins[0].index >= offset && remoteEnds[0].index > remoteBegins[0].index) {
+  const start = remoteBegins[0].index, finish = remoteEnds[0].index + remoteEnds[0][0].length;
+  source = source.slice(0, start) + remoteEmbedded + source.slice(finish);
+} else if (remoteBegins.length === 0 && remoteEnds.length === 0) {
+  const insertion = source.indexOf(end) + end.length;
+  source = source.slice(0, insertion) + '\n\n' + remoteEmbedded + source.slice(insertion);
+} else throw new Error('Embedded telemetry markers are incomplete, duplicated, reversed, or inside metadata.');
 fs.writeFileSync(file, source);
 console.log('Embedded local metrics core into the userscript.');

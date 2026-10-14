@@ -233,7 +233,7 @@
       } catch (_) { fail('invalid-state'); return { ok: false, state, permission }; }
     }
 
-    function writeVerified(state, recordDay, beforeState) {
+    function writeVerified(state, recordDay, beforeState, canRetry = false) {
       let failed = false;
       try {
         if (typeof config.write !== 'function') { fail('write-failed'); return false; }
@@ -259,6 +259,10 @@
               // permanently stop this instance over an approximate lost count.
               if (dominates(actual, state)) return true;
               if (actual.generation === state.generation && actual.version === state.version && beforeState && matches(actual, beforeState)) {
+                // A delayed tab can restore exactly our previous counters. This
+                // is indistinguishable from one ignored write, so allow one
+                // fresh, consent-bound attempt before declaring broken storage.
+                if (canRetry) return 'retry';
                 fail('write-unverified');
               }
               return false;
@@ -327,15 +331,27 @@
 
     function record(name) {
       if (typeof name !== 'string' || !EVENT_SET.has(name) || forcedOff) return false;
+      return recordAttempt(name, true);
+    }
+
+    function recordAttempt(name, canRetry, expectedPermission, expectedState) {
       const current = readState();
-      if (!current.ok || !current.permission.enabled || forcedOff) return false;
+      if (!current.ok || !current.permission.enabled || forcedOff ||
+          expectedPermission && !sameConsent(expectedPermission, current.permission)) return false;
       const beforeState = JSON.parse(JSON.stringify(current.state));
-      const date = new Date(current.today * DAY_MS).toISOString().slice(0, 10);
-      let row = current.state.days.find(item => item.date === date);
-      if (!row) { row = { date, counts: {} }; current.state.days.push(row); }
-      row.counts[name] = Math.min(MAX_COUNT, (row.counts[name] || 0) + 1);
+      // Another writer may restore the first attempt before our fresh read.
+      // Preserve that aggregate instead of blindly counting the event twice.
+      const alreadyPresent = expectedState && dominates(current.state,
+        sanitize(expectedState, version, current.permission.generation, current.today).state);
+      if (!alreadyPresent) {
+        const date = new Date(current.today * DAY_MS).toISOString().slice(0, 10);
+        let row = current.state.days.find(item => item.date === date);
+        if (!row) { row = { date, counts: {} }; current.state.days.push(row); }
+        row.counts[name] = Math.min(MAX_COUNT, (row.counts[name] || 0) + 1);
+      }
       if (!sameConsent(current.permission, consent())) return false;
-      if (!writeVerified(current.state, current.today, beforeState)) return false;
+      const written = writeVerified(current.state, current.today, beforeState, canRetry);
+      if (!written) return false;
       const latest = consent();
       if (!sameConsent(current.permission, latest)) {
         // A write that raced with opt-out is already invalidated by its old
@@ -343,6 +359,7 @@
         if (latest.ok && !latest.enabled) erase(latest.generation);
         return false;
       }
+      if (written === 'retry') return recordAttempt(name, false, current.permission, current.state);
       reset();
       return true;
     }

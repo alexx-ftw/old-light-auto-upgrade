@@ -14,7 +14,7 @@ function harness(options = {}) {
   const storage = options.storage || new Map();
   const writes = [];
   let failWrite = false;
-  const begin = source.indexOf('  function createLocalMetrics()');
+  const begin = source.indexOf('  function createLocalMetrics(');
   const end = source.indexOf('  function installMetricsPanel(', begin);
   assert.ok(begin > 0 && end > begin);
   const context = vm.createContext({
