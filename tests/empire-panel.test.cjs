@@ -21,6 +21,7 @@ class Element {
     } };
   }
   set textContent(value) {
+    if (this.ownerDocument) this.ownerDocument.textWrites = (this.ownerDocument.textWrites || 0) + 1;
     for (const child of this.children) child.parentNode = null;
     this.children = []; this._text = String(value);
   }
@@ -59,11 +60,11 @@ const all = root => [root, ...root.children.flatMap(all)];
 const byLabel = (root, label) => all(root).find(node => node.getAttribute('aria-label') === label);
 const withClass = (root, name) => all(root).filter(node => node.className.split(/\s+/).includes(name));
 
-function harness({ ids = [A, B], capable = true, shadow = false } = {}) {
+function harness({ ids = [A, B], capable = true, shadow = false, visible = true } = {}) {
   const document = new Document(), container = document.createElement('main');
   const host = document.createElement('div'), root = shadow ? new Element('#shadow-root', document) : document;
   document.append(host); root.append(container); if (shadow) document.activeElement = host;
-  let clock = 10000, failure = '', writes = 0;
+  let clock = 10000, failure = '', writes = 0, reads = 0;
   const data = { scope: SCOPE, config: core.normalizeConfig({ fleetTargets: { marauder: 20 } }), ready: false, maxAgeMs: 120000,
     roster: { systems: ids.map(id => ({ id, owned: true, name: id === A ? 'Sede' : 'Colonia' })) },
     snapshots: ids.map(id => ({ scope: SCOPE, systemId: id, owned: true, observedAt: clock, censusId: 'source-1', name: id === A ? 'Sede' : 'Colonia',
@@ -72,8 +73,8 @@ function harness({ ids = [A, B], capable = true, shadow = false } = {}) {
       queue: { buildings: 0, ships: 0 }, energy: 10 })),
     transitCensus: { scope: SCOPE, censusId: 'source-1', observedAt: clock, ships: Object.fromEntries(core.DEFAULT_SHIPS.map(ship => [ship, 0])) },
   };
-  const app = panel.create({ document, core, now: () => clock, canEnable: () => capable,
-    getState: () => ({ ...data, plan: core.plan(data.config, data.snapshots, { scope: SCOPE, now: clock, maxAgeMs: data.maxAgeMs,
+  const app = panel.create({ document, core, now: () => clock, canEnable: () => capable, isVisible: () => visible,
+    getState: () => (reads++, { ...data, plan: core.plan(data.config, data.snapshots, { scope: SCOPE, now: clock, maxAgeMs: data.maxAgeMs,
       expectedIds: data.roster.systems.map(row => row.id), transitCensus: data.transitCensus }) }),
     setConfig: value => {
       writes++;
@@ -84,6 +85,7 @@ function harness({ ids = [A, B], capable = true, shadow = false } = {}) {
   });
   app.mount(container);
   return { app, document, container, root, data,
+    get reads() { return reads; }, get visible() { return visible; }, set visible(value) { visible = value; },
     get clock() { return clock; }, set clock(value) { clock = value; },
     get capable() { return capable; }, set capable(value) { capable = value; },
     get failure() { return failure; }, set failure(value) { failure = value; },
@@ -210,4 +212,32 @@ test('destroy removes panel and style, prevents saves, and cannot be remounted',
   assert.equal(h.container.children.length, 0); h.app.render();
   toggle.dispatch('click'); goal.value = '35'; goal.dispatch('change'); assert.equal(h.writes, 0);
   assert.throws(() => h.app.mount(h.container), /destruido/); h.app.destroy();
+});
+
+
+test('stable visible render does not rewrite identical text or lose live age updates', () => {
+  const h = harness(); h.document.textWrites = 0;
+  for (let i = 0; i < 20; i++) h.app.render();
+  assert.equal(h.document.textWrites, 0);
+  h.clock += 1000; h.app.render();
+  assert.equal(h.document.textWrites, 2);
+  assert.ok(h.paragraphs().filter(text => text === 'Lectura de hace 1 s').length === 2);
+  h.document.textWrites = 0;
+  h.data.snapshots[0].resources.palladium.amount = 123.45; h.app.render();
+  assert.ok(h.document.textWrites > 0);
+  assert.ok(h.paragraphs().includes('Palladium 223,45 / 2000 · Iridium 100 / 1000'));
+});
+
+test('hidden dashboard does no census reads and renders the latest values when opened', () => {
+  const h = harness({ visible: false });
+  assert.equal(h.reads, 0); assert.equal(h.cards.length, 0);
+  for (let i = 0; i < 20; i++) h.app.render();
+  assert.equal(h.reads, 0);
+  h.data.snapshots[0].resources.palladium.amount = 999; h.visible = true; h.app.render();
+  assert.equal(h.reads, 1); assert.equal(h.cards.length, 2);
+  assert.ok(h.paragraphs().includes('Palladium 1099 / 2000 · Iridium 100 / 1000'));
+  h.visible = false; h.clock += 120001; h.app.render(); assert.equal(h.reads, 1);
+  h.visible = true; h.app.render(); assert.equal(h.reads, 2);
+  assert.equal(h.cards[0].dataset.stale, 'true');
+  assert.ok(h.paragraphs().includes('0 de 2 sistemas con datos recientes · información incompleta'));
 });

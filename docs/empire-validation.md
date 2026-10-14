@@ -1,8 +1,8 @@
-# Validación de la gestión imperial 1.14.2
+# Validación de la gestión imperial 1.14.3
 
 ## Alcance
 
-Base de contenido: release 1.14.1, publicada en el commit `5398c115bdbabdff008c070c19b31bf053daf826`. El modo imperial es opt-in. La corrección 1.14.2 mantiene exactamente sus cinco grants, `@inject-into content` y `@run-at document-start`. Retira únicamente la suposición de que un documento ya parseado implica una conexión nativa perdida: el observador intenta instalarse en loading, interactive y complete, sin abrir conexiones. La inicialización previa del Helper conserva su espera a DOMContentLoaded cuando el documento aún está cargando.
+Base de contenido: release 1.14.2, publicada en el commit `bad7632ea45ab5c8959ac04c3edb3aeb8d38f47e`. El modo imperial es opt-in. La corrección 1.14.3 mantiene exactamente sus cinco grants, `@inject-into content`, `@run-at document-start`, el observador nativo y el puente de Drive. Reduce cálculos, lecturas y renderizados duplicados y agrupa ráfagas mientras Imperio está activo. No añade capacidades de juego ni sincronización de la política imperial.
 
 - `empire-core.js`: configuración por sistema, normalización estricta, censo simultáneo y reparto de objetivos globales.
 - `empire-runtime.js`: política por cuenta/galaxia, recorrido justo, exclusión durante operaciones y verificación inmediatamente anterior a cada orden.
@@ -13,7 +13,7 @@ Base de contenido: release 1.14.1, publicada en el commit `5398c115bdbabdff008c0
 
 ## Resultado de la candidata
 
-El árbol final pasa **1060/1060 pruebas automatizadas** (cero fallos, omitidas o pendientes), comprobación sintáctica y `git diff --check`. Los cuatro generadores de módulos se han vuelto a ejecutar. La revisión independiente incluye regresiones de arranque, aislamiento, Drive y las guardas del adaptador.
+El árbol final pasa **1095/1095 pruebas automatizadas** (cero fallos, omitidas o pendientes), comprobación sintáctica y `git diff --check`. Los cuatro generadores de módulos se han vuelto a ejecutar. La revisión independiente incluye equivalencia bundle/lectores previos, preflight fresco, revocación, errores de lectura, tránsitos duplicados, descriptores seguros y aislamiento entre cuentas, además de las regresiones de arranque y Drive.
 
 ## Pruebas reproducibles
 
@@ -42,7 +42,7 @@ La revisión no certifica resistencia frente a una página de juego comprometida
 ## Comprobación pendiente en el navegador del usuario
 
 1. Actualizar, aceptar GM_addElement si el gestor lo solicita, recargar el juego y abrir Imperio manteniéndolo desactivado.
-2. Verificar que se listan únicamente sus sistemas y que recursos, colas y selección coinciden con el juego. Confirmar que aparece la versión 1.14.2 y que Drive conserva su comportamiento.
+2. Verificar que se listan únicamente sus sistemas y que recursos, colas y selección coinciden con el juego. Confirmar que aparece la versión 1.14.3 y que Drive conserva su comportamiento.
 3. Si el estado nativo no aparece, registrar el texto de estado visible, gestor y versión de navegador. No compartir copias del perfil, tokens, tramas ni credenciales.
 4. La activación queda a elección del usuario tras comprobar esos datos. Si no hay concordancia, conservar el modo detenido.
 
@@ -63,3 +63,28 @@ El estándar pone el documento en interactive antes de ejecutar la lista de scri
 Fuentes primarias: [HTML, final del parseo](https://html.spec.whatwg.org/multipage/parsing.html#the-end), [Document.readyState](https://developer.mozilla.org/en-US/docs/Web/API/Document/readyState) y [Violentmonkey run-at](https://violentmonkey.github.io/api/metadata-block/#run-at).
 
 Las pruebas cubren interactive antes de módulos, complete antes de una conexión, raíz y ejecución del grant diferidas, socket previo ya OPEN con init perdido, deltas sin init, init posterior válido en una conexión observada, desconexión y recepción futura. No fuerzan recargas, reconexiones ni órdenes. No prueban que un socket previo invisible pueda recuperarse.
+
+## Rendimiento imperial: corrección 1.14.3
+
+Perfilado local con DTO y DOM sintéticos, sin navegador ni peticiones al juego. Los escenarios usan 2, 10 y 50 sistemas y cuatro tránsitos propios por sistema; el reloj fijo aísla el coste de repetir una revisión. `node benchmarks/empire-runtime.cjs [ruta-al-repo]` , `node benchmarks/empire-panel.cjs [ruta-al-repo]` y `node benchmarks/empire-priority.cjs [ruta-al-repo]` reproducen las mediciones sin conectarse a ningún servicio. No describen la latencia de Brave/Violentmonkey ni la frecuencia real de eventos en la partida.
+
+Medianas del mismo entorno Node antes/después:
+
+| Sección medida | 2 sistemas | 10 sistemas | 50 sistemas |
+| --- | --- | --- | --- |
+| Dos update + readActive + canAct | 1,414 → 0,584 ms | 5,965 → 2,047 ms | 27,683 → 9,095 ms |
+| Render del panel (DOM mínimo) | 0,82 → 0,11 ms | 3,81 → 0,15 ms | 19,32 → 0,47 ms |
+
+La previsión de flota sin misión pendiente ejecutaba dos comprobaciones imperiales y diez reconstrucciones de censo por consulta. Ahora esa rama no consulta permisos de una misión inexistente. Si hay misión pendiente, sigue comprobándolos en cada consulta, con dos reconstrucciones en lugar de diez. `empire-priority.cjs` ejecuta las funciones reales de prioridad, política y permisos sobre un HUD sintético; no mide el coste del DOM ni un step completo. No deben sumarse sus tiempos parciales para afirmar un porcentaje global del Helper.
+
+El test determinista del scheduler agrupa 100 tareas separadas por 1 ms en tres ejecuciones, frente a 100 antes. Un flujo de 100 tareas cada 10 ms produce 21 ejecuciones sin inanición. La demora añadida a un plazo en el escenario probado es 49 ms. Se prueba también la lectura de una nueva identidad y de la pausa mientras la ejecución estaba pendiente.
+
+El ciclo parcial reconstruía el censo 13 veces; ahora lo hace cuatro. No incluye todas las ramas de `step`, el DOM real ni la observación nativa. Una ráfaga secuencial de veinte revisiones distintas con 50 sistemas pasó de aproximadamente 576 a 172 ms antes de cualquier coalescencia del scheduler. El panel de 50 sistemas escribía 555 textos iguales por render; ahora no escribe ninguno si nada cambia. La vista oculta/minimizada no solicita estado, y al abrirla vuelve a leer todos los datos y su caducidad.
+
+Las lecturas se agrupan **solo dentro de una llamada síncrona**. `update`, cada `canAct` y el preflight de navegación solicitan un bundle nuevo. No existe caché por revisión ni por tiempo. Siguen comprobándose la propiedad, cuenta/galaxia, selección y HUD actuales, antigüedad, retrocesos de generación/revisión, contradicciones con la misma revisión, tránsitos y la barrera posterior a pedidos. Si falla el bundle, no se combinan lecturas legacy para recuperarlo.
+
+El scheduler activo agrupa tareas con separación de 50 ms y cede el hilo mediante un timer; no depende de animation frames. No conserva permisos ni datos de identidad de la llamada a schedule. El modo habitual mantiene sus microtareas inmediatas. Las comprobaciones de respuesta pueden retrasarse hasta 50 ms adicionales, además de cualquier demora propia del navegador; no se adelantan plazos ni se eliminan guardas. Elimina dos validaciones de misión redundantes en cada previsión de flota cuando no hay misión pendiente.
+
+Cobertura adicional: bundles mutables/contradictorios, desconexión y cambio de scope/HUD entre actualización y permiso, expiración sin revisión nueva, configuración desactivada, snapshots duplicados/faltantes, devolución de políticas desacopladas, panel oculto/reapertura/caducidad y valores editados con foco. Se conserva el aislamiento de Drive, el puente, el lector nativo y los cinco grants. La sincronización imperial y las nuevas métricas de diagnóstico quedan fuera del hotfix.
+
+Pendiente: confirmar con el usuario el rendimiento después de actualizar y recargar. Las mejoras del banco sintético no garantizan por sí solas la experiencia real ni demuestran que el censo observado por el usuario sea correcto.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.14.2
+// @version      1.14.3
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -338,9 +338,9 @@ function create(options){
       ||(barrier&&(s.observedAt<=barrier.at||(barrier.censusId&&(!s.censusId||s.censusId===barrier.censusId)))))return null;
     return s;
   }
-  function readBatch(currentRoster){
-    if(typeof adapter.readSnapshots!=='function')return new Map(snapshots);
-    let values;try{values=adapter.readSnapshots();}catch{return null;}
+  function readBatch(currentRoster,bundle,bundled=false){
+    if(!bundled&&typeof adapter.readSnapshots!=='function')return new Map(snapshots);
+    let values;try{values=bundled?bundle?.snapshots:adapter.readSnapshots();}catch{return null;}
     if(!Array.isArray(values))return null;
     const ids=new Set(currentRoster.systems.map(x=>x.id)),batch=new Map();
     for(const value of values){
@@ -359,6 +359,13 @@ function create(options){
     config=next;epoch++;ready=false;cancelMove();arrivedAt=now();pauseUntil=0;onChange();return copy(config);
   }
   function state(){return copy({scope,config,roster,transitCensus,snapshots:[...snapshots.values()],plan,ready,status,error,moving:!!move,target:move?.id||'',storageError,manualHold,pausedUntil:pauseUntil,maxAgeMs});}
+  // Bounded display/local-engine policy only. This does not grant authority;
+  // every action still requires canAct's fresh source and HUD validation.
+  function systemPolicy(systemId){
+    const id=typeof systemId==='string'&&UUID.test(systemId)?systemId.toLowerCase():'';
+    return copy({role:config.systems[id]?.role||'balanced',
+      shipMinimums:plan?.targetsBySystem?.[id]?.shipMinimums||{probe:0,marauder:0,sentinel:0,vanguard:0}});
+  }
   function hold(reason){ready=false;status=reason;return state();}
   function reject(reason){cancelMove();return hold(reason);}
   function chooseNext(current){
@@ -370,7 +377,8 @@ function create(options){
     const operation={id,scope,token:epoch,at:now(),started:false,cancelled:false};move=operation;
     Promise.resolve().then(()=>{
       if(operation.cancelled||move!==operation||operation.token!==epoch||!permitNavigation||!config.enabled||scope!==operation.scope||pauseUntil>now())return null;
-      const freshRoster=validRoster(adapter.readRoster()),active=adapter.readActive();
+      const bundled=typeof adapter.readBundle==='function',bundle=bundled?adapter.readBundle():null;
+      const freshRoster=validRoster(bundled?bundle?.roster:adapter.readRoster()),active=bundled?bundle?.active:adapter.readActive();
       if(!freshRoster?.systems.some(x=>x.id===id)||!matches(active?.context,fromId)||!acceptable(active?.snapshot,fromId,freshRoster)||adapter.canNavigate?.()===false){operation.cancelled=true;return null;}
       operation.started=true;return adapter.selectSystem(id,{scope:operation.scope});
     }).then(result=>{
@@ -388,24 +396,26 @@ function create(options){
     if(storageError)return reject(error);
     try{const next=core.normalizeConfig(sync(read(key())));if(JSON.stringify(next)!==JSON.stringify(config)){config=next;epoch++;cancelMove();arrivedAt=now();}}
     catch{storageError=true;return reject(error='No se puede leer la configuración imperial. No se enviarán órdenes.');}
-    try{roster=validRoster(adapter.readRoster());}catch{roster=null;}
+    const bundled=typeof adapter.readBundle==='function';let bundle=null;
+    if(bundled)try{bundle=adapter.readBundle();}catch{/* Invalid bundle fails closed below. */}
+    try{roster=validRoster(bundled?bundle?.roster:adapter.readRoster());}catch{roster=null;}
     if(!roster)return reject(adapter.getStatus?.()||'No se ha podido verificar la lista completa de sistemas propios.');
     const owned=new Set(roster.systems.map(x=>x.id));
     for(const id of snapshots.keys())if(!owned.has(id)){snapshots.delete(id);visited.delete(id);barriers.delete(id);}
-    if(typeof adapter.readSnapshots==='function'){
-      const census=readBatch(roster);
+    if(bundled||typeof adapter.readSnapshots==='function'){
+      const census=readBatch(roster,bundle,bundled);
       if(!census){snapshots.clear();return reject('El censo imperial no está disponible o es ambiguo.');}
       snapshots.clear();for(const [id,value] of census)snapshots.set(id,value);
     }
-    let active;try{active=adapter.readActive();}catch{active=null;}
+    let active;try{active=bundled?bundle?.active:adapter.readActive();}catch{active=null;}
     const id=active?.context?.systemId?.toLowerCase();
     const current=id&&owned.has(id)&&matches(active.context,id)&&acceptable(active.snapshot,id);
-    if(current&&typeof adapter.readSnapshots==='function'&&JSON.stringify(current)!==JSON.stringify(snapshots.get(id)))return reject('El HUD y el censo imperial no coinciden.');
+    if(current&&(bundled||typeof adapter.readSnapshots==='function')&&JSON.stringify(current)!==JSON.stringify(snapshots.get(id)))return reject('El HUD y el censo imperial no coinciden.');
     if(current){snapshots.set(id,current);if(id!==observedId){observedId=id;arrivedAt=now();visited.set(id,now());}}
     else if(id)snapshots.delete(id);
-    let transit;try{transit=adapter.readTransitCensus?.();}catch{transit=null;}
+    let transit;try{transit=bundled?bundle?.transitCensus:adapter.readTransitCensus?.();}catch{transit=null;}
     transitCensus=transit?core.normalizeTransitCensus(transit):null;
-    if(typeof adapter.readTransitCensus==='function'&&!transitCensus)return reject('El censo de flotas en tránsito no está disponible.');
+    if((bundled||typeof adapter.readTransitCensus==='function')&&!transitCensus)return reject('El censo de flotas en tránsito no está disponible.');
     const expectedIds=roster.systems.map(x=>x.id);
     plan=core.plan(config,[...snapshots.values()],{scope,now:now(),maxAgeMs,expectedIds,activeSystemId:id,transitCensus:transitCensus||undefined});
     if(!config.enabled)return reject('Modo imperio desactivado. Los ajustes habituales siguen vigentes.');
@@ -429,15 +439,16 @@ function create(options){
     if(!ready||!config.enabled||move||manualHold||pauseUntil>now()||!roster||!plan?.complete)return false;
     try{
       if(JSON.stringify(core.normalizeConfig(sync(read(key()))))!==JSON.stringify(config))return false;
-      const latest=validRoster(adapter.readRoster());
+      const bundled=typeof adapter.readBundle==='function',bundle=bundled?adapter.readBundle():null;
+      const latest=validRoster(bundled?bundle?.roster:adapter.readRoster());
       if(!latest||JSON.stringify(latest.systems.map(x=>x.id).sort())!==JSON.stringify(roster.systems.map(x=>x.id).sort()))return false;
-      const id=observedId,active=adapter.readActive(),snapshot=acceptable(active?.snapshot,id,latest);
+      const id=observedId,active=bundled?bundle?.active:adapter.readActive(),snapshot=acceptable(active?.snapshot,id,latest);
       if(!matches(context,id)||!matches(active?.context,id)||!snapshot||config.systems[id]?.enabled===false||adapter.canNavigate?.()===false)return false;
-      const all=readBatch(latest);if(!all)return false;
-      if(typeof adapter.readSnapshots==='function'&&JSON.stringify(snapshot)!==JSON.stringify(all.get(id)))return false;
+      const all=readBatch(latest,bundle,bundled);if(!all)return false;
+      if((bundled||typeof adapter.readSnapshots==='function')&&JSON.stringify(snapshot)!==JSON.stringify(all.get(id)))return false;
       all.set(id,snapshot);
-      const liveTransit=adapter.readTransitCensus?.();
-      if(typeof adapter.readTransitCensus==='function'&&!core.normalizeTransitCensus(liveTransit))return false;
+      const liveTransit=bundled?bundle?.transitCensus:adapter.readTransitCensus?.();
+      if((bundled||typeof adapter.readTransitCensus==='function')&&!core.normalizeTransitCensus(liveTransit))return false;
       const fresh=core.plan(config,[...all.values()],{scope,now:now(),maxAgeMs,expectedIds:latest.systems.map(x=>x.id),activeSystemId:id,transitCensus:liveTransit});
       return fresh.complete&&JSON.stringify(fresh.targetsBySystem)===JSON.stringify(plan.targetsBySystem);
     }catch{return false;}
@@ -447,7 +458,7 @@ function create(options){
     if(UUID.test(systemId||'')){const id=systemId.toLowerCase(),previous=snapshots.get(id),old=barriers.get(id);barriers.set(id,{at:Math.max(now(),previous?.observedAt||0,old?.at||0),censusId:previous?.censusId||old?.censusId||null});snapshots.delete(id);}
     ready=false;cancelMove();
   }
-  return {update,state,setConfig,canAct,suspend,invalidate,importConfig:value=>setConfig({...core.normalizeConfig(value),enabled:false}),exportConfig:()=>copy(config),isEnabled:()=>config.enabled===true,isBusy:()=>!!move};
+  return {update,state,systemPolicy,setConfig,canAct,suspend,invalidate,importConfig:value=>setConfig({...core.normalizeConfig(value),enabled:false}),exportConfig:()=>copy(config),isEnabled:()=>config.enabled===true,isBusy:()=>!!move};
 }
 return Object.freeze({create});
 });
@@ -480,8 +491,14 @@ return Object.freeze({create});
 .oldlight-empire *{box-sizing:border-box}.oldlight-empire h2{font-size:18px;margin:0}.oldlight-empire h3{font-size:14px;margin:0 0 9px}.oldlight-empire p{margin:7px 0}.oldlight-empire button,.oldlight-empire select,.oldlight-empire input{font:inherit;min-height:38px;border-radius:7px;border:1px solid #456177;background:#152432;color:inherit;padding:7px;max-width:100%}.oldlight-empire input[type=checkbox]{min-height:20px}.oldlight-empire button{cursor:pointer}.oldlight-empire button:disabled{cursor:not-allowed;opacity:.55}.oldlight-empire :focus-visible{outline:2px solid #7edec0;outline-offset:2px}.oldlight-empire .empire-head{display:flex;align-items:center;gap:8px;justify-content:space-between}.oldlight-empire .empire-hint{font-size:12px;color:#aebdcc}.oldlight-empire .empire-status{border:1px solid #55715f;border-radius:8px;padding:9px;background:#172c28}.oldlight-empire .empire-warning{color:#ffcf8e}.oldlight-empire .empire-error{color:#ffaeae}.oldlight-empire .empire-goals{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}.oldlight-empire .empire-goals label{display:grid;gap:4px}.oldlight-empire .empire-goals input{width:100%}.oldlight-empire .empire-card{border:1px solid #344c60;border-radius:9px;padding:10px;margin-top:9px}.oldlight-empire .empire-card[data-stale=true]{border-style:dashed}.oldlight-empire .empire-card h3{overflow-wrap:anywhere}.oldlight-empire .empire-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.oldlight-empire .empire-controls label{display:flex;gap:5px;align-items:center}.oldlight-empire .empire-numbers{font-variant-numeric:tabular-nums;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin:8px 0}.oldlight-empire .empire-numbers div{padding:7px;background:#111f2b;border-radius:6px;overflow-wrap:anywhere}.oldlight-empire .empire-numbers small{display:block;color:#aebdcc}.oldlight-empire .empire-fleets{display:grid;gap:3px;font-size:12px;color:#bdcbd7}.oldlight-empire .empire-progress{font-size:12px;color:#b1dccf}.oldlight-empire .empire-empty{padding:14px 0;color:#aebdcc}.oldlight-empire[hidden]{display:none}
 @media(max-width:400px){.oldlight-empire{padding:10px}.oldlight-empire button,.oldlight-empire select,.oldlight-empire input{min-height:44px}.oldlight-empire .empire-head{align-items:flex-start;flex-direction:column}}
 `;
-  const num = value => typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString('es-ES', { maximumFractionDigits: 2 }) : '?';
-  function create({ document, core, getState, setConfig, canEnable = () => false, now = Date.now }) {
+  // Reuse the formatter: constructing locale machinery per resource/ship on
+  // every native tick dominated dashboard time for larger empires.
+  const numberFormat = new Intl.NumberFormat('es-ES', { maximumFractionDigits: 2 });
+  const num = value => typeof value === 'number' && Number.isFinite(value) ? numberFormat.format(value) : '?';
+  const text = (node, value) => { if (node.textContent !== value) node.textContent = value; };
+  const attribute = (node, key, value) => { if (node.getAttribute(key) !== value) node.setAttribute(key, value); };
+  const property = (node, key, value) => { if (node[key] !== value) node[key] = value; };
+  function create({ document, core, getState, setConfig, canEnable = () => false, isVisible = () => true, now = Date.now }) {
     let root, style, status, toggle, total, fleetSummary, error, list, empty, overview;
     const inputs = new Map(), cards = new Map();
     let destroyed = false;
@@ -519,45 +536,46 @@ return Object.freeze({create});
       const result = { card, name, age, role, enabled, resourceNodes, shipNodes, allocation }; cards.set(id, result); return result;
     }
     function render() {
-      if (!root || destroyed) return;
-      const state = getState(), cfg = core.normalizeConfig(state.config);
+      if (!root || destroyed || !isVisible()) return;
+      const state = getState(), cfg = core.normalizeConfig(state.config), clock = now();
       const roster = state.roster?.systems || [];
-      const data = core.aggregate(state.snapshots || [], { scope: state.scope, now: now(), maxAgeMs: state.maxAgeMs, transitCensus: state.transitCensus, expectedIds: roster.map(s => s.id) });
+      const data = core.aggregate(state.snapshots || [], { scope: state.scope, now: clock, maxAgeMs: state.maxAgeMs, transitCensus: state.transitCensus, expectedIds: roster.map(s => s.id) });
+      const freshIds = new Set(data.rows.map(row => row.systemId)), incompleteIds = new Set(data.incompleteIds);
       const raw = new Map((state.snapshots || []).map(row => [row.systemId, row]));
-      status.textContent = state.status || REASONS[state.plan?.reason] || 'Preparando datos del imperio.';
-      status.classList.toggle('empire-warning', !state.ready);
-      toggle.textContent = cfg.enabled ? 'Detener imperio' : 'Activar imperio';
-      toggle.disabled = !cfg.enabled && !canEnable(); toggle.setAttribute('aria-pressed', String(cfg.enabled));
-      toggle.title = toggle.disabled ? 'Falta verificar el catálogo, el selector y el censo nativo de flotas.' : 'Activa o detiene el recorrido automático de sistemas.';
-      total.textContent = `${data.rows.length} de ${roster.length} sistemas con datos recientes${data.complete ? '' : ' · información incompleta'}`;
-      overview.textContent = `Palladium ${num(data.totals.resources.palladium.amount)} / ${num(data.totals.resources.palladium.cap)} · Iridium ${num(data.totals.resources.iridium.amount)} / ${num(data.totals.resources.iridium.cap)}`;
-      fleetSummary.textContent = data.fleetComplete ? (roster.length === 1 && !data.censusId ? 'Recuento exacto del sistema seleccionado.' : 'Flota contada una vez en un censo verificado.') : 'Flota sin censo sincronizado: los totales observados no autorizan nuevos pedidos.';
-      for (const [id, input] of inputs) if (input.getRootNode().activeElement !== input) input.value = String(cfg.fleetTargets[id]);
+      text(status, state.status || REASONS[state.plan?.reason] || 'Preparando datos del imperio.');
+      if (status.className.split(/\s+/).includes('empire-warning') !== !state.ready) status.classList.toggle('empire-warning', !state.ready);
+      text(toggle, cfg.enabled ? 'Detener imperio' : 'Activar imperio');
+      property(toggle, 'disabled', !cfg.enabled && !canEnable()); attribute(toggle, 'aria-pressed', String(cfg.enabled));
+      property(toggle, 'title', toggle.disabled ? 'Falta verificar el catálogo, el selector y el censo nativo de flotas.' : 'Activa o detiene el recorrido automático de sistemas.');
+      text(total, `${data.rows.length} de ${roster.length} sistemas con datos recientes${data.complete ? '' : ' · información incompleta'}`);
+      text(overview, `Palladium ${num(data.totals.resources.palladium.amount)} / ${num(data.totals.resources.palladium.cap)} · Iridium ${num(data.totals.resources.iridium.amount)} / ${num(data.totals.resources.iridium.cap)}`);
+      text(fleetSummary, data.fleetComplete ? (roster.length === 1 && !data.censusId ? 'Recuento exacto del sistema seleccionado.' : 'Flota contada una vez en un censo verificado.') : 'Flota sin censo sincronizado: los totales observados no autorizan nuevos pedidos.');
+      for (const [id, input] of inputs) if (input.getRootNode().activeElement !== input) property(input, 'value', String(cfg.fleetTargets[id]));
       const retained = new Set();
       for (const entry of roster) {
         retained.add(entry.id); const nodes = cardFor(entry.id), snap = raw.get(entry.id), profile = cfg.systems[entry.id] || { role: 'balanced', enabled: true };
-        nodes.name.textContent = entry.name || snap?.name || entry.id;
-        const age = snap && Number.isSafeInteger(snap.observedAt) && snap.observedAt >= 0 && snap.observedAt <= now()
-          ? Math.floor((now() - snap.observedAt) / 1000) : null;
-        const fresh = age !== null && data.rows.some(row => row.systemId === entry.id) && !data.incompleteIds.includes(entry.id);
-        nodes.card.dataset.stale = String(!fresh);
-        nodes.age.textContent = age === null ? 'Sin lectura verificada' : `${fresh ? 'Lectura' : 'Datos antiguos'} de hace ${age} s`;
-        nodes.role.setAttribute('aria-label', 'Rol de ' + nodes.name.textContent);
-        nodes.enabled.setAttribute('aria-label', 'Atender ' + nodes.name.textContent);
-        if (nodes.role.getRootNode().activeElement !== nodes.role) nodes.role.value = profile.role;
-        nodes.enabled.checked = profile.enabled;
+        text(nodes.name, entry.name || snap?.name || entry.id);
+        const age = snap && Number.isSafeInteger(snap.observedAt) && snap.observedAt >= 0 && snap.observedAt <= clock
+          ? Math.floor((clock - snap.observedAt) / 1000) : null;
+        const fresh = age !== null && freshIds.has(entry.id) && !incompleteIds.has(entry.id);
+        property(nodes.card.dataset, 'stale', String(!fresh));
+        text(nodes.age, age === null ? 'Sin lectura verificada' : `${fresh ? 'Lectura' : 'Datos antiguos'} de hace ${age} s`);
+        attribute(nodes.role, 'aria-label', 'Rol de ' + nodes.name.textContent);
+        attribute(nodes.enabled, 'aria-label', 'Atender ' + nodes.name.textContent);
+        if (nodes.role.getRootNode().activeElement !== nodes.role) property(nodes.role, 'value', profile.role);
+        property(nodes.enabled, 'checked', profile.enabled);
         for (const resource of ['palladium', 'iridium']) {
-          const r = snap?.resources?.[resource]; nodes.resourceNodes[resource].textContent = `${num(r?.amount)} / ${num(r?.cap)}`;
+          const r = snap?.resources?.[resource]; text(nodes.resourceNodes[resource], `${num(r?.amount)} / ${num(r?.cap)}`);
         }
-        nodes.resourceNodes.queues.textContent = `${num(snap?.queue?.buildings)} / ${num(snap?.queue?.ships)}`;
-        nodes.resourceNodes.energy.textContent = num(snap?.energy);
-        for (const [id, node] of nodes.shipNodes) { const fleet = snap?.fleet?.[id]; node.textContent = `${LABELS[id]}: ${num(fleet?.parked)} en base · ${num(fleet?.away)} en misión · ${num(fleet?.building)} en cola`; }
+        text(nodes.resourceNodes.queues, `${num(snap?.queue?.buildings)} / ${num(snap?.queue?.ships)}`);
+        text(nodes.resourceNodes.energy, num(snap?.energy));
+        for (const [id, node] of nodes.shipNodes) { const fleet = snap?.fleet?.[id]; text(node, `${LABELS[id]}: ${num(fleet?.parked)} en base · ${num(fleet?.away)} en misión · ${num(fleet?.building)} en cola`); }
         const allocation = state.plan?.summary?.allocationsBySystem?.[entry.id];
         const parts = allocation ? core.DEFAULT_SHIPS.filter(id => allocation[id] > 0).map(id => `${LABELS[id]} ×${num(allocation[id])}`) : [];
-        nodes.allocation.textContent = parts.length ? 'Reparto propuesto: ' + parts.join(' · ') : 'Sin producción imperial adicional asignada.';
+        text(nodes.allocation, parts.length ? 'Reparto propuesto: ' + parts.join(' · ') : 'Sin producción imperial adicional asignada.');
       }
       for (const [id, nodes] of cards) if (!retained.has(id)) { nodes.card.remove(); cards.delete(id); }
-      empty.hidden = roster.length > 0;
+      property(empty, 'hidden', roster.length > 0);
     }
     function mount(container) {
       if (root || destroyed) throw new Error('El panel ya está montado o destruido.');
@@ -1075,7 +1093,11 @@ return Object.freeze({create});
   const counts = value => Object.fromEntries(SHIPS.map(ship => [ship, value]));
   const copy = value => JSON.parse(JSON.stringify(value));
   const array = (x, limit) => Array.isArray(x) && x.length <= limit;
-  const stamp = x => typeof x === 'string' && x.length <= 64 && Number.isFinite(Date.parse(x)) && Date.parse(x) >= 0 ? Date.parse(x) : null;
+  const stamp = x => {
+    if (typeof x !== 'string' || x.length > 64) return null;
+    const parsed = Date.parse(x);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  };
   const coordKey = (q, r) => `${q},${r}`;
   const OBSERVATION_REASONS = Object.freeze(['', 'awaiting-native-init', 'awaiting-init', 'connection-lost', 'stopped',
     'malformed', 'session-lost', 'missing-init', 'eliminated', 'incomplete-data', 'observer-injection-unavailable',
@@ -1202,6 +1224,11 @@ return Object.freeze({create});
    * home and remote endpoints. Only the caller's own transit array is accepted.
    * Hostile incomingTransits are intentionally never read by this adapter. */
   function nativeAwayBySystem(systems, transits) {
+    return awayFromTransits(systems, deduplicateTransits(transits));
+  }
+  // This private path receives the already validated, deduplicated transit list.
+  // Public callers still pass through deduplicateTransits above.
+  function awayFromTransits(systems, unique) {
     if (!array(systems, 10000)) return null;
     const owned = new Set(), byCoordinate = new Map(), out = {};
     for (const system of systems) {
@@ -1209,7 +1236,6 @@ return Object.freeze({create});
       if (!systemId || q === null || r === null || own(out, systemId) || owned.has(coordKey(q, r))) return null;
       owned.add(coordKey(q, r)); byCoordinate.set(coordKey(q, r), systemId); out[systemId] = counts(0);
     }
-    const unique = deduplicateTransits(transits);
     if (!unique) return null;
     for (const transit of unique) {
       const returning = transit.phase === 'returning' || transit.recalledAt !== null;
@@ -1275,7 +1301,7 @@ return Object.freeze({create});
         }
         const censusId = `native:${generation}:${epoch}:${revision}`;
         const transits = deduplicateTransits(get(source, 'transits'));
-        const away = nativeAwayBySystem(systems, get(source, 'transits'));
+        const away = awayFromTransits(systems, transits);
         const ships = counts(transits ? 0 : null);
         if (transits) for (const transit of transits) for (const ship of SHIPS) ships[ship] = add(ships[ship], transit.ships[ship]);
         const reported = get(source, 'transitShips');
@@ -1385,6 +1411,21 @@ return Object.freeze({create});
         snapshot: settled ? copy(snapshot) : null };
     }
     function readActive() { return active(); }
+    // One synchronous census capture, never a revision/TTL cache. Every call
+    // revalidates source identity, age, ordering and contradictory revisions;
+    // active() also reads the live selection and HUD on every call. Runtime
+    // updates, dispatch checks and navigation preflights each request a NEW
+    // bundle. Copies prevent callers from mutating the validated world.
+    function readBundle() {
+      const current = world();
+      if (!current) return null;
+      return copy({
+        roster: { scope: current.scope, complete: current.complete, observedAt: current.observedAt, systems: current.roster },
+        snapshots: current.snapshots,
+        transitCensus: current.complete ? current.transit : null,
+        active: active(current),
+      });
+    }
     function gates() {
       if (disposed || now() < manualUntil || typeof allowed !== 'function') return false;
       try {
@@ -1494,7 +1535,7 @@ return Object.freeze({create});
       for (const [handle, resolve] of timers) { clear(handle); resolve(); } timers.clear();
       for (const type of events) doc?.removeEventListener?.(type, onManual, true);
     }
-    return Object.freeze({ readRoster, readSnapshots, readTransitCensus, readActive, selectSystem, canNavigate,
+    return Object.freeze({ readRoster, readSnapshots, readTransitCensus, readActive, readBundle, selectSystem, canNavigate,
       isAvailable: () => world()?.complete === true,
       getStatus, dispose });
   }
@@ -2474,7 +2515,7 @@ return Object.freeze({create});
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.14.2';
+  const SCRIPT_VERSION = '1.14.3';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -2551,6 +2592,7 @@ return Object.freeze({create});
   let unconfirmed = 0;
   let nextClickAt = 0;
   let scheduled = false;
+  let lastEmpireStepAt = -Infinity;
   let wakeTimer = null;
   let wakeDue = 0;
   let lastClick = '';
@@ -3371,7 +3413,7 @@ return Object.freeze({create});
     // demand even while a native dialog temporarily prevents acting on it.
     const missionDemand = waiting && job.produce && !job.needsReview
       ? fleetWait.productionPlan(job, fleet)?.production : null;
-    const missionCanAct = missionQueueContext().canAct;
+    const missionCanAct = waiting && missionQueueContext().canAct;
     const contextReady = Boolean(systemId()) && operational.shipOrder.every(id =>
       !(operational.shipMinimums[id] > 0 || waiting) || Boolean(fleet.get(id)));
     const byId = new Map(ships.map(row => [row.id, row]));
@@ -3893,6 +3935,11 @@ return Object.freeze({create});
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.14.3', title: 'Rendimiento con Imperio activo', changes: [
+        'Agrupa las lecturas del censo en cada comprobación y elimina consultas de permisos de misiones cuando no hay una misión pendiente.',
+        'El panel reutiliza el formato de números, actualiza solo el texto que cambia y no procesa datos mientras está oculto.',
+        'Agrupa las ráfagas de cambios durante un máximo de 50 ms. Cada pedido sigue comprobando datos e identidad actuales; no reutiliza permisos anteriores.',
+      ] },
       { version: '1.14.2', title: 'Lectura nativa después del parseo', changes: [
         'El lector también se instala si el documento ya está interactive o complete; ese estado no demuestra que el juego haya abierto su conexión.',
         'Los pedidos siguen bloqueados hasta recibir y validar el estado nativo completo. No se recarga ni reconecta el juego automáticamente.',
@@ -5337,11 +5384,19 @@ return Object.freeze({create});
   function schedule() {
     if (scheduled) return;
     scheduled = true;
-    // No depende de requestAnimationFrame para comprobar respuestas y plazos.
-    queueMicrotask(() => {
+    // Native messages and DOM mutations arrive in separate tasks. While the
+    // empire is active, coalesce them at most every 50 ms and yield to the game.
+    // No state/permission is captured here: step and every order re-read it.
+    // Ordinary mode keeps its immediate microtask behavior; no RAF dependency.
+    const run = () => {
       scheduled = false;
+      lastEmpireStepAt = Date.now();
       try { step(); } catch (cause) { metrics.record('error.runtime'); throw cause; }
-    });
+    };
+    if (empireController?.isEnabled()) {
+      const delay = Math.max(0, Math.min(50, 50 - (Date.now() - lastEmpireStepAt)));
+      setTimeout(run, delay);
+    } else queueMicrotask(run);
   }
 
   function wakeAt(time) {
@@ -9720,8 +9775,9 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   }
 
   function missionQueueContext() {
-    return { ...missionContext(), active: canOperateMission(),
-      canAct: canOperateMission() && !missionAdapter?.isBusy() && !attackRetry?.isBusy()
+    const context = missionContext(), active = canOperateMission();
+    return { ...context, active,
+      canAct: active && !missionAdapter?.isBusy() && !attackRetry?.isBusy()
         && isRetryMissionAllowed(currentMissionJob()) && !document.querySelector('dialog[open]') };
   }
 
@@ -14656,16 +14712,15 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   // BEGIN EMPIRE INTEGRATION
   function empireOperationalSettings() {
     if (!empireController?.isEnabled()) return settings;
-    const state = empireController.state();
     const id = systemId()?.toLowerCase();
-    const profile = state.config.systems[id] || { role: 'balanced' };
+    const policy = empireController.systemPolicy(id);
     const roles = {
       industry: ['palladium_extractor', 'iridium_extractor', 'warehouse', 'reactor', 'command_center', 'shipyard', 'trade_hub'],
       shipyard: ['shipyard', 'command_center', 'reactor', 'warehouse', 'palladium_extractor', 'iridium_extractor', 'trade_hub'],
       defense: ['command_center', 'warehouse', 'reactor', 'palladium_extractor', 'iridium_extractor', 'shipyard', 'trade_hub'],
     };
-    return { ...settings, order: roles[profile.role] || settings.order, countAway: true,
-      shipMinimums: state.plan?.targetsBySystem?.[id]?.shipMinimums || Object.fromEntries(SHIPS.map(([id]) => [id, 0])) };
+    return { ...settings, order: roles[policy.role] || settings.order, countAway: true,
+      shipMinimums: policy.shipMinimums };
   }
 
   function empireMissionPermission() {
@@ -14708,7 +14763,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     empirePanel = globalThis.OldLightEmpirePanel.create({ document, core: globalThis.OldLightEmpireCore,
       getState: () => empireController.state(),
       setConfig: value => { const saved = empireController.setConfig(value); schedule(); return saved; },
-      canEnable: () => empireAdapter.isAvailable() });
+      canEnable: () => empireAdapter.isAvailable(),
+      isVisible: () => settings.activeTab === 'empire' && !settings.minimized && !document.hidden && !host?.hidden });
     empirePanel.mount(shadow.querySelector('[data-page="empire"]'));
   }
 

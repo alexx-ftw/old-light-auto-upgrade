@@ -53,6 +53,8 @@ function harness() {
     } },
     empireController: {
       isEnabled: () => enabled, state: () => state, canAct: () => canAct,
+      systemPolicy: id => ({ role: state.config.systems[id]?.role || 'balanced',
+        shipMinimums: state.plan.targetsBySystem[id]?.shipMinimums || Object.fromEntries(SHIPS.map(([id]) => [id, 0])) }),
       update: args => updates.push(args), setConfig: value => value,
     },
     empireAdapter: { readActive: () => active, isAvailable: () => false },
@@ -153,5 +155,10 @@ test('review: panel capability callback uses the real adapter API and requires a
     h.context.installEmpirePanel({ querySelector: () => target });
     assert.equal(configured.canEnable(), false);
     assert.equal(mounted, target);
+    assert.equal(configured.isVisible(), false);
+    h.settings.activeTab = 'empire'; assert.equal(configured.isVisible(), true);
+    h.settings.minimized = true; assert.equal(configured.isVisible(), false);
+    h.settings.minimized = false; h.document.hidden = true; assert.equal(configured.isVisible(), false);
+    h.document.hidden = false; h.globals.host.hidden = true; assert.equal(configured.isVisible(), false);
   } finally { native.dispose(); }
 });

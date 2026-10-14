@@ -27,7 +27,11 @@
   const counts = value => Object.fromEntries(SHIPS.map(ship => [ship, value]));
   const copy = value => JSON.parse(JSON.stringify(value));
   const array = (x, limit) => Array.isArray(x) && x.length <= limit;
-  const stamp = x => typeof x === 'string' && x.length <= 64 && Number.isFinite(Date.parse(x)) && Date.parse(x) >= 0 ? Date.parse(x) : null;
+  const stamp = x => {
+    if (typeof x !== 'string' || x.length > 64) return null;
+    const parsed = Date.parse(x);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  };
   const coordKey = (q, r) => `${q},${r}`;
   const OBSERVATION_REASONS = Object.freeze(['', 'awaiting-native-init', 'awaiting-init', 'connection-lost', 'stopped',
     'malformed', 'session-lost', 'missing-init', 'eliminated', 'incomplete-data', 'observer-injection-unavailable',
@@ -154,6 +158,11 @@
    * home and remote endpoints. Only the caller's own transit array is accepted.
    * Hostile incomingTransits are intentionally never read by this adapter. */
   function nativeAwayBySystem(systems, transits) {
+    return awayFromTransits(systems, deduplicateTransits(transits));
+  }
+  // This private path receives the already validated, deduplicated transit list.
+  // Public callers still pass through deduplicateTransits above.
+  function awayFromTransits(systems, unique) {
     if (!array(systems, 10000)) return null;
     const owned = new Set(), byCoordinate = new Map(), out = {};
     for (const system of systems) {
@@ -161,7 +170,6 @@
       if (!systemId || q === null || r === null || own(out, systemId) || owned.has(coordKey(q, r))) return null;
       owned.add(coordKey(q, r)); byCoordinate.set(coordKey(q, r), systemId); out[systemId] = counts(0);
     }
-    const unique = deduplicateTransits(transits);
     if (!unique) return null;
     for (const transit of unique) {
       const returning = transit.phase === 'returning' || transit.recalledAt !== null;
@@ -227,7 +235,7 @@
         }
         const censusId = `native:${generation}:${epoch}:${revision}`;
         const transits = deduplicateTransits(get(source, 'transits'));
-        const away = nativeAwayBySystem(systems, get(source, 'transits'));
+        const away = awayFromTransits(systems, transits);
         const ships = counts(transits ? 0 : null);
         if (transits) for (const transit of transits) for (const ship of SHIPS) ships[ship] = add(ships[ship], transit.ships[ship]);
         const reported = get(source, 'transitShips');
@@ -337,6 +345,21 @@
         snapshot: settled ? copy(snapshot) : null };
     }
     function readActive() { return active(); }
+    // One synchronous census capture, never a revision/TTL cache. Every call
+    // revalidates source identity, age, ordering and contradictory revisions;
+    // active() also reads the live selection and HUD on every call. Runtime
+    // updates, dispatch checks and navigation preflights each request a NEW
+    // bundle. Copies prevent callers from mutating the validated world.
+    function readBundle() {
+      const current = world();
+      if (!current) return null;
+      return copy({
+        roster: { scope: current.scope, complete: current.complete, observedAt: current.observedAt, systems: current.roster },
+        snapshots: current.snapshots,
+        transitCensus: current.complete ? current.transit : null,
+        active: active(current),
+      });
+    }
     function gates() {
       if (disposed || now() < manualUntil || typeof allowed !== 'function') return false;
       try {
@@ -446,7 +469,7 @@
       for (const [handle, resolve] of timers) { clear(handle); resolve(); } timers.clear();
       for (const type of events) doc?.removeEventListener?.(type, onManual, true);
     }
-    return Object.freeze({ readRoster, readSnapshots, readTransitCensus, readActive, selectSystem, canNavigate,
+    return Object.freeze({ readRoster, readSnapshots, readTransitCensus, readActive, readBundle, selectSystem, canNavigate,
       isAvailable: () => world()?.complete === true,
       getStatus, dispose });
   }

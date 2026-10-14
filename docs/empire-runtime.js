@@ -37,9 +37,9 @@ function create(options){
       ||(barrier&&(s.observedAt<=barrier.at||(barrier.censusId&&(!s.censusId||s.censusId===barrier.censusId)))))return null;
     return s;
   }
-  function readBatch(currentRoster){
-    if(typeof adapter.readSnapshots!=='function')return new Map(snapshots);
-    let values;try{values=adapter.readSnapshots();}catch{return null;}
+  function readBatch(currentRoster,bundle,bundled=false){
+    if(!bundled&&typeof adapter.readSnapshots!=='function')return new Map(snapshots);
+    let values;try{values=bundled?bundle?.snapshots:adapter.readSnapshots();}catch{return null;}
     if(!Array.isArray(values))return null;
     const ids=new Set(currentRoster.systems.map(x=>x.id)),batch=new Map();
     for(const value of values){
@@ -58,6 +58,13 @@ function create(options){
     config=next;epoch++;ready=false;cancelMove();arrivedAt=now();pauseUntil=0;onChange();return copy(config);
   }
   function state(){return copy({scope,config,roster,transitCensus,snapshots:[...snapshots.values()],plan,ready,status,error,moving:!!move,target:move?.id||'',storageError,manualHold,pausedUntil:pauseUntil,maxAgeMs});}
+  // Bounded display/local-engine policy only. This does not grant authority;
+  // every action still requires canAct's fresh source and HUD validation.
+  function systemPolicy(systemId){
+    const id=typeof systemId==='string'&&UUID.test(systemId)?systemId.toLowerCase():'';
+    return copy({role:config.systems[id]?.role||'balanced',
+      shipMinimums:plan?.targetsBySystem?.[id]?.shipMinimums||{probe:0,marauder:0,sentinel:0,vanguard:0}});
+  }
   function hold(reason){ready=false;status=reason;return state();}
   function reject(reason){cancelMove();return hold(reason);}
   function chooseNext(current){
@@ -69,7 +76,8 @@ function create(options){
     const operation={id,scope,token:epoch,at:now(),started:false,cancelled:false};move=operation;
     Promise.resolve().then(()=>{
       if(operation.cancelled||move!==operation||operation.token!==epoch||!permitNavigation||!config.enabled||scope!==operation.scope||pauseUntil>now())return null;
-      const freshRoster=validRoster(adapter.readRoster()),active=adapter.readActive();
+      const bundled=typeof adapter.readBundle==='function',bundle=bundled?adapter.readBundle():null;
+      const freshRoster=validRoster(bundled?bundle?.roster:adapter.readRoster()),active=bundled?bundle?.active:adapter.readActive();
       if(!freshRoster?.systems.some(x=>x.id===id)||!matches(active?.context,fromId)||!acceptable(active?.snapshot,fromId,freshRoster)||adapter.canNavigate?.()===false){operation.cancelled=true;return null;}
       operation.started=true;return adapter.selectSystem(id,{scope:operation.scope});
     }).then(result=>{
@@ -87,24 +95,26 @@ function create(options){
     if(storageError)return reject(error);
     try{const next=core.normalizeConfig(sync(read(key())));if(JSON.stringify(next)!==JSON.stringify(config)){config=next;epoch++;cancelMove();arrivedAt=now();}}
     catch{storageError=true;return reject(error='No se puede leer la configuración imperial. No se enviarán órdenes.');}
-    try{roster=validRoster(adapter.readRoster());}catch{roster=null;}
+    const bundled=typeof adapter.readBundle==='function';let bundle=null;
+    if(bundled)try{bundle=adapter.readBundle();}catch{/* Invalid bundle fails closed below. */}
+    try{roster=validRoster(bundled?bundle?.roster:adapter.readRoster());}catch{roster=null;}
     if(!roster)return reject(adapter.getStatus?.()||'No se ha podido verificar la lista completa de sistemas propios.');
     const owned=new Set(roster.systems.map(x=>x.id));
     for(const id of snapshots.keys())if(!owned.has(id)){snapshots.delete(id);visited.delete(id);barriers.delete(id);}
-    if(typeof adapter.readSnapshots==='function'){
-      const census=readBatch(roster);
+    if(bundled||typeof adapter.readSnapshots==='function'){
+      const census=readBatch(roster,bundle,bundled);
       if(!census){snapshots.clear();return reject('El censo imperial no está disponible o es ambiguo.');}
       snapshots.clear();for(const [id,value] of census)snapshots.set(id,value);
     }
-    let active;try{active=adapter.readActive();}catch{active=null;}
+    let active;try{active=bundled?bundle?.active:adapter.readActive();}catch{active=null;}
     const id=active?.context?.systemId?.toLowerCase();
     const current=id&&owned.has(id)&&matches(active.context,id)&&acceptable(active.snapshot,id);
-    if(current&&typeof adapter.readSnapshots==='function'&&JSON.stringify(current)!==JSON.stringify(snapshots.get(id)))return reject('El HUD y el censo imperial no coinciden.');
+    if(current&&(bundled||typeof adapter.readSnapshots==='function')&&JSON.stringify(current)!==JSON.stringify(snapshots.get(id)))return reject('El HUD y el censo imperial no coinciden.');
     if(current){snapshots.set(id,current);if(id!==observedId){observedId=id;arrivedAt=now();visited.set(id,now());}}
     else if(id)snapshots.delete(id);
-    let transit;try{transit=adapter.readTransitCensus?.();}catch{transit=null;}
+    let transit;try{transit=bundled?bundle?.transitCensus:adapter.readTransitCensus?.();}catch{transit=null;}
     transitCensus=transit?core.normalizeTransitCensus(transit):null;
-    if(typeof adapter.readTransitCensus==='function'&&!transitCensus)return reject('El censo de flotas en tránsito no está disponible.');
+    if((bundled||typeof adapter.readTransitCensus==='function')&&!transitCensus)return reject('El censo de flotas en tránsito no está disponible.');
     const expectedIds=roster.systems.map(x=>x.id);
     plan=core.plan(config,[...snapshots.values()],{scope,now:now(),maxAgeMs,expectedIds,activeSystemId:id,transitCensus:transitCensus||undefined});
     if(!config.enabled)return reject('Modo imperio desactivado. Los ajustes habituales siguen vigentes.');
@@ -128,15 +138,16 @@ function create(options){
     if(!ready||!config.enabled||move||manualHold||pauseUntil>now()||!roster||!plan?.complete)return false;
     try{
       if(JSON.stringify(core.normalizeConfig(sync(read(key()))))!==JSON.stringify(config))return false;
-      const latest=validRoster(adapter.readRoster());
+      const bundled=typeof adapter.readBundle==='function',bundle=bundled?adapter.readBundle():null;
+      const latest=validRoster(bundled?bundle?.roster:adapter.readRoster());
       if(!latest||JSON.stringify(latest.systems.map(x=>x.id).sort())!==JSON.stringify(roster.systems.map(x=>x.id).sort()))return false;
-      const id=observedId,active=adapter.readActive(),snapshot=acceptable(active?.snapshot,id,latest);
+      const id=observedId,active=bundled?bundle?.active:adapter.readActive(),snapshot=acceptable(active?.snapshot,id,latest);
       if(!matches(context,id)||!matches(active?.context,id)||!snapshot||config.systems[id]?.enabled===false||adapter.canNavigate?.()===false)return false;
-      const all=readBatch(latest);if(!all)return false;
-      if(typeof adapter.readSnapshots==='function'&&JSON.stringify(snapshot)!==JSON.stringify(all.get(id)))return false;
+      const all=readBatch(latest,bundle,bundled);if(!all)return false;
+      if((bundled||typeof adapter.readSnapshots==='function')&&JSON.stringify(snapshot)!==JSON.stringify(all.get(id)))return false;
       all.set(id,snapshot);
-      const liveTransit=adapter.readTransitCensus?.();
-      if(typeof adapter.readTransitCensus==='function'&&!core.normalizeTransitCensus(liveTransit))return false;
+      const liveTransit=bundled?bundle?.transitCensus:adapter.readTransitCensus?.();
+      if((bundled||typeof adapter.readTransitCensus==='function')&&!core.normalizeTransitCensus(liveTransit))return false;
       const fresh=core.plan(config,[...all.values()],{scope,now:now(),maxAgeMs,expectedIds:latest.systems.map(x=>x.id),activeSystemId:id,transitCensus:liveTransit});
       return fresh.complete&&JSON.stringify(fresh.targetsBySystem)===JSON.stringify(plan.targetsBySystem);
     }catch{return false;}
@@ -146,7 +157,7 @@ function create(options){
     if(UUID.test(systemId||'')){const id=systemId.toLowerCase(),previous=snapshots.get(id),old=barriers.get(id);barriers.set(id,{at:Math.max(now(),previous?.observedAt||0,old?.at||0),censusId:previous?.censusId||old?.censusId||null});snapshots.delete(id);}
     ready=false;cancelMove();
   }
-  return {update,state,setConfig,canAct,suspend,invalidate,importConfig:value=>setConfig({...core.normalizeConfig(value),enabled:false}),exportConfig:()=>copy(config),isEnabled:()=>config.enabled===true,isBusy:()=>!!move};
+  return {update,state,systemPolicy,setConfig,canAct,suspend,invalidate,importConfig:value=>setConfig({...core.normalizeConfig(value),enabled:false}),exportConfig:()=>copy(config),isEnabled:()=>config.enabled===true,isBusy:()=>!!move};
 }
 return Object.freeze({create});
 });

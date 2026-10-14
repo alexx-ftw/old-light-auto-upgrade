@@ -26,8 +26,14 @@
 .oldlight-empire *{box-sizing:border-box}.oldlight-empire h2{font-size:18px;margin:0}.oldlight-empire h3{font-size:14px;margin:0 0 9px}.oldlight-empire p{margin:7px 0}.oldlight-empire button,.oldlight-empire select,.oldlight-empire input{font:inherit;min-height:38px;border-radius:7px;border:1px solid #456177;background:#152432;color:inherit;padding:7px;max-width:100%}.oldlight-empire input[type=checkbox]{min-height:20px}.oldlight-empire button{cursor:pointer}.oldlight-empire button:disabled{cursor:not-allowed;opacity:.55}.oldlight-empire :focus-visible{outline:2px solid #7edec0;outline-offset:2px}.oldlight-empire .empire-head{display:flex;align-items:center;gap:8px;justify-content:space-between}.oldlight-empire .empire-hint{font-size:12px;color:#aebdcc}.oldlight-empire .empire-status{border:1px solid #55715f;border-radius:8px;padding:9px;background:#172c28}.oldlight-empire .empire-warning{color:#ffcf8e}.oldlight-empire .empire-error{color:#ffaeae}.oldlight-empire .empire-goals{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}.oldlight-empire .empire-goals label{display:grid;gap:4px}.oldlight-empire .empire-goals input{width:100%}.oldlight-empire .empire-card{border:1px solid #344c60;border-radius:9px;padding:10px;margin-top:9px}.oldlight-empire .empire-card[data-stale=true]{border-style:dashed}.oldlight-empire .empire-card h3{overflow-wrap:anywhere}.oldlight-empire .empire-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.oldlight-empire .empire-controls label{display:flex;gap:5px;align-items:center}.oldlight-empire .empire-numbers{font-variant-numeric:tabular-nums;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin:8px 0}.oldlight-empire .empire-numbers div{padding:7px;background:#111f2b;border-radius:6px;overflow-wrap:anywhere}.oldlight-empire .empire-numbers small{display:block;color:#aebdcc}.oldlight-empire .empire-fleets{display:grid;gap:3px;font-size:12px;color:#bdcbd7}.oldlight-empire .empire-progress{font-size:12px;color:#b1dccf}.oldlight-empire .empire-empty{padding:14px 0;color:#aebdcc}.oldlight-empire[hidden]{display:none}
 @media(max-width:400px){.oldlight-empire{padding:10px}.oldlight-empire button,.oldlight-empire select,.oldlight-empire input{min-height:44px}.oldlight-empire .empire-head{align-items:flex-start;flex-direction:column}}
 `;
-  const num = value => typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString('es-ES', { maximumFractionDigits: 2 }) : '?';
-  function create({ document, core, getState, setConfig, canEnable = () => false, now = Date.now }) {
+  // Reuse the formatter: constructing locale machinery per resource/ship on
+  // every native tick dominated dashboard time for larger empires.
+  const numberFormat = new Intl.NumberFormat('es-ES', { maximumFractionDigits: 2 });
+  const num = value => typeof value === 'number' && Number.isFinite(value) ? numberFormat.format(value) : '?';
+  const text = (node, value) => { if (node.textContent !== value) node.textContent = value; };
+  const attribute = (node, key, value) => { if (node.getAttribute(key) !== value) node.setAttribute(key, value); };
+  const property = (node, key, value) => { if (node[key] !== value) node[key] = value; };
+  function create({ document, core, getState, setConfig, canEnable = () => false, isVisible = () => true, now = Date.now }) {
     let root, style, status, toggle, total, fleetSummary, error, list, empty, overview;
     const inputs = new Map(), cards = new Map();
     let destroyed = false;
@@ -65,45 +71,46 @@
       const result = { card, name, age, role, enabled, resourceNodes, shipNodes, allocation }; cards.set(id, result); return result;
     }
     function render() {
-      if (!root || destroyed) return;
-      const state = getState(), cfg = core.normalizeConfig(state.config);
+      if (!root || destroyed || !isVisible()) return;
+      const state = getState(), cfg = core.normalizeConfig(state.config), clock = now();
       const roster = state.roster?.systems || [];
-      const data = core.aggregate(state.snapshots || [], { scope: state.scope, now: now(), maxAgeMs: state.maxAgeMs, transitCensus: state.transitCensus, expectedIds: roster.map(s => s.id) });
+      const data = core.aggregate(state.snapshots || [], { scope: state.scope, now: clock, maxAgeMs: state.maxAgeMs, transitCensus: state.transitCensus, expectedIds: roster.map(s => s.id) });
+      const freshIds = new Set(data.rows.map(row => row.systemId)), incompleteIds = new Set(data.incompleteIds);
       const raw = new Map((state.snapshots || []).map(row => [row.systemId, row]));
-      status.textContent = state.status || REASONS[state.plan?.reason] || 'Preparando datos del imperio.';
-      status.classList.toggle('empire-warning', !state.ready);
-      toggle.textContent = cfg.enabled ? 'Detener imperio' : 'Activar imperio';
-      toggle.disabled = !cfg.enabled && !canEnable(); toggle.setAttribute('aria-pressed', String(cfg.enabled));
-      toggle.title = toggle.disabled ? 'Falta verificar el catálogo, el selector y el censo nativo de flotas.' : 'Activa o detiene el recorrido automático de sistemas.';
-      total.textContent = `${data.rows.length} de ${roster.length} sistemas con datos recientes${data.complete ? '' : ' · información incompleta'}`;
-      overview.textContent = `Palladium ${num(data.totals.resources.palladium.amount)} / ${num(data.totals.resources.palladium.cap)} · Iridium ${num(data.totals.resources.iridium.amount)} / ${num(data.totals.resources.iridium.cap)}`;
-      fleetSummary.textContent = data.fleetComplete ? (roster.length === 1 && !data.censusId ? 'Recuento exacto del sistema seleccionado.' : 'Flota contada una vez en un censo verificado.') : 'Flota sin censo sincronizado: los totales observados no autorizan nuevos pedidos.';
-      for (const [id, input] of inputs) if (input.getRootNode().activeElement !== input) input.value = String(cfg.fleetTargets[id]);
+      text(status, state.status || REASONS[state.plan?.reason] || 'Preparando datos del imperio.');
+      if (status.className.split(/\s+/).includes('empire-warning') !== !state.ready) status.classList.toggle('empire-warning', !state.ready);
+      text(toggle, cfg.enabled ? 'Detener imperio' : 'Activar imperio');
+      property(toggle, 'disabled', !cfg.enabled && !canEnable()); attribute(toggle, 'aria-pressed', String(cfg.enabled));
+      property(toggle, 'title', toggle.disabled ? 'Falta verificar el catálogo, el selector y el censo nativo de flotas.' : 'Activa o detiene el recorrido automático de sistemas.');
+      text(total, `${data.rows.length} de ${roster.length} sistemas con datos recientes${data.complete ? '' : ' · información incompleta'}`);
+      text(overview, `Palladium ${num(data.totals.resources.palladium.amount)} / ${num(data.totals.resources.palladium.cap)} · Iridium ${num(data.totals.resources.iridium.amount)} / ${num(data.totals.resources.iridium.cap)}`);
+      text(fleetSummary, data.fleetComplete ? (roster.length === 1 && !data.censusId ? 'Recuento exacto del sistema seleccionado.' : 'Flota contada una vez en un censo verificado.') : 'Flota sin censo sincronizado: los totales observados no autorizan nuevos pedidos.');
+      for (const [id, input] of inputs) if (input.getRootNode().activeElement !== input) property(input, 'value', String(cfg.fleetTargets[id]));
       const retained = new Set();
       for (const entry of roster) {
         retained.add(entry.id); const nodes = cardFor(entry.id), snap = raw.get(entry.id), profile = cfg.systems[entry.id] || { role: 'balanced', enabled: true };
-        nodes.name.textContent = entry.name || snap?.name || entry.id;
-        const age = snap && Number.isSafeInteger(snap.observedAt) && snap.observedAt >= 0 && snap.observedAt <= now()
-          ? Math.floor((now() - snap.observedAt) / 1000) : null;
-        const fresh = age !== null && data.rows.some(row => row.systemId === entry.id) && !data.incompleteIds.includes(entry.id);
-        nodes.card.dataset.stale = String(!fresh);
-        nodes.age.textContent = age === null ? 'Sin lectura verificada' : `${fresh ? 'Lectura' : 'Datos antiguos'} de hace ${age} s`;
-        nodes.role.setAttribute('aria-label', 'Rol de ' + nodes.name.textContent);
-        nodes.enabled.setAttribute('aria-label', 'Atender ' + nodes.name.textContent);
-        if (nodes.role.getRootNode().activeElement !== nodes.role) nodes.role.value = profile.role;
-        nodes.enabled.checked = profile.enabled;
+        text(nodes.name, entry.name || snap?.name || entry.id);
+        const age = snap && Number.isSafeInteger(snap.observedAt) && snap.observedAt >= 0 && snap.observedAt <= clock
+          ? Math.floor((clock - snap.observedAt) / 1000) : null;
+        const fresh = age !== null && freshIds.has(entry.id) && !incompleteIds.has(entry.id);
+        property(nodes.card.dataset, 'stale', String(!fresh));
+        text(nodes.age, age === null ? 'Sin lectura verificada' : `${fresh ? 'Lectura' : 'Datos antiguos'} de hace ${age} s`);
+        attribute(nodes.role, 'aria-label', 'Rol de ' + nodes.name.textContent);
+        attribute(nodes.enabled, 'aria-label', 'Atender ' + nodes.name.textContent);
+        if (nodes.role.getRootNode().activeElement !== nodes.role) property(nodes.role, 'value', profile.role);
+        property(nodes.enabled, 'checked', profile.enabled);
         for (const resource of ['palladium', 'iridium']) {
-          const r = snap?.resources?.[resource]; nodes.resourceNodes[resource].textContent = `${num(r?.amount)} / ${num(r?.cap)}`;
+          const r = snap?.resources?.[resource]; text(nodes.resourceNodes[resource], `${num(r?.amount)} / ${num(r?.cap)}`);
         }
-        nodes.resourceNodes.queues.textContent = `${num(snap?.queue?.buildings)} / ${num(snap?.queue?.ships)}`;
-        nodes.resourceNodes.energy.textContent = num(snap?.energy);
-        for (const [id, node] of nodes.shipNodes) { const fleet = snap?.fleet?.[id]; node.textContent = `${LABELS[id]}: ${num(fleet?.parked)} en base · ${num(fleet?.away)} en misión · ${num(fleet?.building)} en cola`; }
+        text(nodes.resourceNodes.queues, `${num(snap?.queue?.buildings)} / ${num(snap?.queue?.ships)}`);
+        text(nodes.resourceNodes.energy, num(snap?.energy));
+        for (const [id, node] of nodes.shipNodes) { const fleet = snap?.fleet?.[id]; text(node, `${LABELS[id]}: ${num(fleet?.parked)} en base · ${num(fleet?.away)} en misión · ${num(fleet?.building)} en cola`); }
         const allocation = state.plan?.summary?.allocationsBySystem?.[entry.id];
         const parts = allocation ? core.DEFAULT_SHIPS.filter(id => allocation[id] > 0).map(id => `${LABELS[id]} ×${num(allocation[id])}`) : [];
-        nodes.allocation.textContent = parts.length ? 'Reparto propuesto: ' + parts.join(' · ') : 'Sin producción imperial adicional asignada.';
+        text(nodes.allocation, parts.length ? 'Reparto propuesto: ' + parts.join(' · ') : 'Sin producción imperial adicional asignada.');
       }
       for (const [id, nodes] of cards) if (!retained.has(id)) { nodes.card.remove(); cards.delete(id); }
-      empty.hidden = roster.length > 0;
+      property(empty, 'hidden', roster.length > 0);
     }
     function mount(container) {
       if (root || destroyed) throw new Error('El panel ya está montado o destruido.');
