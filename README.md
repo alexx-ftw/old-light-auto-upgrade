@@ -179,6 +179,12 @@ La primera conexión sin datos de sincronización puede recuperar los ajustes co
 
 Pruebas: `node --test tests/*.test.cjs`. El núcleo compartido se incluye dentro del userscript, sin dependencias de red adicionales para ejecutarlo. Después de modificar `docs/sync-core.js`, ejecuta `node build-sync.cjs` y las pruebas.
 
+## Validación para mantenedores
+
+Antes de publicar una candidata, guarda el árbol final en un commit limpio y ejecuta `node validate-release.cjs`. El gate agrupa la suite offline completa, la sintaxis, la coherencia de versiones y dos pasadas reproducibles de los cuatro builders en una copia temporal. Rechaza pruebas omitidas y sustituciones de fuente; no repara silenciosamente el userscript ni publica nada.
+
+El informe queda ligado a los hashes probados. La revisión independiente, la matriz de flujos afectados y las comprobaciones de concurrencia/autoupdate/Pages siguen siendo obligatorias. Las pruebas de navegador no ejecutadas se declaran como límite. Consulta el [procedimiento de validación y publicación](docs/release-validation.md).
+
 ## Instalación
 
 1. Instala [Tampermonkey](https://www.tampermonkey.net/) o [Violentmonkey](https://violentmonkey.github.io/get-it/).
