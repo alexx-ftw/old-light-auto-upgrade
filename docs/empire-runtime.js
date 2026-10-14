@@ -9,10 +9,11 @@ function create(options){
   const {core,adapter,read,write,onChange=()=>{},now=Date.now}=options;
   const dwellMs=Math.max(2000,options.dwellMs||5000),maxAgeMs=Math.max(15000,options.maxAgeMs||120000);
   let scope='',config=core.normalizeConfig(),roster=null,transitCensus=null,plan=null,ready=false,status='',error='',epoch=0;
-  let observedId='',arrivedAt=0,pauseUntil=0,move=null,permitNavigation=false,storageError=false,manualHold=false,recoveryDisabled=false;
+  let observedId='',arrivedAt=0,pauseUntil=0,interactionUntil=0,move=null,permitNavigation=false,storageError=false,manualHold=false,recoveryDisabled=false;
   const snapshots=new Map(),visited=new Map(),barriers=new Map();
   const orderBoundaries=new WeakMap();
   const key=()=> 'old-light-empire:v1:'+scope;
+  const pauseDeadline=()=>Math.max(pauseUntil,interactionUntil);
   function cancelMove(){permitNavigation=false;if(move){move.cancelled=true;if(!move.started)move=null;}}
   function changeScope(next){
     if(next===scope)return;
@@ -78,7 +79,7 @@ function create(options){
     if(manualHold&&recoveryDisabled&&next.enabled&&!config.enabled&&!move){manualHold=false;recoveryDisabled=false;error='';}
     config=next;epoch++;ready=false;cancelMove();arrivedAt=now();pauseUntil=0;onChange();return copy(config);
   }
-  function state(){return copy({scope,config,roster,transitCensus,snapshots:[...snapshots.values()],plan,ready,status,error,moving:!!move,target:move?.id||'',storageError,manualHold,pausedUntil:pauseUntil,maxAgeMs});}
+  function state(){return copy({scope,config,roster,transitCensus,snapshots:[...snapshots.values()],plan,ready,status,error,moving:!!move,target:move?.id||'',storageError,manualHold,pausedUntil:pauseDeadline(),maxAgeMs});}
   // Bounded display/local-engine policy only. This does not grant authority;
   // every action still requires canAct's fresh source and HUD validation.
   function systemPolicy(systemId){
@@ -96,7 +97,7 @@ function create(options){
   function select(id,fromId){
     const operation={id,scope,token:epoch,at:now(),started:false,cancelled:false};move=operation;
     Promise.resolve().then(()=>{
-      if(operation.cancelled||move!==operation||operation.token!==epoch||!permitNavigation||!config.enabled||scope!==operation.scope||pauseUntil>now())return null;
+      if(operation.cancelled||move!==operation||operation.token!==epoch||!permitNavigation||!config.enabled||scope!==operation.scope||pauseDeadline()>now())return null;
       const bundled=typeof adapter.readBundle==='function',bundle=bundled?adapter.readBundle():null;
       const freshRoster=validRoster(bundled?bundle?.roster:adapter.readRoster()),active=bundled?bundle?.active:adapter.readActive();
       if(!freshRoster?.systems.some(x=>x.id===id)||!matches(active?.context,fromId)||!acceptable(active?.snapshot,fromId,freshRoster)||adapter.canNavigate?.()===false){operation.cancelled=true;return null;}
@@ -146,7 +147,8 @@ function create(options){
     if(manualHold)return reject('Recorrido detenido tras una selección sin confirmar. Desactiva y activa el modo para revisar.');
     if(move&&now()-move.at>15000){move.cancelled=true;manualHold=true;return hold(error='El cambio de sistema no respondió. Revisa la selección antes de continuar.');}
     if(move){permitNavigation=!move.cancelled;return hold('Seleccionando el siguiente sistema…');}
-    if(pauseUntil>now())return reject('Esperando a que termines de usar el juego.');
+    if(pauseUntil>now())return reject('Imperio suspendido. Revisa la pausa antes de continuar.');
+    if(interactionUntil>now())return reject('Pausa por interacción: '+Math.ceil((interactionUntil-now())/1000)+' s restantes sin nueva actividad en el juego.');
     if(!current)return reject('Esperando identidad, propiedad y datos actuales del sistema seleccionado.');
     const currentEnabled=config.systems[id]?.enabled!==false,nextId=chooseNext(id);
     if(nextId&&nextId!==id&&(!plan.complete||!currentEnabled||now()-arrivedAt>=dwellMs)){
@@ -158,7 +160,7 @@ function create(options){
     ready=true;status='Imperio activo: '+(current.name||id)+'.';error='';return state();
   }
   function checkAction(context,capture=false){
-    if(!ready||!config.enabled||move||manualHold||pauseUntil>now()||!roster||!plan?.complete)return false;
+    if(!ready||!config.enabled||move||manualHold||pauseDeadline()>now()||!roster||!plan?.complete)return false;
     try{
       const actionEpoch=epoch;
       if(JSON.stringify(core.normalizeConfig(sync(read(key()))))!==JSON.stringify(config))return false;
@@ -189,6 +191,9 @@ function create(options){
   function canAct(context){return checkAction(context)===true;}
   function captureOrderBoundary(context){return checkAction(context,true)||null;}
   function suspend(ms=15000){pauseUntil=now()+Math.max(0,ms);ready=false;epoch++;cancelMove();onChange();}
+  // Interaction cannot shorten an independent emergency/explicit suspension.
+  // Policy edits retain this deadline so the adapter and runtime stay aligned.
+  function suspendInteraction(ms=15000){interactionUntil=Math.max(interactionUntil,now()+Math.max(0,ms));ready=false;epoch++;cancelMove();onChange();}
   function invalidate(systemId,token){
     const boundary=token&&typeof token==='object'?orderBoundaries.get(token):null;
     if(boundary)orderBoundaries.delete(token); // Single use, including invalid targets/scopes.
@@ -211,7 +216,7 @@ function create(options){
     }
     ready=false;cancelMove();
   }
-  return {update,state,systemPolicy,setConfig,canAct,captureOrderBoundary,suspend,invalidate,importConfig:value=>setConfig({...core.normalizeConfig(value),enabled:false}),exportConfig:()=>copy(config),isEnabled:()=>config.enabled===true,isBusy:()=>!!move};
+  return {update,state,systemPolicy,setConfig,canAct,captureOrderBoundary,suspend,suspendInteraction,invalidate,importConfig:value=>setConfig({...core.normalizeConfig(value),enabled:false}),exportConfig:()=>copy(config),isEnabled:()=>config.enabled===true,isBusy:()=>!!move};
 }
 return Object.freeze({create});
 });

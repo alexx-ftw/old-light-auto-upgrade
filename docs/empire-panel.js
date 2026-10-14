@@ -6,6 +6,13 @@
   'use strict';
   const LABELS = { probe: 'Probe', marauder: 'Marauder', sentinel: 'Sentinel', vanguard: 'Vanguard' };
   const ROLES = { balanced: 'Equilibrado', industry: 'Industria', shipyard: 'Astillero', defense: 'Defensa' };
+  const ROLE_HELP = {
+    balanced: 'Equilibrado mantiene tu orden de edificios y participa en el reparto de nuevos objetivos de flota.',
+    industry: 'Industria prioriza extractores, almacén y reactor. No recibe nuevos pedidos por los objetivos imperiales de flota.',
+    shipyard: 'Astillero prioriza astillero, centro de mando, reactor y almacén. Participa en el reparto de flota, sin más peso que Equilibrado.',
+    defense: 'Defensa prioriza centro de mando, almacén y reactor. No recibe nuevos pedidos por los objetivos imperiales de flota ni activa defensa militar.',
+  };
+  let panelSequence = 0;
   const REASONS = {
     'invalid-context': 'Falta identificar la cuenta y la galaxia.',
     'invalid-roster': 'Falta verificar la lista completa de sistemas propios.',
@@ -35,6 +42,8 @@
   const property = (node, key, value) => { if (node[key] !== value) node[key] = value; };
   function create({ document, core, getState, setConfig, canEnable = () => false, isVisible = () => true, now = Date.now }) {
     let root, style, status, toggle, total, fleetSummary, error, list, empty, overview;
+    const panelId = ++panelSequence;
+    let helpSequence = 0;
     const inputs = new Map(), cards = new Map();
     let destroyed = false;
     const el = (tag, text, cls) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node; };
@@ -53,6 +62,9 @@
       for (const [value, caption] of Object.entries(ROLES)) { const option = el('option', caption); option.value = value; role.append(option); }
       roleLabel.append(role); const enabledLabel = el('label', 'Atender '), enabled = el('input'); enabled.type = 'checkbox'; enabled.setAttribute('aria-label', 'Atender este sistema'); enabledLabel.append(enabled);
       controls.append(roleLabel, enabledLabel);
+      const roleHelp = el('p', '', 'empire-hint empire-role-help');
+      roleHelp.id = `oldlight-empire-role-${panelId}-${++helpSequence}`;
+      role.setAttribute('aria-describedby', roleHelp.id);
       const numbers = el('div', undefined, 'empire-numbers');
       const resourceNodes = {};
       for (const [key, label] of [['palladium', 'Palladium'], ['iridium', 'Iridium'], ['queues', 'Colas: edificios / naves'], ['energy', 'Energía libre']]) {
@@ -61,14 +73,14 @@
       const ships = el('div', undefined, 'empire-fleets');
       const shipNodes = new Map(core.DEFAULT_SHIPS.map(id => { const node = el('div'); ships.append(node); return [id, node]; }));
       const allocation = el('p', '', 'empire-progress');
-      card.append(name, age, controls, numbers, ships, allocation); list.append(card);
+      card.append(name, age, controls, roleHelp, numbers, ships, allocation); list.append(card);
       const update = () => {
         const state = getState(), cfg = core.normalizeConfig(state.config);
         const current = cfg.systems[id] || { name: name.textContent, role: 'balanced', enabled: true };
         save({ ...cfg, systems: { ...cfg.systems, [id]: { ...current, role: role.value, enabled: enabled.checked } } });
       };
       role.addEventListener('change', update); enabled.addEventListener('change', update);
-      const result = { card, name, age, role, enabled, resourceNodes, shipNodes, allocation }; cards.set(id, result); return result;
+      const result = { card, name, age, role, roleHelp, enabled, resourceNodes, shipNodes, allocation }; cards.set(id, result); return result;
     }
     function render() {
       if (!root || destroyed || !isVisible()) return;
@@ -98,6 +110,9 @@
         attribute(nodes.role, 'aria-label', 'Rol de ' + nodes.name.textContent);
         attribute(nodes.enabled, 'aria-label', 'Atender ' + nodes.name.textContent);
         if (nodes.role.getRootNode().activeElement !== nodes.role) property(nodes.role, 'value', profile.role);
+        // Describe the visible choice, including a focused unsaved draft. The
+        // save error remains separate; help text never claims it was applied.
+        text(nodes.roleHelp, ROLE_HELP[nodes.role.value] || 'Selecciona un rol válido para consultar sus prioridades.');
         property(nodes.enabled, 'checked', profile.enabled);
         for (const resource of ['palladium', 'iridium']) {
           const r = snap?.resources?.[resource]; text(nodes.resourceNodes[resource], `${num(r?.amount)} / ${num(r?.cap)}`);
@@ -134,6 +149,7 @@
       root.append(head, status, total, overview, fleetSummary, el('h3', 'Objetivos para todo el imperio'), goals,
         el('p', 'Los objetivos cuentan base, misiones y construcción. Los recursos permanecen en cada sistema; la suma es informativa.', 'empire-hint'),
         el('p', 'Equilibrado y Astillero reciben producción de flota. Industria y Defensa no reciben producción imperial adicional en esta fase.', 'empire-hint'),
+        el('p', 'El reparto requiere Atender. Los roles reordenan prioridades, no excluyen otros edificios: respetan tus edificios marcados y las reglas de Depot/Reactor. No organizan patrullas, ataques ni transportes.', 'empire-hint'),
         el('p', 'Con la sincronización de Drive conectada, se comparten objetivos, roles y Atender. Activar o detener Imperio sigue siendo una decisión local.', 'empire-hint'), error, list, empty);
       container.append(style, root); render();
       return root;

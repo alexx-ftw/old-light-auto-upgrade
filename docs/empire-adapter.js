@@ -456,18 +456,38 @@
       } catch { return false; }
       finally { if (moving === operation) moving = null; status = ''; notify(); }
     }
+    function interrupt(ms) {
+      if (moving) moving.cancelled = true;
+      // Revoke the coordinator in this same event, before a cancelled native
+      // hop resolves false and could be mistaken for an unconfirmed selection.
+      try { options.onManualInteraction?.(ms); } catch { /* Local gates remain closed. */ }
+      notify();
+    }
     function onManual(event) {
       if (!event?.isTrusted) return;
+      // The isolated integration knows the Helper host. An absent/throwing
+      // classifier cannot establish an exemption, so uncertain input stops us.
+      try { if (options.isHelperEvent?.(event) === true) return; } catch { /* Fail closed. */ }
       manualUntil = now() + manualHoldMs;
-      if (moving) moving.cancelled = true;
-      notify();
+      interrupt(manualHoldMs);
+    }
+    function onEditorFocus(event) {
+      if (!event?.isTrusted) return;
+      try {
+        if (options.isHelperEvent?.(event) !== true || options.isHelperEditorFocused?.() !== true) return;
+      } catch { return; /* Existing editor/navigation gates still fail closed. */ }
+      // Browser focus() can be trusted without a human gesture. Known editing
+      // revokes a hop, but does not create or extend the interaction cooldown.
+      interrupt(0);
     }
     const events = ['pointerdown', 'keydown', 'touchstart', 'wheel'];
     for (const type of events) doc?.addEventListener?.(type, onManual, true);
+    doc?.addEventListener?.('focusin', onEditorFocus, true);
     function dispose() {
       disposed = true; if (moving) moving.cancelled = true;
       for (const [handle, resolve] of timers) { clear(handle); resolve(); } timers.clear();
       for (const type of events) doc?.removeEventListener?.(type, onManual, true);
+      doc?.removeEventListener?.('focusin', onEditorFocus, true);
     }
     return Object.freeze({ readRoster, readSnapshots, readTransitCensus, readActive, readBundle, selectSystem, canNavigate,
       isAvailable: () => world()?.complete === true,

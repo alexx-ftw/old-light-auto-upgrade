@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.15.1
+// @version      1.15.2
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -310,10 +310,11 @@ function create(options){
   const {core,adapter,read,write,onChange=()=>{},now=Date.now}=options;
   const dwellMs=Math.max(2000,options.dwellMs||5000),maxAgeMs=Math.max(15000,options.maxAgeMs||120000);
   let scope='',config=core.normalizeConfig(),roster=null,transitCensus=null,plan=null,ready=false,status='',error='',epoch=0;
-  let observedId='',arrivedAt=0,pauseUntil=0,move=null,permitNavigation=false,storageError=false,manualHold=false,recoveryDisabled=false;
+  let observedId='',arrivedAt=0,pauseUntil=0,interactionUntil=0,move=null,permitNavigation=false,storageError=false,manualHold=false,recoveryDisabled=false;
   const snapshots=new Map(),visited=new Map(),barriers=new Map();
   const orderBoundaries=new WeakMap();
   const key=()=> 'old-light-empire:v1:'+scope;
+  const pauseDeadline=()=>Math.max(pauseUntil,interactionUntil);
   function cancelMove(){permitNavigation=false;if(move){move.cancelled=true;if(!move.started)move=null;}}
   function changeScope(next){
     if(next===scope)return;
@@ -379,7 +380,7 @@ function create(options){
     if(manualHold&&recoveryDisabled&&next.enabled&&!config.enabled&&!move){manualHold=false;recoveryDisabled=false;error='';}
     config=next;epoch++;ready=false;cancelMove();arrivedAt=now();pauseUntil=0;onChange();return copy(config);
   }
-  function state(){return copy({scope,config,roster,transitCensus,snapshots:[...snapshots.values()],plan,ready,status,error,moving:!!move,target:move?.id||'',storageError,manualHold,pausedUntil:pauseUntil,maxAgeMs});}
+  function state(){return copy({scope,config,roster,transitCensus,snapshots:[...snapshots.values()],plan,ready,status,error,moving:!!move,target:move?.id||'',storageError,manualHold,pausedUntil:pauseDeadline(),maxAgeMs});}
   // Bounded display/local-engine policy only. This does not grant authority;
   // every action still requires canAct's fresh source and HUD validation.
   function systemPolicy(systemId){
@@ -397,7 +398,7 @@ function create(options){
   function select(id,fromId){
     const operation={id,scope,token:epoch,at:now(),started:false,cancelled:false};move=operation;
     Promise.resolve().then(()=>{
-      if(operation.cancelled||move!==operation||operation.token!==epoch||!permitNavigation||!config.enabled||scope!==operation.scope||pauseUntil>now())return null;
+      if(operation.cancelled||move!==operation||operation.token!==epoch||!permitNavigation||!config.enabled||scope!==operation.scope||pauseDeadline()>now())return null;
       const bundled=typeof adapter.readBundle==='function',bundle=bundled?adapter.readBundle():null;
       const freshRoster=validRoster(bundled?bundle?.roster:adapter.readRoster()),active=bundled?bundle?.active:adapter.readActive();
       if(!freshRoster?.systems.some(x=>x.id===id)||!matches(active?.context,fromId)||!acceptable(active?.snapshot,fromId,freshRoster)||adapter.canNavigate?.()===false){operation.cancelled=true;return null;}
@@ -447,7 +448,8 @@ function create(options){
     if(manualHold)return reject('Recorrido detenido tras una selección sin confirmar. Desactiva y activa el modo para revisar.');
     if(move&&now()-move.at>15000){move.cancelled=true;manualHold=true;return hold(error='El cambio de sistema no respondió. Revisa la selección antes de continuar.');}
     if(move){permitNavigation=!move.cancelled;return hold('Seleccionando el siguiente sistema…');}
-    if(pauseUntil>now())return reject('Esperando a que termines de usar el juego.');
+    if(pauseUntil>now())return reject('Imperio suspendido. Revisa la pausa antes de continuar.');
+    if(interactionUntil>now())return reject('Pausa por interacción: '+Math.ceil((interactionUntil-now())/1000)+' s restantes sin nueva actividad en el juego.');
     if(!current)return reject('Esperando identidad, propiedad y datos actuales del sistema seleccionado.');
     const currentEnabled=config.systems[id]?.enabled!==false,nextId=chooseNext(id);
     if(nextId&&nextId!==id&&(!plan.complete||!currentEnabled||now()-arrivedAt>=dwellMs)){
@@ -459,7 +461,7 @@ function create(options){
     ready=true;status='Imperio activo: '+(current.name||id)+'.';error='';return state();
   }
   function checkAction(context,capture=false){
-    if(!ready||!config.enabled||move||manualHold||pauseUntil>now()||!roster||!plan?.complete)return false;
+    if(!ready||!config.enabled||move||manualHold||pauseDeadline()>now()||!roster||!plan?.complete)return false;
     try{
       const actionEpoch=epoch;
       if(JSON.stringify(core.normalizeConfig(sync(read(key()))))!==JSON.stringify(config))return false;
@@ -490,6 +492,9 @@ function create(options){
   function canAct(context){return checkAction(context)===true;}
   function captureOrderBoundary(context){return checkAction(context,true)||null;}
   function suspend(ms=15000){pauseUntil=now()+Math.max(0,ms);ready=false;epoch++;cancelMove();onChange();}
+  // Interaction cannot shorten an independent emergency/explicit suspension.
+  // Policy edits retain this deadline so the adapter and runtime stay aligned.
+  function suspendInteraction(ms=15000){interactionUntil=Math.max(interactionUntil,now()+Math.max(0,ms));ready=false;epoch++;cancelMove();onChange();}
   function invalidate(systemId,token){
     const boundary=token&&typeof token==='object'?orderBoundaries.get(token):null;
     if(boundary)orderBoundaries.delete(token); // Single use, including invalid targets/scopes.
@@ -512,7 +517,7 @@ function create(options){
     }
     ready=false;cancelMove();
   }
-  return {update,state,systemPolicy,setConfig,canAct,captureOrderBoundary,suspend,invalidate,importConfig:value=>setConfig({...core.normalizeConfig(value),enabled:false}),exportConfig:()=>copy(config),isEnabled:()=>config.enabled===true,isBusy:()=>!!move};
+  return {update,state,systemPolicy,setConfig,canAct,captureOrderBoundary,suspend,suspendInteraction,invalidate,importConfig:value=>setConfig({...core.normalizeConfig(value),enabled:false}),exportConfig:()=>copy(config),isEnabled:()=>config.enabled===true,isBusy:()=>!!move};
 }
 return Object.freeze({create});
 });
@@ -525,6 +530,13 @@ return Object.freeze({create});
   'use strict';
   const LABELS = { probe: 'Probe', marauder: 'Marauder', sentinel: 'Sentinel', vanguard: 'Vanguard' };
   const ROLES = { balanced: 'Equilibrado', industry: 'Industria', shipyard: 'Astillero', defense: 'Defensa' };
+  const ROLE_HELP = {
+    balanced: 'Equilibrado mantiene tu orden de edificios y participa en el reparto de nuevos objetivos de flota.',
+    industry: 'Industria prioriza extractores, almacén y reactor. No recibe nuevos pedidos por los objetivos imperiales de flota.',
+    shipyard: 'Astillero prioriza astillero, centro de mando, reactor y almacén. Participa en el reparto de flota, sin más peso que Equilibrado.',
+    defense: 'Defensa prioriza centro de mando, almacén y reactor. No recibe nuevos pedidos por los objetivos imperiales de flota ni activa defensa militar.',
+  };
+  let panelSequence = 0;
   const REASONS = {
     'invalid-context': 'Falta identificar la cuenta y la galaxia.',
     'invalid-roster': 'Falta verificar la lista completa de sistemas propios.',
@@ -554,6 +566,8 @@ return Object.freeze({create});
   const property = (node, key, value) => { if (node[key] !== value) node[key] = value; };
   function create({ document, core, getState, setConfig, canEnable = () => false, isVisible = () => true, now = Date.now }) {
     let root, style, status, toggle, total, fleetSummary, error, list, empty, overview;
+    const panelId = ++panelSequence;
+    let helpSequence = 0;
     const inputs = new Map(), cards = new Map();
     let destroyed = false;
     const el = (tag, text, cls) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node; };
@@ -572,6 +586,9 @@ return Object.freeze({create});
       for (const [value, caption] of Object.entries(ROLES)) { const option = el('option', caption); option.value = value; role.append(option); }
       roleLabel.append(role); const enabledLabel = el('label', 'Atender '), enabled = el('input'); enabled.type = 'checkbox'; enabled.setAttribute('aria-label', 'Atender este sistema'); enabledLabel.append(enabled);
       controls.append(roleLabel, enabledLabel);
+      const roleHelp = el('p', '', 'empire-hint empire-role-help');
+      roleHelp.id = `oldlight-empire-role-${panelId}-${++helpSequence}`;
+      role.setAttribute('aria-describedby', roleHelp.id);
       const numbers = el('div', undefined, 'empire-numbers');
       const resourceNodes = {};
       for (const [key, label] of [['palladium', 'Palladium'], ['iridium', 'Iridium'], ['queues', 'Colas: edificios / naves'], ['energy', 'Energía libre']]) {
@@ -580,14 +597,14 @@ return Object.freeze({create});
       const ships = el('div', undefined, 'empire-fleets');
       const shipNodes = new Map(core.DEFAULT_SHIPS.map(id => { const node = el('div'); ships.append(node); return [id, node]; }));
       const allocation = el('p', '', 'empire-progress');
-      card.append(name, age, controls, numbers, ships, allocation); list.append(card);
+      card.append(name, age, controls, roleHelp, numbers, ships, allocation); list.append(card);
       const update = () => {
         const state = getState(), cfg = core.normalizeConfig(state.config);
         const current = cfg.systems[id] || { name: name.textContent, role: 'balanced', enabled: true };
         save({ ...cfg, systems: { ...cfg.systems, [id]: { ...current, role: role.value, enabled: enabled.checked } } });
       };
       role.addEventListener('change', update); enabled.addEventListener('change', update);
-      const result = { card, name, age, role, enabled, resourceNodes, shipNodes, allocation }; cards.set(id, result); return result;
+      const result = { card, name, age, role, roleHelp, enabled, resourceNodes, shipNodes, allocation }; cards.set(id, result); return result;
     }
     function render() {
       if (!root || destroyed || !isVisible()) return;
@@ -617,6 +634,9 @@ return Object.freeze({create});
         attribute(nodes.role, 'aria-label', 'Rol de ' + nodes.name.textContent);
         attribute(nodes.enabled, 'aria-label', 'Atender ' + nodes.name.textContent);
         if (nodes.role.getRootNode().activeElement !== nodes.role) property(nodes.role, 'value', profile.role);
+        // Describe the visible choice, including a focused unsaved draft. The
+        // save error remains separate; help text never claims it was applied.
+        text(nodes.roleHelp, ROLE_HELP[nodes.role.value] || 'Selecciona un rol válido para consultar sus prioridades.');
         property(nodes.enabled, 'checked', profile.enabled);
         for (const resource of ['palladium', 'iridium']) {
           const r = snap?.resources?.[resource]; text(nodes.resourceNodes[resource], `${num(r?.amount)} / ${num(r?.cap)}`);
@@ -653,6 +673,7 @@ return Object.freeze({create});
       root.append(head, status, total, overview, fleetSummary, el('h3', 'Objetivos para todo el imperio'), goals,
         el('p', 'Los objetivos cuentan base, misiones y construcción. Los recursos permanecen en cada sistema; la suma es informativa.', 'empire-hint'),
         el('p', 'Equilibrado y Astillero reciben producción de flota. Industria y Defensa no reciben producción imperial adicional en esta fase.', 'empire-hint'),
+        el('p', 'El reparto requiere Atender. Los roles reordenan prioridades, no excluyen otros edificios: respetan tus edificios marcados y las reglas de Depot/Reactor. No organizan patrullas, ataques ni transportes.', 'empire-hint'),
         el('p', 'Con la sincronización de Drive conectada, se comparten objetivos, roles y Atender. Activar o detener Imperio sigue siendo una decisión local.', 'empire-hint'), error, list, empty);
       container.append(style, root); render();
       return root;
@@ -1581,18 +1602,38 @@ return Object.freeze({create});
       } catch { return false; }
       finally { if (moving === operation) moving = null; status = ''; notify(); }
     }
+    function interrupt(ms) {
+      if (moving) moving.cancelled = true;
+      // Revoke the coordinator in this same event, before a cancelled native
+      // hop resolves false and could be mistaken for an unconfirmed selection.
+      try { options.onManualInteraction?.(ms); } catch { /* Local gates remain closed. */ }
+      notify();
+    }
     function onManual(event) {
       if (!event?.isTrusted) return;
+      // The isolated integration knows the Helper host. An absent/throwing
+      // classifier cannot establish an exemption, so uncertain input stops us.
+      try { if (options.isHelperEvent?.(event) === true) return; } catch { /* Fail closed. */ }
       manualUntil = now() + manualHoldMs;
-      if (moving) moving.cancelled = true;
-      notify();
+      interrupt(manualHoldMs);
+    }
+    function onEditorFocus(event) {
+      if (!event?.isTrusted) return;
+      try {
+        if (options.isHelperEvent?.(event) !== true || options.isHelperEditorFocused?.() !== true) return;
+      } catch { return; /* Existing editor/navigation gates still fail closed. */ }
+      // Browser focus() can be trusted without a human gesture. Known editing
+      // revokes a hop, but does not create or extend the interaction cooldown.
+      interrupt(0);
     }
     const events = ['pointerdown', 'keydown', 'touchstart', 'wheel'];
     for (const type of events) doc?.addEventListener?.(type, onManual, true);
+    doc?.addEventListener?.('focusin', onEditorFocus, true);
     function dispose() {
       disposed = true; if (moving) moving.cancelled = true;
       for (const [handle, resolve] of timers) { clear(handle); resolve(); } timers.clear();
       for (const type of events) doc?.removeEventListener?.(type, onManual, true);
+      doc?.removeEventListener?.('focusin', onEditorFocus, true);
     }
     return Object.freeze({ readRoster, readSnapshots, readTransitCensus, readActive, readBundle, selectSystem, canNavigate,
       isAvailable: () => world()?.complete === true,
@@ -2727,7 +2768,7 @@ return Object.freeze({create});
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.15.1';
+  const SCRIPT_VERSION = '1.15.2';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -4157,6 +4198,11 @@ return Object.freeze({create});
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.15.2', title: 'Pausa por interacción y ayuda de roles', changes: [
+        'Muestra los segundos restantes de la pausa de interacción. Unifica clics, teclado, rueda y gestos del juego sin contar la actividad dentro del Helper.',
+        'Una interrupción conocida ya no se confunde con una selección fallida permanente. Editar un campo pausa el recorrido hasta salir de él, sin añadir otros 15 segundos.',
+        'Explica cada rol junto al selector. Mantiene las guardas de censo, pedidos y selección; no cambia objetivos, permisos ni lógica de roles. Pruebas offline, sin acciones de partida.',
+      ] },
       { version: '1.15.1', title: 'Confirmación del censo y estados de Drive', changes: [
         'Captura una marca privada del censo antes del clic. Confirmar un pedido ya no descarta la revisión nativa que acaba de confirmar sus colas y recursos.',
         'Mantiene identidad, frescura, bloqueo de pedidos pendientes y reintentos. Distingue una espera real de censo; validación simulada, sin pedidos en la partida.',
@@ -15028,7 +15074,10 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const state = empireController.state();
     const active = empireAdapter.readActive();
     const context = active?.context;
-    return Boolean(context?.scope === state.scope && context.owned && context.settled && context.selectionCount === 1
+    // The dialog exemption does not bypass an explicit interaction/security
+    // pause. In particular touch-only input may not cancel the mission adapter.
+    return Boolean(!(state.pausedUntil > Date.now())
+      && context?.scope === state.scope && context.owned && context.settled && context.selectionCount === 1
       && context.systemId === systemId()?.toLowerCase() && state.config.systems[context.systemId]?.enabled !== false
       && active.snapshot?.owned && active.snapshot.scope === state.scope && active.snapshot.systemId === context.systemId
       && Number.isSafeInteger(active.snapshot.observedAt) && active.snapshot.observedAt <= Date.now()
@@ -15036,7 +15085,9 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   }
 
   function canNavigateEmpire() {
-    return Boolean(leader && settings.enabled && !document.hidden && !hudBlocked() && !pending && !importingBackup
+    const focused = document.activeElement;
+    const gameEditor = focused?.isContentEditable || focused?.matches?.('input, textarea, select, [contenteditable="true"]');
+    return Boolean(!gameEditor && leader && settings.enabled && !document.hidden && !hudBlocked() && !pending && !importingBackup
       && !reports.isRecovering() && !missionAdapter?.isBusy() && !attackRetry?.isBusy()
       && !document.querySelector('dialog[open]')
       && !document.querySelector(`${PANEL} .b-loading, ${FLEET_PANEL} .b-loading`)
@@ -15107,17 +15158,14 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
           queue: { buildings: document.querySelector(`${PANEL} [data-field="queue-list"]`)?.children.length ?? null,
             ships: document.querySelector(`${FLEET_PANEL} [data-field="ship-queue-list"]`)?.children.length ?? null },
           energy: signedInteger(document.querySelector('[data-field="res-energy"]')) }),
-        canNavigate: canNavigateEmpire, onChange: schedule });
+        canNavigate: canNavigateEmpire, onChange: schedule,
+        isHelperEvent: event => Boolean(host && event.composedPath().includes(host)),
+        isHelperEditorFocused: () => Boolean(host?.shadowRoot?.activeElement?.matches('input,select,textarea,[contenteditable="true"]')),
+        onManualInteraction: ms => empireController?.suspendInteraction(ms) });
       empireController = runtime.create({ core, adapter: empireAdapter, onChange: schedule,
         read: key => { const value = localStorage.getItem(key); return value === null ? undefined : JSON.parse(value); },
         write: (key, value) => localStorage.setItem(key, JSON.stringify(value)) });
       bridge?.subscribe?.(() => { observeEmpireStartup(); schedule(); });
-      document.addEventListener('pointerdown', event => {
-        if (event.isTrusted && !event.composedPath().includes(host)) empireController.suspend();
-      }, true);
-      document.addEventListener('keydown', event => {
-        if (event.isTrusted && !event.composedPath().includes(host)) empireController.suspend();
-      }, true);
     }
   } catch (_) { /* Unavailable native observation never enables imperial orders. */ }
   observeEmpireStartup();
