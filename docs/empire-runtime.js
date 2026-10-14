@@ -15,6 +15,14 @@ function create(options){
   const key=()=> 'old-light-empire:v1:'+scope;
   const pauseDeadline=()=>Math.max(pauseUntil,interactionUntil);
   function cancelMove(){permitNavigation=false;if(move){move.cancelled=true;if(!move.started)move=null;}}
+  // Called before the integration's coalesced update. A known global stop
+  // revokes the old traversal even if Resume arrives before the next poll.
+  // Do not clear real selection failures or independent pause deadlines, and
+  // do not notify here: the caller is already scheduling the next update.
+  function cancelNavigation(){
+    if(!ready&&!permitNavigation&&(!move||move.cancelled))return;
+    epoch++;ready=false;cancelMove();
+  }
   function changeScope(next){
     if(next===scope)return;
     epoch++;cancelMove();scope=SCOPE.test(next||'')?next:'';
@@ -254,7 +262,7 @@ function create(options){
     }
     ready=false;cancelMove();
   }
-  return {update,state,systemPolicy,setConfig,canAct,captureOrderBoundary,suspend,suspendInteraction,invalidate,importConfig:value=>setConfig({...core.normalizeConfig(value),enabled:false}),exportConfig:()=>copy(config),isEnabled:()=>config.enabled===true,isBusy:()=>!!move};
+  return {update,state,systemPolicy,setConfig,canAct,captureOrderBoundary,suspend,suspendInteraction,cancelNavigation,invalidate,importConfig:value=>setConfig({...core.normalizeConfig(value),enabled:false}),exportConfig:()=>copy(config),isEnabled:()=>config.enabled===true,isBusy:()=>!!move};
 }
 return Object.freeze({create});
 });

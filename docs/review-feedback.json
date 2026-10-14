@@ -1566,6 +1566,144 @@
         "Verificar token, epoch, ámbito, política vigente, pausas y error de lectura antes de cada next; no usar canNavigate mientras el selector está moving.",
         "Comprobar que un stop conocido no crea manualHold y que los fallos nativos reales lo conservan."
       ]
+    },
+    {
+      "id": "global-pause-navigation-revocation",
+      "feedback": "La pausa global durante next podía resolverse antes del ciclo agrupado de Imperio y dejar manualHold; Pausar/Reanudar rápido podía ejecutar saltos del recorrido antiguo.",
+      "beforeFail": {
+        "revision": "c5f4e690eff170bc03a73947770aa8de0b9fbfc6",
+        "command": "OLD_LIGHT_INTERACTION_ROOT=/ruta/a/base-1.16.4 node --test tests/empire-interaction.test.cjs",
+        "observedFailure": "Mismo archivo final contra la base publicada equivalente: 92 tests, 83 aprobados, 9 fallidos, cero omitidos/cancelados/TODO. Pausar a mitad de next produce manualHold true en vez de false; cinco Pausar/Reanudar ejecutan dos clics en vez de uno. La pausa antes de la microtarea ejecuta un clic en vez de cero.",
+        "evidence": "docs/global-pause-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "global Pause during a native hop cancels before a scheduled update and Resume recovers"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "global Pause then Resume in one coalesced interval never resurrects the old native traversal"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "global Pause before the selector microtask retains zero native clicks across immediate Resume"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "global Pause retains a mid-hop exclude edit and Resume uses only new policy"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "global Pause retains a mid-hop role edit and Resume uses only new policy"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "global Pause retains a mid-hop targets edit and Resume uses only new policy"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "global Pause and Resume preserve a genuine unconfirmed selection hold"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "global Pause and Resume preserve independent suspensions and interaction deadlines"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "global Resume does not bypass account validation after cancelled navigation"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "global Resume does not bypass disconnected validation after cancelled navigation"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "global Resume does not bypass hud validation after cancelled navigation"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "global Resume does not bypass multiselect validation after cancelled navigation"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "hidden then visible during one coalesced interval cancels the old traversal without resetting pauses"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "global Pause with a queued scheduler aborts a false native result without duplicate updates"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "genuine native failure detected before Pause remains a hold even when Resume is immediate"
+        },
+        {
+          "file": "tests/empire-interaction.test.cjs",
+          "name": "global Pause and Resume neither replace pending orders nor bypass their fresh-census barrier"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Pausar durante un salto con el poll nativo anterior al scheduler.",
+          "expected": "Aborta el recorrido antiguo sin manualHold y Reanudar recupera autoridad solo tras revalidar.",
+          "regression": {
+            "file": "tests/empire-interaction.test.cjs",
+            "name": "global Pause during a native hop cancels before a scheduled update and Resume recovers"
+          }
+        },
+        {
+          "scenario": "Cinco Pausar/Reanudar antes del siguiente poll.",
+          "expected": "El segundo clic antiguo no se ejecuta; no se deshace el primero.",
+          "regression": {
+            "file": "tests/empire-interaction.test.cjs",
+            "name": "global Pause then Resume in one coalesced interval never resurrects the old native traversal"
+          }
+        },
+        {
+          "scenario": "El selector falló genuinamente antes de pulsar Pausar.",
+          "expected": "Mantiene manualHold, error y revisión explícita tras Reanudar.",
+          "regression": {
+            "file": "tests/empire-interaction.test.cjs",
+            "name": "global Pause and Resume preserve a genuine unconfirmed selection hold"
+          }
+        },
+        {
+          "scenario": "Cambio de cuenta al reanudar.",
+          "expected": "No permite actuar ni reutiliza el recorrido revocado.",
+          "regression": {
+            "file": "tests/empire-interaction.test.cjs",
+            "name": "global Resume does not bypass account validation after cancelled navigation"
+          }
+        },
+        {
+          "scenario": "Pausa y reanudación mientras hay un pedido con token de confirmación.",
+          "expected": "Conserva el registro y el token; el censo anterior no permite emitir otro pedido.",
+          "regression": {
+            "file": "tests/empire-interaction.test.cjs",
+            "name": "global Pause and Resume neither replace pending orders nor bypass their fresh-census barrier"
+          }
+        },
+        {
+          "scenario": "Ocultar y mostrar la pestaña sin ejecutar un ciclo intermedio.",
+          "expected": "La operación anterior queda cancelada sin crear un bloqueo persistente.",
+          "regression": {
+            "file": "tests/empire-interaction.test.cjs",
+            "name": "hidden then visible during one coalesced interval cancels the old traversal without resetting pauses"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Brave/Violentmonkey y Drive reales",
+          "reason": "Sin sesión real ni acciones de partida. Callback de guardado/notificación, DOM y tiempos sintéticos; no valida persistencia o servicio remoto."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Comprobar que la revocación ocurre antes del retorno por scheduled y no añade callbacks recursivos o timers.",
+        "Verificar que ninguna cancelación limpia manualHold, error o pausas independientes y que órdenes existentes mantienen su barrera.",
+        "Reproducir la causal temporal con el mismo harness contra base y candidata; contrastar que Resume permite trabajo nuevo únicamente con los guards existentes.",
+        "Verificar el commit final limpio y gate completo con dos pasadas idempotentes; no reutilizar resultados tras cambiar bytes."
+      ]
     }
   ]
 }

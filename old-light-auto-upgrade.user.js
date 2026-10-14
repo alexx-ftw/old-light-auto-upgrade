@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.16.4
+// @version      1.16.5
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -316,6 +316,14 @@ function create(options){
   const key=()=> 'old-light-empire:v1:'+scope;
   const pauseDeadline=()=>Math.max(pauseUntil,interactionUntil);
   function cancelMove(){permitNavigation=false;if(move){move.cancelled=true;if(!move.started)move=null;}}
+  // Called before the integration's coalesced update. A known global stop
+  // revokes the old traversal even if Resume arrives before the next poll.
+  // Do not clear real selection failures or independent pause deadlines, and
+  // do not notify here: the caller is already scheduling the next update.
+  function cancelNavigation(){
+    if(!ready&&!permitNavigation&&(!move||move.cancelled))return;
+    epoch++;ready=false;cancelMove();
+  }
   function changeScope(next){
     if(next===scope)return;
     epoch++;cancelMove();scope=SCOPE.test(next||'')?next:'';
@@ -555,7 +563,7 @@ function create(options){
     }
     ready=false;cancelMove();
   }
-  return {update,state,systemPolicy,setConfig,canAct,captureOrderBoundary,suspend,suspendInteraction,invalidate,importConfig:value=>setConfig({...core.normalizeConfig(value),enabled:false}),exportConfig:()=>copy(config),isEnabled:()=>config.enabled===true,isBusy:()=>!!move};
+  return {update,state,systemPolicy,setConfig,canAct,captureOrderBoundary,suspend,suspendInteraction,cancelNavigation,invalidate,importConfig:value=>setConfig({...core.normalizeConfig(value),enabled:false}),exportConfig:()=>copy(config),isEnabled:()=>config.enabled===true,isBusy:()=>!!move};
 }
 return Object.freeze({create});
 });
@@ -3125,7 +3133,7 @@ return Object.freeze({create});
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.16.4';
+  const SCRIPT_VERSION = '1.16.5';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -4575,6 +4583,11 @@ return Object.freeze({create});
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.16.5', title: 'Pausa fiable durante el recorrido imperial', changes: [
+        'Pausar revoca al instante los saltos imperiales pendientes. Reanudar rápido no revive el recorrido anterior ni exige reiniciar Imperio.',
+        'Conserva los bloqueos por selección sin confirmar, las pausas independientes y las comprobaciones de datos antes de actuar. No repite pedidos.',
+        'También detiene el recorrido al ocultar la pestaña. Validación sintética; Brave/Violentmonkey y Drive reales siguen pendientes.',
+      ] },
       { version: '1.16.4', title: 'Reactor y recorrido con trabajo útil', changes: [
         'Reactor puede corregir un déficit actual aunque no haya otra mejora asequible. Conserva casillas, orden, colas y reservas de flota y Depot.',
         'Imperio evita destinos sin trabajo inmediato y los reevalúa. Detenerlo revoca los siguientes saltos nativos; no deshace un salto ya enviado.',
@@ -6163,6 +6176,10 @@ return Object.freeze({create});
   }
 
   function schedule() {
+    // Revoke a known stop synchronously, even when an update is already queued.
+    // Otherwise the native selector can abort before that update and report an
+    // uncertain selection, or a quick Resume can revive its remaining clicks.
+    if (!settings.enabled || document.hidden) empireController?.cancelNavigation?.();
     if (scheduled) return;
     scheduled = true;
     // Native messages and DOM mutations arrive in separate tasks. While the

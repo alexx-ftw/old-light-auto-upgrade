@@ -36,6 +36,7 @@ const installCode = section('  try {\n    const core = globalThis.OldLightEmpire
 const policyCode = section('  function empireMissionPermission()', '\n  function observeEmpireStartup(')
   + section('  function updateEmpireState()', '\n  function installEmpirePanel(');
 const schedulerCode = section('  function schedule()', '\n  function wakeAt(');
+const toggleCode = section("      ui.toggle.addEventListener('click',", "      ui.minimize.addEventListener('click',");
 const fallbackCode = section('  setInterval(() => {\n    schedule();', '\n  schedule();', integrationStart);
 function system(id, q) {
   return { id, q, r: 0, name: 'Synthetic ' + q, buildings: [{ type: 'shipyard', level: 0 }], fleet: [{ type: 'probe', quantity: 2 }],
@@ -99,6 +100,10 @@ function harness(t, { ids = [A], dwellMs = 5000, adapterOptions = {} } = {}) {
   };
   ctx.step = () => { if (++steps > 10000) throw new Error('Scheduler did not yield'); ctx.updateEmpireState(); };
   vm.createContext(ctx); vm.runInContext(plannerCode + policyCode + schedulerCode + installCode + fallbackCode, ctx);
+  let toggle;
+  Object.assign(ctx, { ui: { toggle: { addEventListener(type, fn) { assert.equal(type, 'click'); toggle = fn; } } },
+    error: '', unconfirmed: 0, saveSettings() {}, emitEvent() {} });
+  vm.runInContext(toggleCode, ctx);
   assert.ok(ctx.empireAdapter && ctx.empireController, 'The actual integration must install both coordinators');
   const adapter = ctx.empireAdapter, controller = ctx.empireController;
   const tick = () => { ctx.updateEmpireState(); return controller.state(); };
@@ -107,6 +112,7 @@ function harness(t, { ids = [A], dwellMs = 5000, adapterOptions = {} } = {}) {
   t.after(() => adapter.dispose());
   const microtasks = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
   return { ctx, document, host, game, adapter, controller, listeners, timers, storage, tick, microtasks,
+    toggle: () => toggle(),
     get clock() { return clock; }, get clicks() { return clicks; }, get renders() { return renders; },
     get delivered() { return copy(delivered); }, get active() { return active; },
     set selectorWorks(value) { selectorWorks = value; }, set mismatch(value) { mismatch = value; },
@@ -399,3 +405,139 @@ for (const change of ['disable', 'disable-enable', 'exclude', 'role', 'targets',
     }
   });
 }
+
+// Exercise the real header toggle with the real coalescer and asynchronous
+// selector. The poll is registered before the next 50 ms controller update.
+test('global Pause during a native hop cancels before a scheduled update and Resume recovers', async t => {
+  const middle = uuid(12), h = harness(t, { ids: [A, middle, B] });
+  await h.advance(5001); assert.equal(h.clicks, 1); assert.equal(h.active, middle);
+  h.jump(48); h.toggle(); assert.equal(h.ctx.settings.enabled, false);
+  assert.equal(canAct(h), false);
+  await h.advance(251);
+  assert.equal(h.clicks, 1); assert.equal(h.controller.state().moving, false);
+  assert.equal(h.controller.state().manualHold, false, 'A known Pause must not become an uncertain selection');
+  assert.equal(h.controller.state().error, '');
+  h.toggle(); await h.advance(100);
+  assert.equal(h.ctx.settings.enabled, true); assert.equal(canAct(h), true);
+  assert.equal(h.controller.state().manualHold, false);
+  await h.advance(6000); assert.ok(h.clicks > 1, 'Fresh work resumes without toggling Imperio');
+});
+
+test('global Pause then Resume in one coalesced interval never resurrects the old native traversal', async t => {
+  const middle = uuid(12), h = harness(t, { ids: [A, middle, B] });
+  await h.advance(5001); assert.equal(h.clicks, 1);
+  for (let i = 0; i < 5; i++) { h.toggle(); h.toggle(); }
+  assert.equal(h.ctx.settings.enabled, true);
+  assert.equal(canAct(h), false, 'The cancelled operation still owns the in-flight boundary');
+  await h.advance(500);
+  assert.equal(h.clicks, 1, 'No old second hop after quick repeated Pause/Resume');
+  assert.equal(h.active, middle); assert.equal(h.controller.state().moving, false);
+  assert.equal(h.controller.state().manualHold, false); assert.equal(canAct(h), true);
+});
+
+test('global Pause before the selector microtask retains zero native clicks across immediate Resume', async t => {
+  const h = harness(t, { ids: [A, B] });
+  h.jump(5001); h.tick(); assert.equal(h.controller.state().moving, true);
+  h.toggle(); h.toggle(); await h.microtasks();
+  assert.equal(h.clicks, 0, 'Immediate Resume cannot revive the queued selection');
+  assert.equal(h.controller.state().manualHold, false);
+});
+
+for (const change of ['exclude', 'role', 'targets']) {
+  test(`global Pause retains a mid-hop ${change} edit and Resume uses only new policy`, async t => {
+    const middle = uuid(12), h = harness(t, { ids: [A, middle, B] });
+    await h.advance(5001); h.jump(48); h.toggle();
+    const config = h.controller.exportConfig();
+    if (change === 'exclude') config.systems[B] = { enabled: false };
+    if (change === 'role') config.systems[B] = { role: 'industry' };
+    if (change === 'targets') config.fleetTargets.probe = 50;
+    h.controller.setConfig(config);
+    await h.advance(500); assert.equal(h.clicks, 1);
+    assert.equal(h.controller.state().manualHold, false); assert.equal(canAct(h), false);
+    h.toggle(); await h.advance(100);
+    assert.equal(h.clicks, 1); assert.equal(canAct(h), true);
+    assert.deepEqual(h.controller.exportConfig(), core.normalizeConfig(config));
+  });
+}
+
+test('global Pause and Resume preserve a genuine unconfirmed selection hold', async t => {
+  const h = harness(t, { ids: [A, B] }); h.selectorWorks = false;
+  await h.advance(7500); assert.equal(h.controller.state().manualHold, true);
+  const failure = h.controller.state().error;
+  h.toggle(); await h.advance(100); h.toggle(); await h.advance(16000);
+  assert.equal(h.controller.state().manualHold, true); assert.equal(h.controller.state().error, failure);
+  assert.equal(h.clicks, 1); assert.equal(canAct(h), false);
+});
+
+test('global Pause and Resume preserve independent suspensions and interaction deadlines', async t => {
+  const h = harness(t, { ids: [A, B] });
+  h.controller.suspend(2147483647); h.event('touchstart');
+  const deadline = h.controller.state().pausedUntil;
+  for (let i = 0; i < 4; i++) { h.toggle(); h.toggle(); }
+  await h.advance(16000);
+  assert.equal(h.controller.state().pausedUntil, deadline);
+  assert.equal(h.clicks, 0); assert.equal(canAct(h), false);
+});
+
+for (const invalidate of ['account', 'disconnected', 'hud', 'multiselect']) {
+  test(`global Resume does not bypass ${invalidate} validation after cancelled navigation`, async t => {
+    const middle = uuid(12), h = harness(t, { ids: [A, middle, B] });
+    await h.advance(5001); h.jump(48); h.toggle(); await h.advance(251);
+    assert.equal(h.controller.state().manualHold, false);
+    if (invalidate === 'account') h.scope = 'beta/' + SELF;
+    if (invalidate === 'disconnected') h.disconnect();
+    if (invalidate === 'hud') h.mismatch = true;
+    if (invalidate === 'multiselect') h.selectionCount = 2;
+    h.toggle(); await h.advance(6000);
+    assert.equal(h.clicks, 1); assert.equal(canAct(h), false);
+  });
+}
+
+test('hidden then visible during one coalesced interval cancels the old traversal without resetting pauses', async t => {
+  const middle = uuid(12), h = harness(t, { ids: [A, middle, B] });
+  await h.advance(5001); assert.equal(h.clicks, 1);
+  h.document.hidden = true; h.ctx.schedule();
+  h.document.hidden = false; h.ctx.schedule();
+  await h.advance(500);
+  assert.equal(h.clicks, 1); assert.equal(h.active, middle);
+  assert.equal(h.controller.state().manualHold, false); assert.equal(canAct(h), true);
+});
+
+test('global Pause with a queued scheduler aborts a false native result without duplicate updates', async t => {
+  const middle = uuid(12), h = harness(t, { ids: [A, middle, B] });
+  await h.advance(5001); h.jump(48); h.ctx.schedule();
+  assert.equal(h.ctx.scheduled, true);
+  const timers = h.timers.size;
+  h.toggle();
+  for (let i = 0; i < 20; i++) h.ctx.schedule();
+  assert.equal(h.timers.size, timers, 'Cancelling does not recursively schedule or duplicate timers');
+  await h.advance(251);
+  assert.equal(h.clicks, 1); assert.equal(h.controller.state().manualHold, false);
+  h.toggle(); await h.advance(100); assert.equal(canAct(h), true);
+});
+
+test('genuine native failure detected before Pause remains a hold even when Resume is immediate', async t => {
+  const h = harness(t, { ids: [A, B] });
+  h.beforeResolution = () => { h.mismatch = true; };
+  // An unknown HUD mismatch aborts the native selector; it is not a known pause.
+  await h.advance(5001); h.mismatch = true; await h.advance(2200);
+  assert.equal(h.controller.state().manualHold, true);
+  h.mismatch = false; h.beforeResolution = null;
+  h.toggle(); h.toggle(); await h.advance(16000);
+  assert.equal(h.controller.state().manualHold, true); assert.equal(canAct(h), false);
+  assert.equal(h.clicks, 1);
+});
+
+test('global Pause and Resume neither replace pending orders nor bypass their fresh-census barrier', async t => {
+  const h = harness(t), context = h.adapter.readActive().context;
+  const token = h.controller.captureOrderBoundary(context); assert.ok(token);
+  const pending = { operation: 'existing-synthetic-order', system: A, empireBoundary: token };
+  h.ctx.pending = pending;
+  for (let i = 0; i < 3; i++) { h.toggle(); h.toggle(); }
+  await h.advance(100);
+  assert.equal(h.ctx.pending, pending, 'The original order record and token are untouched');
+  assert.equal(h.clicks, 0); assert.equal(canAct(h), false);
+  h.controller.invalidate(A, token); h.ctx.pending = null;
+  assert.equal(h.tick().ready, false); assert.equal(canAct(h), false, 'A pre-order census cannot authorize another order');
+  h.jump(1); h.publishDelta(); assert.equal(h.tick().ready, true); assert.equal(canAct(h), true);
+});

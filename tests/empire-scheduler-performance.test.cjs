@@ -19,6 +19,7 @@ function scheduler({ imperial = true, execute = () => {}, extras = {}, actualSte
   const steps = [], errors = [], state = { imperial };
   const globals = {
     Date: { now: () => clock + offset }, Math,
+    settings: { enabled: true }, document: { hidden: false },
     queueMicrotask: fn => microtasks.push(fn),
     setTimeout: (fn, delay = 0) => {
       const id = ++nextId; timers.push({ id, at: clock + Math.max(0, delay), fn }); return id;
