@@ -29,6 +29,51 @@
   const array = (x, limit) => Array.isArray(x) && x.length <= limit;
   const stamp = x => typeof x === 'string' && x.length <= 64 && Number.isFinite(Date.parse(x)) && Date.parse(x) >= 0 ? Date.parse(x) : null;
   const coordKey = (q, r) => `${q},${r}`;
+  const OBSERVATION_REASONS = Object.freeze(['', 'awaiting-native-init', 'awaiting-init', 'connection-lost', 'stopped',
+    'malformed', 'session-lost', 'missing-init', 'eliminated', 'incomplete-data', 'observer-injection-unavailable',
+    'invalid-observation', 'out-of-order-observation', 'observer-permission-unavailable', 'observer-started-late']);
+  const OBSERVATION_MESSAGES = Object.freeze({
+    'observer-permission-unavailable': 'El gestor no ofrece GM_addElement. Actualiza el Helper, acepta el permiso de inserción y recarga el juego.',
+    'observer-started-late': 'El lector arrancó después de la carga inicial. Recarga Old Light para observar la conexión nativa desde el inicio.',
+    'observer-injection-unavailable': 'No se pudo instalar el observador nativo en la página. No hay un censo verificado.',
+    'connection-lost': 'Se perdió la conexión nativa del juego. Esperando una nueva conexión y su estado inicial.',
+    'session-lost': 'La sesión nativa dejó de estar disponible. Esperando un nuevo estado inicial de la cuenta.',
+    stopped: 'El observador nativo está detenido. No hay un censo verificado.',
+    malformed: 'El observador recibió datos nativos con un formato no válido. Esperando un nuevo estado inicial.',
+    'missing-init': 'Llegaron actualizaciones nativas sin el estado inicial de la cuenta. No se puede reconstruir el censo.',
+    'invalid-observation': 'El censo nativo recibido no supera la validación de seguridad. No se habilitan acciones imperiales.',
+    'out-of-order-observation': 'Se rechazó un censo nativo anterior al último observado. Esperando datos actuales.',
+    'contradictory-observation': 'El mismo censo nativo contiene datos contradictorios. Esperando una nueva revisión.',
+    eliminated: 'El estado nativo indica que la cuenta está eliminada. No hay sistemas propios verificados.',
+    'incomplete-data': 'El estado nativo recibido está incompleto. Esperando el censo completo de la cuenta.',
+  });
+  // Diagnostic input is separate from world validation and never grants
+  // ownership, connection readiness, navigation or order authority.
+  function observationStatus(read) {
+    if (typeof read !== 'function') return null;
+    try {
+      const raw = read();
+      if (!raw || typeof raw !== 'object') return null;
+      const out = {};
+      for (const key of ['installed', 'observed', 'connected']) {
+        const value = get(raw, key);
+        if (value !== undefined && typeof value !== 'boolean') return null;
+        out[key] = value;
+      }
+      const reason = get(raw, 'reason');
+      if (reason !== undefined && !OBSERVATION_REASONS.includes(reason)) return null;
+      out.reason = reason;
+      const bootstrap = get(raw, 'bootstrap');
+      if (bootstrap !== undefined && bootstrap !== null) {
+        const phase = get(bootstrap, 'phase'), readyState = get(bootstrap, 'readyState'), error = get(bootstrap, 'error');
+        if (!['late-start', 'attempted', 'unavailable'].includes(phase)
+          || !['loading', 'interactive', 'complete', 'unknown'].includes(readyState)
+          || !['', 'bridge-create-failed', 'ready-state-unavailable'].includes(error)) return null;
+        out.bootstrap = { phase, readyState, error };
+      }
+      return out;
+    } catch { return null; }
+  }
   function add(a, b) { const n = a === null || b === null ? null : a + b; return count(n); }
   function shipCounts(rows) {
     if (!array(rows, SHIPS.length)) return counts(null);
@@ -130,6 +175,18 @@
     }
     return out;
   }
+  /**
+   * @typedef {{phase:'late-start'|'attempted'|'unavailable',
+   * readyState:'loading'|'interactive'|'complete'|'unknown',
+   * error:''|'bridge-create-failed'|'ready-state-unavailable'}} BootstrapDiagnostic
+   * @typedef {''|'awaiting-native-init'|'awaiting-init'|'connection-lost'|'stopped'|
+   * 'malformed'|'session-lost'|'missing-init'|'eliminated'|'incomplete-data'|
+   * 'observer-injection-unavailable'|'invalid-observation'|'out-of-order-observation'} ObservationReason
+   * @typedef {{installed?:boolean, observed?:boolean, connected?:boolean,
+   * reason?:ObservationReason, bootstrap?:BootstrapDiagnostic}} ObservationDiagnostic
+   * options.getObservationStatus is an optional () => ObservationDiagnostic
+   * reader for diagnostic text only; none of its fields authorize actions.
+   */
   function create(options = {}) {
     const { getWorld, getContext, getHudSnapshot, document: doc, canNavigate: allowed,
       onChange = () => {}, now = Date.now, setTimeout: later = setTimeout, clearTimeout: clear = clearTimeout } = options;
@@ -144,15 +201,18 @@
     const manualHoldMs = Math.max(0, number(options.manualHoldMs) ?? 15000);
     let disposed = false, moving = null, manualUntil = 0, lastKey = '', lastFingerprint = '', poisonedKey = '';
     let lastVersion = null;
-    let status = 'Esperando el estado nativo completo de la cuenta.';
+    let status = '', worldIssue = '', observationGeneration = null;
     const timers = new Map();
     function notify() { try { onChange(); } catch { /* Rendering cannot authorize navigation. */ } }
     function world() {
+      worldIssue = ''; observationGeneration = null;
       if (disposed) return null;
       try {
         const source = getWorld(), clock = now(), scope = get(source, 'scope'), selfId = id(get(source, 'selfId'));
+        worldIssue = source === null || source === undefined ? '' : 'invalid-observation';
         const galaxy = get(source, 'galaxy'), observedAt = count(get(source, 'observedAt'));
         const epoch = count(get(source, 'epoch')), revision = count(get(source, 'revision')), generation = count(get(source, 'generation'));
+        observationGeneration = generation;
         const systems = get(source, 'systems');
         if (get(source, 'version') !== 1 || get(source, 'connected') !== true || !selfId || typeof scope !== 'string' || !SCOPE.test(scope)
           || scope !== `${galaxy}/${selfId}` || observedAt === null || count(clock) === null || observedAt > clock || clock - observedAt > maxAgeMs
@@ -188,16 +248,51 @@
         // never restore ownership or a pre-arrival fleet after a newer census.
         if (lastVersion?.scope === scope && (generation < lastVersion.generation
           || generation === lastVersion.generation && (epoch < lastVersion.epoch
-            || epoch === lastVersion.epoch && (revision < lastVersion.revision || observedAt < lastVersion.observedAt)))) return null;
+            || epoch === lastVersion.epoch && (revision < lastVersion.revision || observedAt < lastVersion.observedAt)))) {
+          worldIssue = 'out-of-order-observation'; return null;
+        }
         const identity = `${scope}:${generation}:${epoch}`, key = `${identity}:${revision}`;
         const fingerprint = JSON.stringify({ complete, observedAt, roster, snapshots, transits });
-        if (key === poisonedKey) return null;
-        if (lastKey === key && lastFingerprint !== fingerprint) { poisonedKey = key; status = 'El mismo censo nativo contiene datos contradictorios.'; return null; }
+        if (key === poisonedKey) { worldIssue = 'contradictory-observation'; return null; }
+        if (lastKey === key && lastFingerprint !== fingerprint) { poisonedKey = key; worldIssue = 'contradictory-observation'; return null; }
         lastKey = key; lastFingerprint = fingerprint;
         lastVersion = { scope, generation, epoch, revision, observedAt };
+        worldIssue = '';
         return { scope, identity, censusId, observedAt, roster, rawById, snapshots, complete,
           transit: transits && Object.values(ships).every(x => x !== null) ? { scope, censusId, observedAt, ships } : null };
-      } catch { return null; }
+      } catch { worldIssue = 'invalid-observation'; return null; }
+    }
+    function getStatus() {
+      if (disposed) return OBSERVATION_MESSAGES.stopped;
+      const current = world();
+      if (current?.complete) return status || 'Esperando datos nativos y una selección única confirmada.';
+      if (current) return OBSERVATION_MESSAGES['incomplete-data'];
+      if (['out-of-order-observation', 'contradictory-observation'].includes(worldIssue)) return OBSERVATION_MESSAGES[worldIssue];
+      const diagnostic = observationStatus(options.getObservationStatus);
+      if (diagnostic?.bootstrap?.phase === 'late-start') {
+        return 'El helper arrancó después de la carga inicial de la página; el observador nativo no se instaló. Recarga la página con el userscript activado.';
+      }
+      if (diagnostic?.bootstrap?.phase === 'unavailable') return OBSERVATION_MESSAGES['observer-injection-unavailable'];
+      if (diagnostic && own(OBSERVATION_MESSAGES, diagnostic.reason)) return OBSERVATION_MESSAGES[diagnostic.reason];
+      if (diagnostic?.installed === true) {
+        if (diagnostic.reason === 'awaiting-init' && observationGeneration !== null && observationGeneration > 0) {
+          return 'Conexión nativa detectada; esperando el estado inicial de la cuenta.';
+        }
+        if (diagnostic.connected === false && diagnostic.observed === false) {
+          return 'Canal del observador instalado; esperando los primeros datos del observador nativo.';
+        }
+        if (diagnostic.connected === false && observationGeneration === 0) {
+          return 'Canal del observador instalado; esperando la conexión nativa del juego.';
+        }
+        if (diagnostic.connected === false && diagnostic.reason === 'awaiting-init') {
+          return 'Canal del observador instalado; esperando el estado inicial de la cuenta.';
+        }
+      }
+      if (worldIssue) return OBSERVATION_MESSAGES[worldIssue];
+      if (diagnostic?.bootstrap?.phase === 'attempted' && diagnostic.installed === false) {
+        return 'Se intentó iniciar el observador nativo, pero todavía no se ha confirmado su instalación.';
+      }
+      return 'Estado del observador nativo desconocido; esperando un censo completo y verificado de la cuenta.';
     }
     function readRoster() {
       const current = world();
@@ -357,7 +452,7 @@
     }
     return Object.freeze({ readRoster, readSnapshots, readTransitCensus, readActive, selectSystem, canNavigate,
       isAvailable: () => world()?.complete === true,
-      getStatus: () => status || 'Esperando datos nativos y una selección única confirmada.', dispose });
+      getStatus, dispose });
   }
   return Object.freeze({ create, projectResources, nativeAwayBySystem });
 });

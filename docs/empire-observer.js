@@ -1,6 +1,6 @@
 /* Source-backed passive Old Light observer. No game connection or action API.
  * Evidence: galaxy-CqK10P8m.js, release 526e1feaf0acb4d2fcc1648f1c61eb81a26f0884.
- * Must run in the page realm before that module caches window.WebSocket.
+ * Run in the page realm before the native socket registers its handlers.
  * Keep the privileged Helper and all GM/Drive storage in the content realm.
  */
 (function (root, factory) {
@@ -360,6 +360,7 @@
     if (!galaxy || typeof Native !== 'function' || !descriptor || !own(descriptor, 'value')
       || (!descriptor.writable && !descriptor.configurable)) throw new Error('Observer unavailable');
     const reducer = createReducer({ galaxy, now: () => Date.now() });
+    const watched = new WeakSet();
     let stopped = false, active = null, lastError = false, publishTimer = null;
     const later = realm.setTimeout.bind(realm), cancel = realm.clearTimeout.bind(realm);
     const publish = (defer = false) => {
@@ -377,6 +378,10 @@
       active = null;
     }
     function watch(socket) {
+      // Constructor and handler discovery can see the same socket. Never reset
+      // its epoch, or let a detached older socket become active a second time.
+      if (watched.has(socket)) return;
+      watched.add(socket);
       detach(); const token = reducer.beginConnection();
       const onMessage = event => {
         if (stopped || active?.socket !== socket || event.isTrusted !== true) return;
@@ -402,6 +407,36 @@
       return socket;
     } });
     Object.defineProperty(realm, 'WebSocket', { ...descriptor, value: Wrapped });
+    // Engine.IO caches the constructor before opening its socket, then assigns
+    // onmessage immediately after construction. A prototype accessor remains
+    // visible to that cached constructor. Keep the original callback/getter and
+    // setter behavior; discover only still-CONNECTING native sockets. This does
+    // not enumerate or recover sockets whose handlers were already registered.
+    const prototype = Native.prototype;
+    const messageDescriptor = Object.getOwnPropertyDescriptor(prototype, 'onmessage');
+    const urlGetter = Object.getOwnPropertyDescriptor(prototype, 'url')?.get;
+    const stateGetter = Object.getOwnPropertyDescriptor(prototype, 'readyState')?.get;
+    let handlerSetter = null;
+    if (messageDescriptor?.configurable && typeof messageDescriptor.get === 'function'
+      && typeof messageDescriptor.set === 'function' && typeof urlGetter === 'function' && typeof stateGetter === 'function') {
+      const set = function (value) {
+        // The native setter runs first, including its brand checks and errors.
+        const result = Reflect.apply(messageDescriptor.set, this, [value]);
+        if (!stopped && !watched.has(this)) {
+          try {
+            // Native getters bypass shadow properties supplied on an instance.
+            if (Reflect.apply(stateGetter, this, []) === 0 && isGameSocket(Reflect.apply(urlGetter, this, []))) watch(this);
+          } catch {
+            reducer.loseConnection(reducer.snapshot().generation, 'malformed'); publish();
+          }
+        }
+        return result;
+      };
+      try {
+        Object.defineProperty(prototype, 'onmessage', { ...messageDescriptor, set });
+        handlerSetter = set;
+      } catch { /* Keep constructor-only observation when the accessor is unavailable. */ }
+    }
     publish();
     return Object.freeze({
       status: () => ({ installed: !stopped, emissionError: lastError, ...reducer.snapshot() }),
@@ -409,6 +444,11 @@
         if (stopped) return;
         reducer.loseConnection(reducer.snapshot().generation, 'stopped'); publish(); stopped = true; detach();
         if (realm.WebSocket === Wrapped) Object.defineProperty(realm, 'WebSocket', descriptor);
+        const currentHandler = Object.getOwnPropertyDescriptor(prototype, 'onmessage');
+        if (handlerSetter && currentHandler?.set === handlerSetter && currentHandler.get === messageDescriptor.get
+          && currentHandler.enumerable === messageDescriptor.enumerable && currentHandler.configurable === messageDescriptor.configurable) {
+          Object.defineProperty(prototype, 'onmessage', messageDescriptor);
+        }
       },
     });
   }

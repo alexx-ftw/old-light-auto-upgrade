@@ -42,15 +42,18 @@ function harness({ rootAvailable = true, injectionFailure = false } = {}) {
     }
   }
   let page;
-  const parent = { appendChild(script) {
-    scripts.push(script.textContent); script.isConnected = true;
+  const parent = { appendChild(container) { container.isConnected = true; } };
+  function addElement(container, tag, attrs) {
+    assert.equal(tag, 'script'); assert.equal(container.hidden, true);
     if (injectionFailure) throw new Error('CSP refused injection');
-    document.currentScript = script;
+    const script = { textContent: attrs.textContent, parentNode: container };
+    scripts.push(script.textContent); document.currentScript = script;
     try { vm.runInContext(script.textContent, page); } finally { document.currentScript = null; }
-  } };
-  const document = { documentElement: rootAvailable ? parent : null, head: null,
+    return script;
+  }
+  const document = { readyState: 'loading', documentElement: rootAvailable ? parent : null, head: null,
     createElement(tag) {
-      assert.equal(tag, 'script');
+      assert.equal(tag, 'div');
       const script = { textContent: '', isConnected: false, listeners: new Set(),
         remove() { removed++; this.isConnected = false; },
         addEventListener(type, fn) { this.listeners.add(fn); },
@@ -64,7 +67,8 @@ function harness({ rootAvailable = true, injectionFailure = false } = {}) {
       scriptNodes.push(script); return script;
     },
   };
-  const realm = { document, crypto: { randomUUID: () => 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' },
+  const timers = new Map(); let nextTimer = 0;
+  const realm = { document, setTimeout(fn) { const id = ++nextTimer; timers.set(id, fn); return id; }, clearTimeout(id) { timers.delete(id); }, crypto: { randomUUID: () => 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' },
     location: { pathname: '/game/galaxy/alpha', origin: 'https://oldlight.io' },
     postMessage() { throw new Error('Do not broadcast the port to page-wide listeners.'); },
     MutationObserver: class {
@@ -80,7 +84,7 @@ function harness({ rootAvailable = true, injectionFailure = false } = {}) {
     MessageEvent: class { constructor(type, options) { this.type = type; Object.assign(this, options); } },
   });
   const staticSource = 'globalThis.OldLightEmpireObserver = { installPageObserver() {} };';
-  const app = bridge.create({ realm, document, observer, observerSource: staticSource, now: () => NOW, onChange: () => changes++ });
+  const app = bridge.create({ realm, document, observer, observerSource: staticSource, addElement, now: () => NOW, onChange: () => changes++ });
   return { app, realm, document, channels, scripts, handoffs, scriptNodes, staticSource,
     send: data => channels[0].port1.postMessage(typeof data === 'string' ? data : JSON.stringify(data)),
     sendRaw: data => channels[0].port1.postMessage(data),

@@ -11,11 +11,11 @@ const observer = require('../docs/empire-observer.js');
 const root = path.join(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'old-light-auto-upgrade.user.js'), 'utf8');
 
-test('early observation retains content isolation and the exact original grant set', () => {
+test('early observation retains content isolation and only the specifically approved extra grant', () => {
   const meta = fs.readFileSync(path.join(root, 'old-light-auto-upgrade.meta.js'), 'utf8');
   for (const text of [source, meta]) {
     assert.match(text, /@run-at\s+document-start/); assert.match(text, /@inject-into\s+content/);
-    assert.deepEqual([...text.matchAll(/^\/\/ @grant\s+(\S+)/gm)].map(x=>x[1]), ['GM_xmlhttpRequest','GM_getValue','GM_setValue','GM.setValue']);
+    assert.deepEqual([...text.matchAll(/^\/\/ @grant\s+(\S+)/gm)].map(x=>x[1]), ['GM_xmlhttpRequest','GM_getValue','GM_setValue','GM.setValue','GM_addElement']);
     assert.doesNotMatch(text, /@grant\s+unsafeWindow/);
   }
 });
@@ -33,6 +33,7 @@ test('document-start loads only passive modules and defers the legacy Helper unt
   const context={window:win,location:{origin:'https://oldlight.io',pathname:'/game/galaxy/alpha'},
     document:{readyState:'loading',documentElement:null,head:null,addEventListener:(type,fn,options)=>events.push({type,fn,options}),
       querySelector:selector=>{queries.push(selector);throw new Error('Legacy UI ran before DOM ready');}},
+    GM_addElement(){ throw new Error('No root should defer insertion'); },
     crypto:{randomUUID:()=> 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'},
     MutationObserver:class{observe(){watches++;}disconnect(){}},
   };
