@@ -57,13 +57,14 @@ test('unknown frames including action tokens and chat are ignored before parsing
     assert.deepEqual(O.parseFrame(text), { kind: 'ignore' });
   }
 });
-test('projection drops all other player data and extraneous self/system/config properties', () => {
+test('projection keeps only public ownership identity and drops other private player data', () => {
   const input = init(); input.token = 'ROOT_SECRET'; input.world.players[0].email = 'SELF_SECRET';
-  input.world.players[0].owned[0].token = 'SYSTEM_SECRET'; input.world.players[1].name = 'OTHER_SECRET';
+  input.world.players[0].owned[0].token = 'SYSTEM_SECRET'; input.world.players[1].name = 'Public Rival'; input.world.players[1].email = 'OTHER_SECRET';
   input.config.token = 'CONFIG_SECRET'; input.world.players[0].transits[0].token = 'TRANSIT_SECRET';
   const serialized = JSON.stringify(O.parseFrame(frame('world.init', input)));
   assert.equal(/SECRET|token|email/.test(serialized), false);
-  assert.equal(serialized.includes(OTHER), false);
+  assert.equal(serialized.includes(OTHER), true);
+  assert.equal(serialized.includes('Public Rival'), true);
 });
 test('native delta retains omitted transits/credits and empty owned list', () => {
   const { reducer, token, advance } = ready(); advance();

@@ -464,7 +464,7 @@
       notify();
     }
     function onManual(event) {
-      if (!event?.isTrusted) return;
+      if (disposed || !event?.isTrusted) return;
       // The isolated integration knows the Helper host. An absent/throwing
       // classifier cannot establish an exemption, so uncertain input stops us.
       try { if (options.isHelperEvent?.(event) === true) return; } catch { /* Fail closed. */ }
@@ -491,7 +491,7 @@
     }
     return Object.freeze({ readRoster, readSnapshots, readTransitCensus, readActive, readBundle, selectSystem, canNavigate,
       isAvailable: () => world()?.complete === true,
-      getStatus, dispose });
+      getStatus, observeInteraction: onManual, dispose });
   }
   return Object.freeze({ create, projectResources, nativeAwayBySystem });
 });

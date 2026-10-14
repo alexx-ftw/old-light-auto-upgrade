@@ -143,6 +143,127 @@
     if (x.eliminatedAt !== undefined) out.eliminatedAt = x.eliminatedAt === null ? null : stamp(x.eliminatedAt);
     return out;
   }
+  // Public identity/coordinate claims only. This is deliberately NOT a complete
+  // galaxy census: native rivals may also arrive through region/star replies,
+  // which this passive world-event observer does not consume. Missing cells
+  // are unknown, never evidence of a dormant or safe target.
+  function ownerPlayer(value) {
+    const x = record(value), out = { id: id(x.id), owned: unique(array(x.owned, LIMITS.systems).map(item => {
+      record(item); return { q: coord(item.q), r: coord(item.r) };
+    }), item => `${item.q},${item.r}`) };
+    optional(out, x, 'name', name);
+    return out;
+  }
+  function ownershipPlayers(value) {
+    const list = unique(array(value, LIMITS.players).map(ownerPlayer), player => player.id);
+    let count = 0; const seen = new Set();
+    for (const player of list) for (const item of player.owned) {
+      const key = `${item.q},${item.r}`;
+      if (++count > LIMITS.systems || seen.has(key)) fail();
+      seen.add(key);
+    }
+    return list;
+  }
+  function projectOwnershipInit(world) {
+    try { return { version: 1, complete: false, players: ownershipPlayers(world.players) }; }
+    catch { return null; }
+  }
+  function projectOwnershipDelta(payload) {
+    try {
+      const out = { removed: [], updated: [], added: [], invalidated: false };
+      if (payload.removed?.playerIds !== undefined) out.removed = unique(array(payload.removed.playerIds, LIMITS.players).map(id), x => x);
+      for (const group of ['updated', 'added']) {
+        if (payload[group]?.players !== undefined) {
+          out[group] = unique(array(payload[group].players, LIMITS.players).map(ownerPlayer), player => player.id);
+        }
+      }
+      // Native dirty-sector events refresh rival ownership from region replies.
+      // We cannot retain old claims when those replacement replies are unseen.
+      if (payload.updated?.dirtySectors !== undefined) {
+        const dirty = array(payload.updated.dirtySectors, LIMITS.systems);
+        out.invalidated = dirty.length > 0;
+      }
+      return out;
+    } catch { return null; }
+  }
+  // Private, current-generation indices. No DTO or permission is cached here.
+  // Each coordinate has one owner; changing a small native delta does not scan
+  // or clone every other player. Fresh wire DTOs are made only for publication.
+  function indexOwnership(value) {
+    if (!value) return null;
+    const state = { players: new Map(), coordinates: new Map() };
+    for (const player of value.players) {
+      const cells = new Map(player.owned.map(cell => [`${cell.q},${cell.r}`, cell]));
+      state.players.set(player.id, { id: player.id, ...(player.name === undefined ? {} : { name: player.name }), cells });
+      for (const key of cells.keys()) state.coordinates.set(key, player.id);
+    }
+    return state;
+  }
+  function reduceOwnership(previous, delta) {
+    if (!previous || !delta || delta.invalidated) return null;
+    if (!delta.removed.length && !delta.updated.length && !delta.added.length) return previous;
+    try {
+      const players = previous.players, coordinates = previous.coordinates;
+      // A failure below drops this whole private generation. No partially
+      // mutated state is ever published or returned to a consumer.
+      for (const id of delta.removed) {
+        const old = players.get(id);
+        if (old) { for (const key of old.cells.keys()) coordinates.delete(key); players.delete(id); }
+      }
+      const replacements = new Map(), touched = new Set(), claims = new Set();
+      for (const player of [...delta.updated, ...delta.added]) {
+        touched.add(player.id);
+        for (const cell of player.owned) claims.add(`${cell.q},${cell.r}`);
+      }
+      for (const player of delta.updated) {
+        const old = players.get(player.id);
+        if (old && !player.owned.length) {
+          // Native [] retains ownership. A name/economy-only update must not
+          // traverse a large owner's unchanged coordinate index.
+          players.set(player.id, { id: player.id, ...(player.name === undefined ? {} : { name: player.name }), cells: old.cells });
+          continue;
+        }
+        const cells = new Map(player.owned.map(cell => [`${cell.q},${cell.r}`, cell]));
+        // Remove old index entries first, then install all final claims. This
+        // preserves ambiguity detection between players touched in one delta.
+        if (old) for (const key of old.cells.keys()) coordinates.delete(key);
+        const next = { id: player.id, ...(player.name === undefined ? {} : { name: player.name }), cells };
+        players.set(player.id, next); replacements.set(player.id, next);
+      }
+      for (const player of delta.added) if (!players.has(player.id)) {
+        const next = { id: player.id, ...(player.name === undefined ? {} : { name: player.name }),
+          cells: new Map(player.owned.map(cell => [`${cell.q},${cell.r}`, cell])) };
+        players.set(player.id, next); replacements.set(player.id, next);
+      }
+      // Native captures prune only players absent from both touched sets,
+      // including claims from added records ignored for an existing player.
+      for (const key of claims) {
+        const owner = coordinates.get(key);
+        if (owner !== undefined && !touched.has(owner)) {
+          players.get(owner).cells.delete(key); coordinates.delete(key);
+        }
+      }
+      if (players.size > LIMITS.players) return null;
+      for (const player of replacements.values()) for (const key of player.cells.keys()) {
+        if (coordinates.has(key)) return null;
+        coordinates.set(key, player.id);
+        if (coordinates.size > LIMITS.systems) return null;
+      }
+      return previous;
+    } catch { return null; }
+  }
+  function validatedOwnership(value, selfId, owned, connected) {
+    if (!connected || value === null || value === undefined) return null;
+    try {
+      const x = record(value);
+      if (x.version !== 1 || x.complete !== false) fail();
+      const players = ownershipPlayers(x.players), self = players.find(player => player.id === selfId);
+      if (!self || self.owned.length !== owned.length) fail();
+      const ownKeys = new Set(owned.map(item => `${item.q},${item.r}`));
+      if (self.owned.some(item => !ownKeys.has(`${item.q},${item.r}`))) fail();
+      return { version: 1, complete: false, players };
+    } catch { return null; }
+  }
   function boundedJson(text) {
     let depth = 0, nodes = 0, quoted = false, escaped = false;
     for (let i = 0; i < text.length; i++) {
@@ -167,7 +288,7 @@
     if (!self) fail();
     const configVersion = p.config && ['string', 'number'].includes(typeof p.config.version)
       ? String(p.config.version).slice(0, 100) : '';
-    return { kind: 'init', selfId, self, serverNow: int(p.serverNow), configVersion };
+    return { kind: 'init', selfId, self, serverNow: int(p.serverNow), configVersion, ownership: projectOwnershipInit(world) };
   }
   function projectDelta(payload, selfId) {
     if (!selfId || !UUID.test(selfId)) fail();
@@ -195,6 +316,7 @@
         }
       }
     }
+    out.ownership = projectOwnershipDelta(p);
     return out;
   }
   /** Returns a sanitized event, {kind:'ignore'}, or {kind:'invalid'}; never raw payloads. */
@@ -224,8 +346,8 @@
   function createReducer({ galaxy, now = Date.now } = {}) {
     if (!GALAXY.test(galaxy || '') || typeof now !== 'function') throw new TypeError('Invalid observer scope');
     let generation = 0, epoch = 0, revision = 0, current = null, connected = false, reason = 'awaiting-init';
-    let receivedAt = 0, serverNow = null, lastInitServerNow = null, configVersion = '';
-    function invalidate(why) { connected = false; current = null; receivedAt = 0; serverNow = null; reason = why; }
+    let receivedAt = 0, serverNow = null, lastInitServerNow = null, configVersion = '', ownership = null;
+    function invalidate(why) { connected = false; current = null; ownership = null; receivedAt = 0; serverNow = null; reason = why; }
     function beginConnection() { generation++; lastInitServerNow = null; invalidate('awaiting-init'); return generation; }
     function loseConnection(token, why = 'connection-lost') {
       if (token !== generation) return false;
@@ -243,7 +365,7 @@
       if (!Number.isSafeInteger(observedAt) || observedAt < 0) { invalidate('malformed'); return true; }
       if (event.kind === 'init') {
         if (lastInitServerNow !== null && event.serverNow < lastInitServerNow) { invalidate('malformed'); return true; }
-        epoch++; revision = 0; current = event.self; connected = true; reason = '';
+        epoch++; revision = 0; current = event.self; ownership = indexOwnership(event.ownership); connected = true; reason = '';
         serverNow = event.serverNow; lastInitServerNow = event.serverNow; configVersion = event.configVersion; receivedAt = observedAt; return true;
       }
       if (!current || !connected) { invalidate('missing-init'); return true; }
@@ -262,31 +384,57 @@
         const keys = new Set(event.claims.map(x => `${x.q},${x.r}`));
         current = { ...current, owned: current.owned.filter(x => !keys.has(`${x.q},${x.r}`)) };
       }
+      ownership = reduceOwnership(ownership, event.ownership);
       revision++; receivedAt = observedAt; return true;
+    }
+    // Scalar metadata never materializes or validates a full ownership census.
+    function stamp() { return { generation, epoch, revision, connected, observedAt: receivedAt }; }
+    function facts() {
+      const transitShips = Object.fromEntries(SHIPS.map(x => [x, 0]));
+      if (!current) return { complete: false, reason, transitShips };
+      let complete = current.owned.length > 0 && Array.isArray(current.transits) && !current.eliminatedAt;
+      for (const s of current.owned) {
+        const yardLevel = s.buildings.find(x => x.type === 'shipyard')?.level;
+        if (!s.economy || !s.fleet || (yardLevel !== 0 && !s.shipyard)) complete = false;
+      }
+      for (const t of current.transits || []) for (const ship of t.ships) {
+        if (transitShips[ship.type] === null) continue;
+        const total = transitShips[ship.type] + ship.quantity;
+        if (!Number.isSafeInteger(total)) { complete = false; transitShips[ship.type] = null; }
+        else if (transitShips[ship.type] !== null) transitShips[ship.type] = total;
+      }
+      return { complete: complete && connected,
+        reason: current.eliminatedAt ? 'eliminated' : complete ? '' : 'incomplete-data', transitShips };
+    }
+    function coherentOwnership() {
+      if (!current || !connected || !ownership) return false;
+      const self = ownership.players.get(current.id);
+      if (!self || self.cells.size !== current.owned.length) return false;
+      return current.owned.every(item => self.cells.has(`${item.q},${item.r}`));
+    }
+    function canDeferPublication() {
+      // Scheduling only: the wire receiver still revalidates every DTO.
+      return facts().complete && coherentOwnership();
+    }
+    function ownershipProjection() {
+      if (!coherentOwnership()) return null;
+      return { version: 1, complete: false, players: [...ownership.players.values()].map(player => ({
+        id: player.id, ...(player.name === undefined ? {} : { name: player.name }),
+        owned: [...player.cells.values()].map(cell => ({ q: cell.q, r: cell.r })),
+      })) };
     }
     function snapshot() {
       const out = { version: VERSION, galaxy, selfId: current?.id || '', scope: current ? `${galaxy}/${current.id}` : '',
         epoch, revision, generation, observedAt: receivedAt, serverNow, configVersion, connected,
-        complete: false, reason, systems: [], transits: [], transitShips: Object.fromEntries(SHIPS.map(x => [x, 0])), credits: null };
+        ...facts(), systems: [], transits: [], credits: null, ownership: null };
       if (!current) return out;
       out.systems = clone(current.owned); out.transits = clone(current.transits || []); out.credits = clone(current.credits || null);
-      let complete = current.owned.length > 0 && Array.isArray(current.transits) && !current.eliminatedAt;
-      for (const s of out.systems) {
-        const yardLevel = s.buildings.find(x => x.type === 'shipyard')?.level;
-        if (!s.economy || !s.fleet || (yardLevel !== 0 && !s.shipyard)) complete = false;
-      }
-      for (const t of out.transits) for (const ship of t.ships) {
-        if (out.transitShips[ship.type] === null) continue;
-        const total = out.transitShips[ship.type] + ship.quantity;
-        if (!Number.isSafeInteger(total)) { complete = false; out.transitShips[ship.type] = null; }
-        else if (out.transitShips[ship.type] !== null) out.transitShips[ship.type] = total;
-      }
-      out.complete = complete && connected;
-      out.reason = current.eliminatedAt ? 'eliminated' : complete ? '' : 'incomplete-data';
+      out.ownership = ownershipProjection();
       return out;
     }
-    return Object.freeze({ beginConnection, loseConnection, ingest, snapshot });
+    return Object.freeze({ beginConnection, loseConnection, ingest, snapshot, stamp, canDeferPublication });
   }
+
   // Revalidate the unprivileged page-to-content bridge without invoking input
   // accessors, toJSON, iterators, or prototype hooks. JSON text is preferred.
   function plainCopy(value) {
@@ -328,6 +476,9 @@
         systems: systems(p.systems), transits: transits(p.transits),
         transitShips: Object.fromEntries(SHIPS.map(type => [type, 0])), credits: credits(p.credits) };
       if (!selfId && (out.systems.length || out.transits.length || out.credits)) fail();
+      // Older page observers omit ownership. Invalid/incomplete public claims
+      // close the ally guard, without discarding otherwise valid own economy.
+      out.ownership = validatedOwnership(p.ownership, selfId, out.systems, connected);
       for (const t of out.transits) for (const ship of t.ships) {
         const n = out.transitShips[ship.type];
         if (n !== null) out.transitShips[ship.type] = Number.isSafeInteger(n + ship.quantity) ? n + ship.quantity : null;
@@ -355,8 +506,9 @@
     } catch { return false; }
   }
   /** Page-world only. It never initiates/changes a connection, or accesses send. */
-  function installPageObserver({ channel, emit } = {}) {
-    if (typeof channel !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(channel) || typeof emit !== 'function') throw new TypeError('Invalid observer channel');
+  function installPageObserver({ channel, emit, onPending } = {}) {
+    if (typeof channel !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(channel) || typeof emit !== 'function'
+      || onPending !== undefined && typeof onPending !== 'function') throw new TypeError('Invalid observer channel');
     const location = realm.location;
     const galaxy = location?.origin === 'https://oldlight.io'
       ? /^\/game\/galaxy\/([A-Za-z0-9_-]{1,64})(?:\/|$)/.exec(location.pathname)?.[1] : null;
@@ -369,6 +521,10 @@
     const later = realm.setTimeout.bind(realm), cancel = realm.clearTimeout.bind(realm);
     const publish = (defer = false) => {
       if (stopped) return;
+      // A synchronous, scalar-only bridge marker revokes the prior snapshot
+      // before either a timer or MessagePort delivery can lag the native event.
+      // It is optional for direct consumers and never touches game state.
+      try { onPending?.(reducer.stamp()); } catch { lastError = true; }
       if (defer) {
         if (publishTimer === null) publishTimer = later(() => { publishTimer = null; publish(); }, 0);
         return;
@@ -389,7 +545,12 @@
       detach(); const token = reducer.beginConnection();
       const onMessage = event => {
         if (stopped || active?.socket !== socket || event.isTrusted !== true) return;
-        if (reducer.ingest(event.data, token)) publish(reducer.snapshot().complete);
+        if (reducer.ingest(event.data, token)) {
+          // Unknown ownership closes dispatch immediately, even while the own
+          // economy remains complete. Valid updates still wait for native UI.
+          // Do not copy all owners for every frame just to choose that timing.
+          publish(reducer.canDeferPublication());
+        }
       };
       const onLost = () => {
         if (stopped || active?.socket !== socket) return;

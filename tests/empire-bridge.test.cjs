@@ -54,7 +54,10 @@ function harness({ rootAvailable = true, injectionFailure = false } = {}) {
   const document = { readyState: 'loading', documentElement: rootAvailable ? parent : null, head: null,
     createElement(tag) {
       assert.equal(tag, 'div');
-      const script = { textContent: '', isConnected: false, listeners: new Set(),
+      const script = { textContent: '', isConnected: false, listeners: new Set(), attributes: new Map(),
+        getAttribute(name) { return this.attributes.get(name) ?? null; },
+        setAttribute(name,value) { this.attributes.set(name,String(value)); },
+        removeAttribute(name) { this.attributes.delete(name); },
         remove() { removed++; this.isConnected = false; },
         addEventListener(type, fn) { this.listeners.add(fn); },
         removeEventListener(type, fn) { this.listeners.delete(fn); },
@@ -83,10 +86,12 @@ function harness({ rootAvailable = true, injectionFailure = false } = {}) {
   page = vm.createContext({ document, MessageChannel,
     MessageEvent: class { constructor(type, options) { this.type = type; Object.assign(this, options); } },
   });
-  const staticSource = 'globalThis.OldLightEmpireObserver = { installPageObserver() {} };';
+  const staticSource = 'globalThis.OldLightEmpireObserver = { installPageObserver(options) { globalThis.observerOptions = options; } };';
   const app = bridge.create({ realm, document, observer, observerSource: staticSource, addElement, now: () => NOW, onChange: () => changes++ });
   return { app, realm, document, channels, scripts, handoffs, scriptNodes, staticSource,
-    send: data => channels[0].port1.postMessage(typeof data === 'string' ? data : JSON.stringify(data)),
+    pending: data => page.observerOptions.onPending(data),
+    send: data => { if(data&&typeof data==='object')page.observerOptions.onPending(data);channels[0].port1.postMessage(typeof data === 'string' ? data : JSON.stringify(data)); },
+    deliver: data => channels[0].port1.postMessage(typeof data === 'string' ? data : JSON.stringify(data)),
     sendRaw: data => channels[0].port1.postMessage(data),
     mountRoot() { document.documentElement = parent; watcher(); },
     get changes() { return changes; }, get removed() { return removed; }, get observerDisconnected() { return observerDisconnected; },
@@ -170,4 +175,30 @@ test('stop closes the pipe, clears data and prevents subsequent notifications', 
   h.app.stop(); assert.equal(h.app.snapshot(), null);
   assert.equal(h.channels[0].port2.closed, true);
   h.send(validSnapshot()); assert.equal(h.app.snapshot(), null); assert.equal(h.changes, count); h.app.stop();
+});
+
+test('synchronous pending marker revokes old authority before delayed snapshot delivery', () => {
+  const h=harness(),first=validSnapshot(),next={...first,revision:first.revision+1,observedAt:NOW+1};
+  h.send(first);assert.ok(h.app.snapshot());
+  h.pending(next);
+  assert.equal(h.app.snapshot(),null);assert.equal(h.app.status().connected,false);assert.equal(h.app.status().complete,false);
+  h.deliver(first);assert.equal(h.app.snapshot(),null,'late old MessagePort delivery cannot restore authority');
+  h.deliver(next);assert.equal(h.app.snapshot().revision,next.revision);
+  const marker=h.scriptNodes[0].getAttribute('data-oldlight-empire-pending');
+  assert.deepEqual(JSON.parse(marker),[next.generation,next.epoch,next.revision,true,NOW+1]);
+  assert.ok(!marker.includes(SELF)&&!marker.includes(SYSTEM));
+});
+
+test('pending generation, epoch, connected flag and timestamp each independently revoke cached snapshots', () => {
+  for(const change of [{generation:2},{epoch:2},{connected:false},{observedAt:NOW+1}]){
+    const h=harness(),value=validSnapshot();h.send(value);h.pending({...value,...change});
+    assert.equal(h.app.snapshot(),null);
+  }
+});
+
+test('missing or malformed pending marker cannot expose a cached or freshly delivered snapshot', () => {
+  const h=harness(),value=validSnapshot();h.deliver(value);assert.equal(h.app.snapshot(),null);
+  h.send(value);assert.ok(h.app.snapshot());
+  h.scriptNodes[0].removeAttribute('data-oldlight-empire-pending');assert.equal(h.app.snapshot(),null);
+  h.scriptNodes[0].setAttribute('data-oldlight-empire-pending','bad');assert.equal(h.app.snapshot(),null);
 });

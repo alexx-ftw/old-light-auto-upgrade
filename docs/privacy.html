@@ -29,6 +29,13 @@
       <p>Desde 1.14.1, el permiso GM_addElement inserta únicamente el lector estático de estado. El Helper y Drive siguen en el contexto aislado del gestor; esta inserción no añade servidores, acceso a credenciales ni permisos de red.</p>
       <p>Los datos seleccionados cruzan un puerto privado hacia el Helper aislado. El observador no puede acceder al almacenamiento GM ni al token de Google Drive, que nunca se entrega al código de la página. Las observaciones económicas no se incluyen en las copias ni en las métricas y no se transmiten a ningún servicio nuevo. Si no se puede verificar la identidad, propiedad o actualidad de los datos, se bloquean los pedidos imperiales.</p>
     </section>
+    <section aria-labelledby="allies-heading">
+      <h2 id="allies-heading">Jugadores protegidos</h2>
+      <p>Desde 1.16.0, la lista de jugadores protegidos empieza vacía y se configura localmente por cuenta y galaxia. Guarda los identificadores de juego y nombres que introduces en este navegador. No se incluye en Drive, copias ni métricas; puedes quitar sus entradas desde Flota → Jugadores protegidos.</p>
+      <p>Para comprobar el destinatario, el observador conserva en memoria una proyección parcial y acotada de identificadores, nombres públicos y coordenadas de propiedad que llegan por la conexión nativa. No proyecta economía, flotas, tránsitos ni mensajes privados de otros jugadores. La proyección se invalida al desconectar o cuando una actualización no permite reconstruirla con certeza. No se envía a un servicio externo ni se guarda como historial.</p>
+      <p>La protección se comprueba en los envíos automáticos del Helper. No cancela flotas ya enviadas, no controla órdenes manuales ni garantiza ausencia de combate si cambia la propiedad durante el viaje. Actualizar el Helper no protege automáticamente a ninguna persona concreta.</p>
+    </section>
+
     <section aria-labelledby="google-heading">
       <h2 id="google-heading">Conexión con Google Drive</h2>
       <p>Google Drive es opcional. Al iniciar sesión, se solicita únicamente el permiso <code>drive.appdata</code> para crear, actualizar, listar y leer las copias y los ajustes sincronizados en <code>appDataFolder</code>, el espacio privado de datos de esta aplicación en tu cuenta.</p>

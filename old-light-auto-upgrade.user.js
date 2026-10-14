@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.15.2
+// @version      1.16.0
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -828,6 +828,127 @@ return Object.freeze({create});
     if (x.eliminatedAt !== undefined) out.eliminatedAt = x.eliminatedAt === null ? null : stamp(x.eliminatedAt);
     return out;
   }
+  // Public identity/coordinate claims only. This is deliberately NOT a complete
+  // galaxy census: native rivals may also arrive through region/star replies,
+  // which this passive world-event observer does not consume. Missing cells
+  // are unknown, never evidence of a dormant or safe target.
+  function ownerPlayer(value) {
+    const x = record(value), out = { id: id(x.id), owned: unique(array(x.owned, LIMITS.systems).map(item => {
+      record(item); return { q: coord(item.q), r: coord(item.r) };
+    }), item => `${item.q},${item.r}`) };
+    optional(out, x, 'name', name);
+    return out;
+  }
+  function ownershipPlayers(value) {
+    const list = unique(array(value, LIMITS.players).map(ownerPlayer), player => player.id);
+    let count = 0; const seen = new Set();
+    for (const player of list) for (const item of player.owned) {
+      const key = `${item.q},${item.r}`;
+      if (++count > LIMITS.systems || seen.has(key)) fail();
+      seen.add(key);
+    }
+    return list;
+  }
+  function projectOwnershipInit(world) {
+    try { return { version: 1, complete: false, players: ownershipPlayers(world.players) }; }
+    catch { return null; }
+  }
+  function projectOwnershipDelta(payload) {
+    try {
+      const out = { removed: [], updated: [], added: [], invalidated: false };
+      if (payload.removed?.playerIds !== undefined) out.removed = unique(array(payload.removed.playerIds, LIMITS.players).map(id), x => x);
+      for (const group of ['updated', 'added']) {
+        if (payload[group]?.players !== undefined) {
+          out[group] = unique(array(payload[group].players, LIMITS.players).map(ownerPlayer), player => player.id);
+        }
+      }
+      // Native dirty-sector events refresh rival ownership from region replies.
+      // We cannot retain old claims when those replacement replies are unseen.
+      if (payload.updated?.dirtySectors !== undefined) {
+        const dirty = array(payload.updated.dirtySectors, LIMITS.systems);
+        out.invalidated = dirty.length > 0;
+      }
+      return out;
+    } catch { return null; }
+  }
+  // Private, current-generation indices. No DTO or permission is cached here.
+  // Each coordinate has one owner; changing a small native delta does not scan
+  // or clone every other player. Fresh wire DTOs are made only for publication.
+  function indexOwnership(value) {
+    if (!value) return null;
+    const state = { players: new Map(), coordinates: new Map() };
+    for (const player of value.players) {
+      const cells = new Map(player.owned.map(cell => [`${cell.q},${cell.r}`, cell]));
+      state.players.set(player.id, { id: player.id, ...(player.name === undefined ? {} : { name: player.name }), cells });
+      for (const key of cells.keys()) state.coordinates.set(key, player.id);
+    }
+    return state;
+  }
+  function reduceOwnership(previous, delta) {
+    if (!previous || !delta || delta.invalidated) return null;
+    if (!delta.removed.length && !delta.updated.length && !delta.added.length) return previous;
+    try {
+      const players = previous.players, coordinates = previous.coordinates;
+      // A failure below drops this whole private generation. No partially
+      // mutated state is ever published or returned to a consumer.
+      for (const id of delta.removed) {
+        const old = players.get(id);
+        if (old) { for (const key of old.cells.keys()) coordinates.delete(key); players.delete(id); }
+      }
+      const replacements = new Map(), touched = new Set(), claims = new Set();
+      for (const player of [...delta.updated, ...delta.added]) {
+        touched.add(player.id);
+        for (const cell of player.owned) claims.add(`${cell.q},${cell.r}`);
+      }
+      for (const player of delta.updated) {
+        const old = players.get(player.id);
+        if (old && !player.owned.length) {
+          // Native [] retains ownership. A name/economy-only update must not
+          // traverse a large owner's unchanged coordinate index.
+          players.set(player.id, { id: player.id, ...(player.name === undefined ? {} : { name: player.name }), cells: old.cells });
+          continue;
+        }
+        const cells = new Map(player.owned.map(cell => [`${cell.q},${cell.r}`, cell]));
+        // Remove old index entries first, then install all final claims. This
+        // preserves ambiguity detection between players touched in one delta.
+        if (old) for (const key of old.cells.keys()) coordinates.delete(key);
+        const next = { id: player.id, ...(player.name === undefined ? {} : { name: player.name }), cells };
+        players.set(player.id, next); replacements.set(player.id, next);
+      }
+      for (const player of delta.added) if (!players.has(player.id)) {
+        const next = { id: player.id, ...(player.name === undefined ? {} : { name: player.name }),
+          cells: new Map(player.owned.map(cell => [`${cell.q},${cell.r}`, cell])) };
+        players.set(player.id, next); replacements.set(player.id, next);
+      }
+      // Native captures prune only players absent from both touched sets,
+      // including claims from added records ignored for an existing player.
+      for (const key of claims) {
+        const owner = coordinates.get(key);
+        if (owner !== undefined && !touched.has(owner)) {
+          players.get(owner).cells.delete(key); coordinates.delete(key);
+        }
+      }
+      if (players.size > LIMITS.players) return null;
+      for (const player of replacements.values()) for (const key of player.cells.keys()) {
+        if (coordinates.has(key)) return null;
+        coordinates.set(key, player.id);
+        if (coordinates.size > LIMITS.systems) return null;
+      }
+      return previous;
+    } catch { return null; }
+  }
+  function validatedOwnership(value, selfId, owned, connected) {
+    if (!connected || value === null || value === undefined) return null;
+    try {
+      const x = record(value);
+      if (x.version !== 1 || x.complete !== false) fail();
+      const players = ownershipPlayers(x.players), self = players.find(player => player.id === selfId);
+      if (!self || self.owned.length !== owned.length) fail();
+      const ownKeys = new Set(owned.map(item => `${item.q},${item.r}`));
+      if (self.owned.some(item => !ownKeys.has(`${item.q},${item.r}`))) fail();
+      return { version: 1, complete: false, players };
+    } catch { return null; }
+  }
   function boundedJson(text) {
     let depth = 0, nodes = 0, quoted = false, escaped = false;
     for (let i = 0; i < text.length; i++) {
@@ -852,7 +973,7 @@ return Object.freeze({create});
     if (!self) fail();
     const configVersion = p.config && ['string', 'number'].includes(typeof p.config.version)
       ? String(p.config.version).slice(0, 100) : '';
-    return { kind: 'init', selfId, self, serverNow: int(p.serverNow), configVersion };
+    return { kind: 'init', selfId, self, serverNow: int(p.serverNow), configVersion, ownership: projectOwnershipInit(world) };
   }
   function projectDelta(payload, selfId) {
     if (!selfId || !UUID.test(selfId)) fail();
@@ -880,6 +1001,7 @@ return Object.freeze({create});
         }
       }
     }
+    out.ownership = projectOwnershipDelta(p);
     return out;
   }
   /** Returns a sanitized event, {kind:'ignore'}, or {kind:'invalid'}; never raw payloads. */
@@ -909,8 +1031,8 @@ return Object.freeze({create});
   function createReducer({ galaxy, now = Date.now } = {}) {
     if (!GALAXY.test(galaxy || '') || typeof now !== 'function') throw new TypeError('Invalid observer scope');
     let generation = 0, epoch = 0, revision = 0, current = null, connected = false, reason = 'awaiting-init';
-    let receivedAt = 0, serverNow = null, lastInitServerNow = null, configVersion = '';
-    function invalidate(why) { connected = false; current = null; receivedAt = 0; serverNow = null; reason = why; }
+    let receivedAt = 0, serverNow = null, lastInitServerNow = null, configVersion = '', ownership = null;
+    function invalidate(why) { connected = false; current = null; ownership = null; receivedAt = 0; serverNow = null; reason = why; }
     function beginConnection() { generation++; lastInitServerNow = null; invalidate('awaiting-init'); return generation; }
     function loseConnection(token, why = 'connection-lost') {
       if (token !== generation) return false;
@@ -928,7 +1050,7 @@ return Object.freeze({create});
       if (!Number.isSafeInteger(observedAt) || observedAt < 0) { invalidate('malformed'); return true; }
       if (event.kind === 'init') {
         if (lastInitServerNow !== null && event.serverNow < lastInitServerNow) { invalidate('malformed'); return true; }
-        epoch++; revision = 0; current = event.self; connected = true; reason = '';
+        epoch++; revision = 0; current = event.self; ownership = indexOwnership(event.ownership); connected = true; reason = '';
         serverNow = event.serverNow; lastInitServerNow = event.serverNow; configVersion = event.configVersion; receivedAt = observedAt; return true;
       }
       if (!current || !connected) { invalidate('missing-init'); return true; }
@@ -947,31 +1069,57 @@ return Object.freeze({create});
         const keys = new Set(event.claims.map(x => `${x.q},${x.r}`));
         current = { ...current, owned: current.owned.filter(x => !keys.has(`${x.q},${x.r}`)) };
       }
+      ownership = reduceOwnership(ownership, event.ownership);
       revision++; receivedAt = observedAt; return true;
+    }
+    // Scalar metadata never materializes or validates a full ownership census.
+    function stamp() { return { generation, epoch, revision, connected, observedAt: receivedAt }; }
+    function facts() {
+      const transitShips = Object.fromEntries(SHIPS.map(x => [x, 0]));
+      if (!current) return { complete: false, reason, transitShips };
+      let complete = current.owned.length > 0 && Array.isArray(current.transits) && !current.eliminatedAt;
+      for (const s of current.owned) {
+        const yardLevel = s.buildings.find(x => x.type === 'shipyard')?.level;
+        if (!s.economy || !s.fleet || (yardLevel !== 0 && !s.shipyard)) complete = false;
+      }
+      for (const t of current.transits || []) for (const ship of t.ships) {
+        if (transitShips[ship.type] === null) continue;
+        const total = transitShips[ship.type] + ship.quantity;
+        if (!Number.isSafeInteger(total)) { complete = false; transitShips[ship.type] = null; }
+        else if (transitShips[ship.type] !== null) transitShips[ship.type] = total;
+      }
+      return { complete: complete && connected,
+        reason: current.eliminatedAt ? 'eliminated' : complete ? '' : 'incomplete-data', transitShips };
+    }
+    function coherentOwnership() {
+      if (!current || !connected || !ownership) return false;
+      const self = ownership.players.get(current.id);
+      if (!self || self.cells.size !== current.owned.length) return false;
+      return current.owned.every(item => self.cells.has(`${item.q},${item.r}`));
+    }
+    function canDeferPublication() {
+      // Scheduling only: the wire receiver still revalidates every DTO.
+      return facts().complete && coherentOwnership();
+    }
+    function ownershipProjection() {
+      if (!coherentOwnership()) return null;
+      return { version: 1, complete: false, players: [...ownership.players.values()].map(player => ({
+        id: player.id, ...(player.name === undefined ? {} : { name: player.name }),
+        owned: [...player.cells.values()].map(cell => ({ q: cell.q, r: cell.r })),
+      })) };
     }
     function snapshot() {
       const out = { version: VERSION, galaxy, selfId: current?.id || '', scope: current ? `${galaxy}/${current.id}` : '',
         epoch, revision, generation, observedAt: receivedAt, serverNow, configVersion, connected,
-        complete: false, reason, systems: [], transits: [], transitShips: Object.fromEntries(SHIPS.map(x => [x, 0])), credits: null };
+        ...facts(), systems: [], transits: [], credits: null, ownership: null };
       if (!current) return out;
       out.systems = clone(current.owned); out.transits = clone(current.transits || []); out.credits = clone(current.credits || null);
-      let complete = current.owned.length > 0 && Array.isArray(current.transits) && !current.eliminatedAt;
-      for (const s of out.systems) {
-        const yardLevel = s.buildings.find(x => x.type === 'shipyard')?.level;
-        if (!s.economy || !s.fleet || (yardLevel !== 0 && !s.shipyard)) complete = false;
-      }
-      for (const t of out.transits) for (const ship of t.ships) {
-        if (out.transitShips[ship.type] === null) continue;
-        const total = out.transitShips[ship.type] + ship.quantity;
-        if (!Number.isSafeInteger(total)) { complete = false; out.transitShips[ship.type] = null; }
-        else if (out.transitShips[ship.type] !== null) out.transitShips[ship.type] = total;
-      }
-      out.complete = complete && connected;
-      out.reason = current.eliminatedAt ? 'eliminated' : complete ? '' : 'incomplete-data';
+      out.ownership = ownershipProjection();
       return out;
     }
-    return Object.freeze({ beginConnection, loseConnection, ingest, snapshot });
+    return Object.freeze({ beginConnection, loseConnection, ingest, snapshot, stamp, canDeferPublication });
   }
+
   // Revalidate the unprivileged page-to-content bridge without invoking input
   // accessors, toJSON, iterators, or prototype hooks. JSON text is preferred.
   function plainCopy(value) {
@@ -1013,6 +1161,9 @@ return Object.freeze({create});
         systems: systems(p.systems), transits: transits(p.transits),
         transitShips: Object.fromEntries(SHIPS.map(type => [type, 0])), credits: credits(p.credits) };
       if (!selfId && (out.systems.length || out.transits.length || out.credits)) fail();
+      // Older page observers omit ownership. Invalid/incomplete public claims
+      // close the ally guard, without discarding otherwise valid own economy.
+      out.ownership = validatedOwnership(p.ownership, selfId, out.systems, connected);
       for (const t of out.transits) for (const ship of t.ships) {
         const n = out.transitShips[ship.type];
         if (n !== null) out.transitShips[ship.type] = Number.isSafeInteger(n + ship.quantity) ? n + ship.quantity : null;
@@ -1040,8 +1191,9 @@ return Object.freeze({create});
     } catch { return false; }
   }
   /** Page-world only. It never initiates/changes a connection, or accesses send. */
-  function installPageObserver({ channel, emit } = {}) {
-    if (typeof channel !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(channel) || typeof emit !== 'function') throw new TypeError('Invalid observer channel');
+  function installPageObserver({ channel, emit, onPending } = {}) {
+    if (typeof channel !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(channel) || typeof emit !== 'function'
+      || onPending !== undefined && typeof onPending !== 'function') throw new TypeError('Invalid observer channel');
     const location = realm.location;
     const galaxy = location?.origin === 'https://oldlight.io'
       ? /^\/game\/galaxy\/([A-Za-z0-9_-]{1,64})(?:\/|$)/.exec(location.pathname)?.[1] : null;
@@ -1054,6 +1206,10 @@ return Object.freeze({create});
     const later = realm.setTimeout.bind(realm), cancel = realm.clearTimeout.bind(realm);
     const publish = (defer = false) => {
       if (stopped) return;
+      // A synchronous, scalar-only bridge marker revokes the prior snapshot
+      // before either a timer or MessagePort delivery can lag the native event.
+      // It is optional for direct consumers and never touches game state.
+      try { onPending?.(reducer.stamp()); } catch { lastError = true; }
       if (defer) {
         if (publishTimer === null) publishTimer = later(() => { publishTimer = null; publish(); }, 0);
         return;
@@ -1074,7 +1230,12 @@ return Object.freeze({create});
       detach(); const token = reducer.beginConnection();
       const onMessage = event => {
         if (stopped || active?.socket !== socket || event.isTrusted !== true) return;
-        if (reducer.ingest(event.data, token)) publish(reducer.snapshot().complete);
+        if (reducer.ingest(event.data, token)) {
+          // Unknown ownership closes dispatch immediately, even while the own
+          // economy remains complete. Valid updates still wait for native UI.
+          // Do not copy all owners for every frame just to choose that timing.
+          publish(reducer.canDeferPublication());
+        }
       };
       const onLost = () => {
         if (stopped || active?.socket !== socket) return;
@@ -1610,7 +1771,7 @@ return Object.freeze({create});
       notify();
     }
     function onManual(event) {
-      if (!event?.isTrusted) return;
+      if (disposed || !event?.isTrusted) return;
       // The isolated integration knows the Helper host. An absent/throwing
       // classifier cannot establish an exemption, so uncertain input stops us.
       try { if (options.isHelperEvent?.(event) === true) return; } catch { /* Fail closed. */ }
@@ -1637,7 +1798,7 @@ return Object.freeze({create});
     }
     return Object.freeze({ readRoster, readSnapshots, readTransitCensus, readActive, readBundle, selectSystem, canNavigate,
       isAvailable: () => world()?.complete === true,
-      getStatus, dispose });
+      getStatus, observeInteraction: onManual, dispose });
   }
   return Object.freeze({ create, projectResources, nativeAwayBySystem });
 });
@@ -1649,6 +1810,9 @@ function create({realm=globalThis,document=realm.document,observer,observerSourc
   let current=null,stopped=false,failed=false,installed=false,reason='awaiting-native-init',lastEpoch=-1,lastRevision=-1,port=null,container=null,ackTimer=null,watcher=null;
   const subscribers=new Set(),channel='oldlight_empire_'+realm.crypto.randomUUID().replace(/-/g,'');
   const eventName='oldlight-empire-bootstrap';
+  const pendingAttribute='data-oldlight-empire-pending';
+  const stamp=value=>JSON.stringify([value.generation,value.epoch,value.revision,value.connected,value.observedAt]);
+  function settled(){try{return !!current&&container?.getAttribute(pendingAttribute)===stamp(current);}catch{return false;}}
   const notify=()=>{for(const fn of subscribers){try{fn();}catch{}}try{onChange();}catch{}};
   function invalidate(message){current=null;reason=message;notify();}
   function cleanupBootstrap(){
@@ -1680,7 +1844,7 @@ function create({realm=globalThis,document=realm.document,observer,observerSourc
     // GM_addElement executes static page code, never a privileged closure. Its
     // synchronous return happens AFTER execution, so the listener must already
     // exist. A bounded ACK also tolerates delayed insertion without guessing.
-    const textContent=`(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected||!['loading','interactive','complete'].includes(document.readyState))return;target.remove();${observerSource}\nconst api=globalThis.OldLightEmpireObserver;const channel=${JSON.stringify(channel)};\nconst pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;\ntry{handle=api.installPageObserver({channel,emit:value=>{const data=JSON.stringify(value.snapshot);if(ready)send(data);else pending=data;}});\ntarget.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);\n}catch(_){try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();}})();`;
+    const textContent=`(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected||!['loading','interactive','complete'].includes(document.readyState))return;target.remove();${observerSource}\nconst api=globalThis.OldLightEmpireObserver;const channel=${JSON.stringify(channel)};\nconst pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;\ntry{handle=api.installPageObserver({channel,onPending:value=>{target.removeAttribute(${JSON.stringify(pendingAttribute)});target.setAttribute(${JSON.stringify(pendingAttribute)},JSON.stringify([value.generation,value.epoch,value.revision,value.connected,value.observedAt]));},emit:value=>{const data=JSON.stringify(value.snapshot);if(ready)send(data);else pending=data;}});\ntarget.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);\n}catch(_){try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();}})();`;
     try{
       parent.appendChild(container);
       ackTimer=realm.setTimeout(()=>{ackTimer=null;if(!installed&&!stopped)fail('observer-injection-unavailable');},2000);
@@ -1693,10 +1857,10 @@ function create({realm=globalThis,document=realm.document,observer,observerSourc
     if(!container&&!failed){watcher=new realm.MutationObserver(()=>{inject();if(container||failed)watcher.disconnect();});watcher.observe(document,{childList:true,subtree:true});}
   }
   return Object.freeze({
-    snapshot(){return current?JSON.parse(JSON.stringify(current)):null;},
+    snapshot({includeOwnership=true}={}){return settled()?JSON.parse(JSON.stringify(includeOwnership?current:{...current,ownership:null})):null;},
     subscribe(fn){if(typeof fn!=='function')return()=>{};subscribers.add(fn);return()=>subscribers.delete(fn);},
-    status:()=>({installed,reason,observed:!!current,connected:current?.connected===true,
-      connectionObserved:!!current&&current.generation>0,complete:current?.complete===true}),
+    status:()=>({installed,reason,observed:!!current,connected:settled()&&current.connected===true,
+      connectionObserved:!!current&&current.generation>0,complete:settled()&&current.complete===true}),
     stop(){if(stopped)return;stopped=true;cleanupBootstrap();port?.removeEventListener('message',receive);port?.close();current=null;subscribers.clear();},
   });
 }
@@ -1723,7 +1887,7 @@ return Object.freeze({create});
   if (readyState === 'unknown') return;
   try {
     const bridge = globalThis.OldLightEmpireBridgeFactory.create({ realm: globalThis, document,
-      observer: globalThis.OldLightEmpireObserver, addElement: typeof GM_addElement === 'function' ? GM_addElement : null, observerSource: "/* Source-backed passive Old Light observer. No game connection or action API.\n * Evidence: galaxy-CqK10P8m.js, release 526e1feaf0acb4d2fcc1648f1c61eb81a26f0884.\n * Run in the page realm before the native socket registers its handlers.\n * Keep the privileged Helper and all GM/Drive storage in the content realm.\n */\n(function (root, factory) {\n  'use strict';\n  const api = factory(root);\n  if (typeof module === 'object' && module && module.exports) module.exports = api;\n  else Object.defineProperty(root, 'OldLightEmpireObserver', { configurable: true, value: api });\n})(typeof globalThis === 'object' ? globalThis : this, function (realm) {\n  'use strict';\n  const VERSION = 1;\n  const LIMITS = Object.freeze({ frame: 8 * 1024 * 1024, depth: 32, nodes: 250000,\n    players: 10000, systems: 10000, transits: 20000, queue: 128, string: 1024 });\n  const SHIPS = Object.freeze(['probe', 'marauder', 'sentinel', 'vanguard']);\n  const BUILDINGS = Object.freeze(['command_center', 'reactor', 'palladium_extractor',\n    'iridium_extractor', 'warehouse', 'shipyard', 'trade_hub']);\n  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\n  const GALAXY = /^[A-Za-z0-9_-]{1,64}$/;\n  const own = (x, key) => Object.prototype.hasOwnProperty.call(x, key);\n  const fail = () => { throw new Error('Unsupported game data'); };\n  const object = x => x !== null && typeof x === 'object' && !Array.isArray(x);\n  const record = x => object(x) ? x : fail();\n  const array = (x, max) => Array.isArray(x) && x.length <= max ? x : fail();\n  const num = (x, signed = false) => typeof x === 'number' && Number.isFinite(x)\n    && Math.abs(x) <= Number.MAX_SAFE_INTEGER && (signed || x >= 0) ? x : fail();\n  const int = x => Number.isSafeInteger(x) && x >= 0 ? x : fail();\n  const coord = x => Number.isSafeInteger(x) && Math.abs(x) <= 10000000 ? x : fail();\n  const id = x => typeof x === 'string' && UUID.test(x) ? x.toLowerCase() : fail();\n  const word = (x, values) => values.includes(x) ? x : fail();\n  const bool = x => typeof x === 'boolean' ? x : fail();\n  const stamp = x => typeof x === 'string' && x.length <= 64 && Number.isFinite(Date.parse(x))\n    && Date.parse(x) >= 0 ? x : fail();\n  const name = x => typeof x === 'string' && x.length <= LIMITS.string\n    ? x.replace(/[\\u0000-\\u001f\\u007f]/g, '').slice(0, 200) : fail();\n  const clone = x => JSON.parse(JSON.stringify(x));\n  function optional(out, source, key, convert) {\n    if (source[key] !== undefined) out[key] = convert(source[key]);\n  }\n  function unique(values, key) {\n    const seen = new Set();\n    for (const value of values) { const k = key(value); if (seen.has(k)) fail(); seen.add(k); }\n    return values;\n  }\n  function ships(value) {\n    return unique(array(value, SHIPS.length).map(x => {\n      record(x); return { type: word(x.type, SHIPS), quantity: int(x.quantity) };\n    }), x => x.type);\n  }\n  function building(value) {\n    const x = record(value), out = { type: word(x.type, BUILDINGS), level: int(x.level) };\n    if (x.nextUpgrade === null) out.nextUpgrade = null;\n    else if (x.nextUpgrade !== undefined) {\n      const u = record(x.nextUpgrade);\n      out.nextUpgrade = { paCost: num(u.paCost), irCost: num(u.irCost), timeMs: num(u.timeMs), energyDelta: num(u.energyDelta, true) };\n    }\n    if (x.unlockRequirement !== undefined && x.unlockRequirement !== null) {\n      const u = record(x.unlockRequirement);\n      out.unlockRequirement = { type: word(u.type, BUILDINGS), level: int(u.level), met: bool(u.met) };\n    }\n    return out;\n  }\n  function buildJob(value) {\n    const x = record(value);\n    return { id: id(x.id), type: word(x.type, BUILDINGS), targetLevel: int(x.targetLevel),\n      startedAt: stamp(x.startedAt), completesAt: stamp(x.completesAt) };\n  }\n  function shipJob(value) {\n    const x = record(value), out = { id: id(x.id), type: word(x.type, SHIPS),\n      kind: word(x.kind, ['recruit', 'scrap']), quantityTotal: int(x.quantityTotal),\n      quantityRemaining: int(x.quantityRemaining), startedAt: stamp(x.startedAt), nextCompletesAt: stamp(x.nextCompletesAt) };\n    if (out.quantityRemaining > out.quantityTotal) fail();\n    optional(out, x, 'heldReason', name);\n    return out;\n  }\n  function economy(value) {\n    if (value === undefined || value === null) return null;\n    const x = record(value), r = record(x.resources);\n    const out = { resources: { palladium: num(r.palladium), iridium: num(r.iridium), settledAt: stamp(r.settledAt) },\n      paCap: num(x.paCap), irCap: num(x.irCap), paRatePerMin: num(x.paRatePerMin, true),\n      irRatePerMin: num(x.irRatePerMin, true), energyCap: num(x.energyCap), energyUsed: num(x.energyUsed),\n      deficitMultiplier: num(x.deficitMultiplier), queueSlots: int(x.queueSlots),\n      queue: unique(array(x.queue, LIMITS.queue).map(buildJob), j => j.id) };\n    if (x.wealth !== undefined && x.wealth !== null) {\n      const w = record(x.wealth); out.wealth = { active: bool(w.active), unlocked: bool(w.unlocked) };\n    }\n    return out;\n  }\n  function shipyard(value) {\n    if (value === undefined || value === null) return null;\n    const x = record(value);\n    const types = unique(array(x.types, SHIPS.length).map(t => {\n      record(t); const s = record(t.stats), stats = {};\n      for (const key of ['paCost', 'irCost', 'buildTimeSec', 'scrapTimeSec', 'lyPerHour', 'upkeepPerDay']) optional(stats, s, key, num);\n      return { type: word(t.type, SHIPS), unlocked: bool(t.unlocked), shipyardLevelRequired: int(t.shipyardLevelRequired), stats };\n    }), t => t.type);\n    return { queueSlots: int(x.queueSlots), types, queue: unique(array(x.queue, LIMITS.queue).map(shipJob), j => j.id) };\n  }\n  function system(value) {\n    const x = record(value), out = { id: id(x.id), q: coord(x.q), r: coord(x.r), name: name(x.name),\n      buildings: unique(array(x.buildings, BUILDINGS.length).map(building), b => b.type),\n      fleet: x.fleet == null ? null : ships(x.fleet), economy: economy(x.economy), shipyard: shipyard(x.shipyard) };\n    optional(out, x, 'capturedAt', int); optional(out, x, 'score', num); optional(out, x, 'garrisonCap', int);\n    return out;\n  }\n  function systems(value) {\n    const list = unique(array(value, LIMITS.systems).map(system), s => s.id);\n    return unique(list, s => `${s.q},${s.r}`);\n  }\n  function transit(value) {\n    const x = record(value), out = { id: id(x.id),\n      fromQ: x.fromQ === null ? null : coord(x.fromQ), fromR: x.fromR === null ? null : coord(x.fromR),\n      toQ: coord(x.toQ), toR: coord(x.toR), ships: ships(x.ships), arrivesAt: stamp(x.arrivesAt),\n      recalledAt: x.recalledAt === null ? null : stamp(x.recalledAt) };\n    if ((out.fromQ === null) !== (out.fromR === null)) fail();\n    // Only these fields are needed for identity/counts. Phase strings are bounded;\n    // the native renderer distinguishes returning from all other phase values.\n    optional(out, x, 'phase', name);\n    optional(out, x, 'kind', v => word(v, ['combat', 'trade', 'deal']));\n    optional(out, x, 'departsAt', stamp);\n    return out;\n  }\n  function transits(value) {\n    const out = [], byId = new Map();\n    for (const raw of array(value, LIMITS.transits)) {\n      const t = transit(raw), old = byId.get(t.id);\n      if (old) { if (JSON.stringify(old) !== JSON.stringify(t)) fail(); continue; }\n      byId.set(t.id, t); out.push(t);\n    }\n    return out;\n  }\n  function credits(value) {\n    if (value === undefined || value === null) return null;\n    const x = record(value); return { amount: num(x.amount, true), settledAt: stamp(x.settledAt),\n      incomePerDay: num(x.incomePerDay), upkeepPerDay: num(x.upkeepPerDay), inDeficit: bool(x.inDeficit) };\n  }\n  function selfPlayer(value, initial) {\n    const x = record(value), out = { id: id(x.id), owned: systems(x.owned) };\n    // Absence is deliberately distinct from an empty array in the native reducer.\n    if (initial || x.transits !== undefined) out.transits = x.transits === undefined ? null : transits(x.transits);\n    if (initial || x.credits !== undefined) out.credits = credits(x.credits);\n    if (x.eliminatedAt !== undefined) out.eliminatedAt = x.eliminatedAt === null ? null : stamp(x.eliminatedAt);\n    return out;\n  }\n  function boundedJson(text) {\n    let depth = 0, nodes = 0, quoted = false, escaped = false;\n    for (let i = 0; i < text.length; i++) {\n      const c = text[i];\n      if (quoted) { if (escaped) escaped = false; else if (c === '\\\\') escaped = true; else if (c === '\"') quoted = false; continue; }\n      if (c === '\"') { quoted = true; if (++nodes > LIMITS.nodes) fail(); }\n      else if (c === '[' || c === '{') { if (++depth > LIMITS.depth || ++nodes > LIMITS.nodes) fail(); }\n      else if (c === ']' || c === '}') { if (--depth < 0) fail(); }\n      else if (c === ',' && ++nodes > LIMITS.nodes) fail();\n    }\n    if (quoted || depth !== 0) fail();\n    return JSON.parse(text);\n  }\n  function projectInit(payload) {\n    const p = record(payload), selfId = id(p.selfId), world = record(p.world);\n    const list = array(world.players, LIMITS.players), seen = new Set();\n    let self = null;\n    for (const raw of list) {\n      const player = record(raw), key = id(player.id); if (seen.has(key)) fail(); seen.add(key);\n      if (key === selfId) self = selfPlayer(player, true);\n    }\n    if (!self) fail();\n    const configVersion = p.config && ['string', 'number'].includes(typeof p.config.version)\n      ? String(p.config.version).slice(0, 100) : '';\n    return { kind: 'init', selfId, self, serverNow: int(p.serverNow), configVersion };\n  }\n  function projectDelta(payload, selfId) {\n    if (!selfId || !UUID.test(selfId)) fail();\n    const p = record(payload), out = { kind: 'delta', removedSelf: false, selfUpdate: null, selfAdded: null, claims: [] };\n    if (p.removed !== undefined) {\n      const removed = record(p.removed);\n      if (removed.playerIds !== undefined) out.removedSelf = array(removed.playerIds, LIMITS.players).some(x => id(x) === selfId);\n    }\n    const seen = new Set(), claimKeys = new Set();\n    for (const group of ['updated', 'added']) {\n      if (p[group] === undefined) continue;\n      const data = record(p[group]); if (data.players === undefined) continue;\n      for (const raw of array(data.players, LIMITS.players)) {\n        const player = record(raw), key = id(player.id), seenKey = `${group}:${key}`;\n        if (seen.has(seenKey)) fail(); seen.add(seenKey);\n        if (key === selfId) {\n          const field = group === 'updated' ? 'selfUpdate' : 'selfAdded'; out[field] = selfPlayer(player, false);\n        } else {\n          // Only coordinates of other owners' new claims affect self ownership.\n          for (const item of array(player.owned, LIMITS.systems)) {\n            record(item); const q = coord(item.q), r = coord(item.r), k = `${q},${r}`;\n            if (!claimKeys.has(k)) { claimKeys.add(k); out.claims.push({ q, r }); }\n            if (out.claims.length > LIMITS.systems) fail();\n          }\n        }\n      }\n    }\n    return out;\n  }\n  /** Returns a sanitized event, {kind:'ignore'}, or {kind:'invalid'}; never raw payloads. */\n  function parseFrame(data, selfId = '') {\n    if (typeof data !== 'string') return { kind: 'invalid' };\n    if (data.length > LIMITS.frame) return { kind: 'invalid' };\n    if (data === '1' || data === '41' || data.startsWith('44')) return { kind: 'lost' };\n    // Binary Socket.IO event envelopes cannot be reconstructed by this observer.\n    if (data.startsWith('45') || data.startsWith('46')) return { kind: 'invalid' };\n    if (!data.startsWith('42')) return { kind: 'ignore' };\n    const packet = /^42(?:[0-9]{1,12})?(\\[.*)$/s.exec(data);\n    if (!packet) return { kind: 'invalid' };\n    const payloadText = packet[1];\n    // Discard session.token/chat/etc before JSON parsing or retaining their bodies.\n    const event = /^\\[\\s*\"(world\\.init|world\\.delta|session\\.displaced)\"\\s*[,\\]]/.exec(payloadText)?.[1];\n    if (!event) return { kind: 'ignore' };\n    if (event === 'session.displaced') return { kind: 'lost' };\n    try {\n      const value = boundedJson(payloadText);\n      if (!Array.isArray(value) || value.length !== 2 || value[0] !== event) fail();\n      // A recognized delta cannot be projected onto a player before its init.\n      // Validate the bounded JSON envelope/object, but retain no payload or IDs.\n      if (event === 'world.delta' && selfId === '') { record(value[1]); return { kind: 'missing-init' }; }\n      return event === 'world.init' ? projectInit(value[1]) : projectDelta(value[1], selfId);\n    } catch { return { kind: 'invalid' }; }\n  }\n  function createReducer({ galaxy, now = Date.now } = {}) {\n    if (!GALAXY.test(galaxy || '') || typeof now !== 'function') throw new TypeError('Invalid observer scope');\n    let generation = 0, epoch = 0, revision = 0, current = null, connected = false, reason = 'awaiting-init';\n    let receivedAt = 0, serverNow = null, lastInitServerNow = null, configVersion = '';\n    function invalidate(why) { connected = false; current = null; receivedAt = 0; serverNow = null; reason = why; }\n    function beginConnection() { generation++; lastInitServerNow = null; invalidate('awaiting-init'); return generation; }\n    function loseConnection(token, why = 'connection-lost') {\n      if (token !== generation) return false;\n      invalidate(['connection-lost', 'stopped', 'malformed', 'session-lost', 'missing-init'].includes(why) ? why : 'connection-lost');\n      return true;\n    }\n    function ingest(data, token = generation) {\n      if (token !== generation) return false;\n      const event = parseFrame(data, current?.id || '');\n      if (event.kind === 'ignore') return false;\n      if (event.kind === 'invalid') { invalidate('malformed'); return true; }\n      if (event.kind === 'lost') { invalidate('session-lost'); return true; }\n      if (event.kind === 'missing-init') { invalidate('missing-init'); return true; }\n      const observedAt = now();\n      if (!Number.isSafeInteger(observedAt) || observedAt < 0) { invalidate('malformed'); return true; }\n      if (event.kind === 'init') {\n        if (lastInitServerNow !== null && event.serverNow < lastInitServerNow) { invalidate('malformed'); return true; }\n        epoch++; revision = 0; current = event.self; connected = true; reason = '';\n        serverNow = event.serverNow; lastInitServerNow = event.serverNow; configVersion = event.configVersion; receivedAt = observedAt; return true;\n      }\n      if (!current || !connected) { invalidate('missing-init'); return true; }\n      if (event.removedSelf) { invalidate('session-lost'); return true; }\n      // Native applyDelta replaces the self record, retaining owned on [], and\n      // retaining omitted transits/credits. Added self is ignored when it exists.\n      if (event.selfUpdate) {\n        const next = event.selfUpdate, old = current;\n        current = { ...next, owned: next.owned.length ? next.owned : old.owned,\n          transits: own(next, 'transits') ? next.transits : old.transits,\n          credits: own(next, 'credits') ? next.credits : old.credits,\n          eliminatedAt: own(next, 'eliminatedAt') ? next.eliminatedAt : old.eliminatedAt };\n      }\n      // Captures prune only players absent from this delta's added/updated sets.\n      if (!event.selfUpdate && !event.selfAdded && event.claims.length) {\n        const keys = new Set(event.claims.map(x => `${x.q},${x.r}`));\n        current = { ...current, owned: current.owned.filter(x => !keys.has(`${x.q},${x.r}`)) };\n      }\n      revision++; receivedAt = observedAt; return true;\n    }\n    function snapshot() {\n      const out = { version: VERSION, galaxy, selfId: current?.id || '', scope: current ? `${galaxy}/${current.id}` : '',\n        epoch, revision, generation, observedAt: receivedAt, serverNow, configVersion, connected,\n        complete: false, reason, systems: [], transits: [], transitShips: Object.fromEntries(SHIPS.map(x => [x, 0])), credits: null };\n      if (!current) return out;\n      out.systems = clone(current.owned); out.transits = clone(current.transits || []); out.credits = clone(current.credits || null);\n      let complete = current.owned.length > 0 && Array.isArray(current.transits) && !current.eliminatedAt;\n      for (const s of out.systems) {\n        const yardLevel = s.buildings.find(x => x.type === 'shipyard')?.level;\n        if (!s.economy || !s.fleet || (yardLevel !== 0 && !s.shipyard)) complete = false;\n      }\n      for (const t of out.transits) for (const ship of t.ships) {\n        if (out.transitShips[ship.type] === null) continue;\n        const total = out.transitShips[ship.type] + ship.quantity;\n        if (!Number.isSafeInteger(total)) { complete = false; out.transitShips[ship.type] = null; }\n        else if (out.transitShips[ship.type] !== null) out.transitShips[ship.type] = total;\n      }\n      out.complete = complete && connected;\n      out.reason = current.eliminatedAt ? 'eliminated' : complete ? '' : 'incomplete-data';\n      return out;\n    }\n    return Object.freeze({ beginConnection, loseConnection, ingest, snapshot });\n  }\n  // Revalidate the unprivileged page-to-content bridge without invoking input\n  // accessors, toJSON, iterators, or prototype hooks. JSON text is preferred.\n  function plainCopy(value) {\n    let nodes = 0, bytes = 0;\n    function visit(x, depth) {\n      if (++nodes > LIMITS.nodes || depth > LIMITS.depth) fail();\n      if (x === null || typeof x === 'boolean') return x;\n      if (typeof x === 'number') return Number.isFinite(x) ? x : fail();\n      if (typeof x === 'string') { bytes += x.length; if (bytes > LIMITS.frame) fail(); return x; }\n      if (!object(x) && !Array.isArray(x)) fail();\n      const proto = Object.getPrototypeOf(x);\n      if (Array.isArray(x) ? proto !== Array.prototype : proto !== Object.prototype && proto !== null) fail();\n      const out = Array.isArray(x) ? [] : Object.create(null);\n      const keys = Object.keys(x); if (keys.length > LIMITS.nodes) fail();\n      for (const key of keys) {\n        bytes += key.length; if (bytes > LIMITS.frame) fail();\n        const d = Object.getOwnPropertyDescriptor(x, key);\n        if (!d || !own(d, 'value')) fail();\n        Object.defineProperty(out, key, { value: visit(d.value, depth + 1), enumerable: true, writable: true, configurable: true });\n      }\n      if (Array.isArray(x) && (x.length > LIMITS.nodes || keys.length !== x.length)) fail();\n      return out;\n    }\n    return visit(value, 0);\n  }\n  function validateSnapshot(input) {\n    try {\n      if (typeof input === 'string' && input.length > LIMITS.frame) fail();\n      const p = record(typeof input === 'string' ? boundedJson(input) : plainCopy(input));\n      if (p.version !== VERSION || !GALAXY.test(p.galaxy || '')) fail();\n      const connected = bool(p.connected), selfId = p.selfId === '' ? '' : id(p.selfId);\n      if (p.scope !== (selfId ? `${p.galaxy}/${selfId}` : '') || (connected && !selfId)) fail();\n      const out = { version: VERSION, galaxy: p.galaxy, selfId, scope: p.scope,\n        epoch: int(p.epoch), revision: int(p.revision), generation: int(p.generation),\n        observedAt: int(p.observedAt), serverNow: p.serverNow === null ? null : int(p.serverNow),\n        configVersion: typeof p.configVersion === 'string' && p.configVersion.length <= 100 ? p.configVersion : fail(),\n        connected, complete: bool(p.complete), reason: word(p.reason, ['', 'awaiting-init', 'connection-lost',\n          'stopped', 'malformed', 'session-lost', 'missing-init', 'eliminated', 'incomplete-data']),\n        systems: systems(p.systems), transits: transits(p.transits),\n        transitShips: Object.fromEntries(SHIPS.map(type => [type, 0])), credits: credits(p.credits) };\n      if (!selfId && (out.systems.length || out.transits.length || out.credits)) fail();\n      for (const t of out.transits) for (const ship of t.ships) {\n        const n = out.transitShips[ship.type];\n        if (n !== null) out.transitShips[ship.type] = Number.isSafeInteger(n + ship.quantity) ? n + ship.quantity : null;\n      }\n      record(p.transitShips);\n      for (const type of SHIPS) if (p.transitShips[type] !== out.transitShips[type]) fail();\n      if (out.complete) {\n        if (!connected || !selfId || out.epoch < 1 || out.generation < 1 || out.serverNow === null\n          || !out.systems.length || out.reason !== '' || Object.values(out.transitShips).some(x => x === null)) fail();\n        for (const s of out.systems) {\n          const level = s.buildings.find(x => x.type === 'shipyard')?.level;\n          if (!s.economy || !s.fleet || (level !== 0 && !s.shipyard)) fail();\n        }\n      }\n      return out;\n    } catch { return null; }\n  }\n  function isGameSocket(value) {\n    if (typeof value !== 'string' || value.length > 4096) return false;\n    try {\n      const u = new URL(value);\n      return u.protocol === 'wss:' && u.hostname === 'api.oldlight.io' && !u.port && !u.username && !u.password\n        && u.pathname === '/socket.io/' && u.searchParams.getAll('EIO').length === 1 && u.searchParams.getAll('transport').length === 1\n        && u.searchParams.get('EIO') === '4' && u.searchParams.get('transport') === 'websocket';\n    } catch { return false; }\n  }\n  /** Page-world only. It never initiates/changes a connection, or accesses send. */\n  function installPageObserver({ channel, emit } = {}) {\n    if (typeof channel !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(channel) || typeof emit !== 'function') throw new TypeError('Invalid observer channel');\n    const location = realm.location;\n    const galaxy = location?.origin === 'https://oldlight.io'\n      ? /^\\/game\\/galaxy\\/([A-Za-z0-9_-]{1,64})(?:\\/|$)/.exec(location.pathname)?.[1] : null;\n    const Native = realm.WebSocket, descriptor = Object.getOwnPropertyDescriptor(realm, 'WebSocket');\n    if (!galaxy || typeof Native !== 'function' || !descriptor || !own(descriptor, 'value')\n      || (!descriptor.writable && !descriptor.configurable)) throw new Error('Observer unavailable');\n    const reducer = createReducer({ galaxy, now: () => Date.now() });\n    const watched = new WeakSet();\n    let stopped = false, active = null, lastError = false, publishTimer = null;\n    const later = realm.setTimeout.bind(realm), cancel = realm.clearTimeout.bind(realm);\n    const publish = (defer = false) => {\n      if (stopped) return;\n      if (defer) {\n        if (publishTimer === null) publishTimer = later(() => { publishTimer = null; publish(); }, 0);\n        return;\n      }\n      if (publishTimer !== null) { cancel(publishTimer); publishTimer = null; }\n      try { emit({ channel, snapshot: reducer.snapshot() }); } catch { lastError = true; }\n    };\n    function detach() {\n      if (!active) return;\n      for (const [type, fn] of active.listeners) active.socket.removeEventListener(type, fn);\n      active = null;\n    }\n    function watch(socket) {\n      // Constructor and handler discovery can see the same socket. Never reset\n      // its epoch, or let a detached older socket become active a second time.\n      if (watched.has(socket)) return;\n      watched.add(socket);\n      detach(); const token = reducer.beginConnection();\n      const onMessage = event => {\n        if (stopped || active?.socket !== socket || event.isTrusted !== true) return;\n        if (reducer.ingest(event.data, token)) publish(reducer.snapshot().complete);\n      };\n      const onLost = () => {\n        if (stopped || active?.socket !== socket) return;\n        reducer.loseConnection(token); publish(); detach();\n      };\n      const listeners = [['message', onMessage], ['close', onLost], ['error', onLost]];\n      active = { socket, listeners };\n      for (const [type, fn] of listeners) socket.addEventListener(type, fn);\n      publish();\n    }\n    let Wrapped;\n    Wrapped = new Proxy(Native, { construct(target, args, newTarget) {\n      // Construction and all static/prototype behavior remain native. Unknown\n      // sockets pass through untouched. We do not inspect protocols or send().\n      const socket = Reflect.construct(target, args, newTarget);\n      if (!stopped && isGameSocket(args[0])) {\n        try { watch(socket); } catch { reducer.loseConnection(reducer.snapshot().generation, 'malformed'); publish(); }\n      }\n      return socket;\n    } });\n    Object.defineProperty(realm, 'WebSocket', { ...descriptor, value: Wrapped });\n    // Engine.IO caches the constructor before opening its socket, then assigns\n    // onmessage immediately after construction. A prototype accessor remains\n    // visible to that cached constructor. Keep the original callback/getter and\n    // setter behavior; discover only still-CONNECTING native sockets. This does\n    // not enumerate or recover sockets whose handlers were already registered.\n    const prototype = Native.prototype;\n    const messageDescriptor = Object.getOwnPropertyDescriptor(prototype, 'onmessage');\n    const urlGetter = Object.getOwnPropertyDescriptor(prototype, 'url')?.get;\n    const stateGetter = Object.getOwnPropertyDescriptor(prototype, 'readyState')?.get;\n    let handlerSetter = null;\n    if (messageDescriptor?.configurable && typeof messageDescriptor.get === 'function'\n      && typeof messageDescriptor.set === 'function' && typeof urlGetter === 'function' && typeof stateGetter === 'function') {\n      const set = function (value) {\n        // The native setter runs first, including its brand checks and errors.\n        const result = Reflect.apply(messageDescriptor.set, this, [value]);\n        if (!stopped && !watched.has(this)) {\n          try {\n            // Native getters bypass shadow properties supplied on an instance.\n            if (Reflect.apply(stateGetter, this, []) === 0 && isGameSocket(Reflect.apply(urlGetter, this, []))) watch(this);\n          } catch {\n            reducer.loseConnection(reducer.snapshot().generation, 'malformed'); publish();\n          }\n        }\n        return result;\n      };\n      try {\n        Object.defineProperty(prototype, 'onmessage', { ...messageDescriptor, set });\n        handlerSetter = set;\n      } catch { /* Keep constructor-only observation when the accessor is unavailable. */ }\n    }\n    publish();\n    return Object.freeze({\n      status: () => ({ installed: !stopped, emissionError: lastError, ...reducer.snapshot() }),\n      stop() {\n        if (stopped) return;\n        reducer.loseConnection(reducer.snapshot().generation, 'stopped'); publish(); stopped = true; detach();\n        if (realm.WebSocket === Wrapped) Object.defineProperty(realm, 'WebSocket', descriptor);\n        const currentHandler = Object.getOwnPropertyDescriptor(prototype, 'onmessage');\n        if (handlerSetter && currentHandler?.set === handlerSetter && currentHandler.get === messageDescriptor.get\n          && currentHandler.enumerable === messageDescriptor.enumerable && currentHandler.configurable === messageDescriptor.configurable) {\n          Object.defineProperty(prototype, 'onmessage', messageDescriptor);\n        }\n      },\n    });\n  }\n  return Object.freeze({ VERSION, LIMITS, SHIPS, parseFrame, createReducer, validateSnapshot, isGameSocket, installPageObserver });\n});" });
+      observer: globalThis.OldLightEmpireObserver, addElement: typeof GM_addElement === 'function' ? GM_addElement : null, observerSource: "/* Source-backed passive Old Light observer. No game connection or action API.\n * Evidence: galaxy-CqK10P8m.js, release 526e1feaf0acb4d2fcc1648f1c61eb81a26f0884.\n * Run in the page realm before the native socket registers its handlers.\n * Keep the privileged Helper and all GM/Drive storage in the content realm.\n */\n(function (root, factory) {\n  'use strict';\n  const api = factory(root);\n  if (typeof module === 'object' && module && module.exports) module.exports = api;\n  else Object.defineProperty(root, 'OldLightEmpireObserver', { configurable: true, value: api });\n})(typeof globalThis === 'object' ? globalThis : this, function (realm) {\n  'use strict';\n  const VERSION = 1;\n  const LIMITS = Object.freeze({ frame: 8 * 1024 * 1024, depth: 32, nodes: 250000,\n    players: 10000, systems: 10000, transits: 20000, queue: 128, string: 1024 });\n  const SHIPS = Object.freeze(['probe', 'marauder', 'sentinel', 'vanguard']);\n  const BUILDINGS = Object.freeze(['command_center', 'reactor', 'palladium_extractor',\n    'iridium_extractor', 'warehouse', 'shipyard', 'trade_hub']);\n  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\n  const GALAXY = /^[A-Za-z0-9_-]{1,64}$/;\n  const own = (x, key) => Object.prototype.hasOwnProperty.call(x, key);\n  const fail = () => { throw new Error('Unsupported game data'); };\n  const object = x => x !== null && typeof x === 'object' && !Array.isArray(x);\n  const record = x => object(x) ? x : fail();\n  const array = (x, max) => Array.isArray(x) && x.length <= max ? x : fail();\n  const num = (x, signed = false) => typeof x === 'number' && Number.isFinite(x)\n    && Math.abs(x) <= Number.MAX_SAFE_INTEGER && (signed || x >= 0) ? x : fail();\n  const int = x => Number.isSafeInteger(x) && x >= 0 ? x : fail();\n  const coord = x => Number.isSafeInteger(x) && Math.abs(x) <= 10000000 ? x : fail();\n  const id = x => typeof x === 'string' && UUID.test(x) ? x.toLowerCase() : fail();\n  const word = (x, values) => values.includes(x) ? x : fail();\n  const bool = x => typeof x === 'boolean' ? x : fail();\n  const stamp = x => typeof x === 'string' && x.length <= 64 && Number.isFinite(Date.parse(x))\n    && Date.parse(x) >= 0 ? x : fail();\n  const name = x => typeof x === 'string' && x.length <= LIMITS.string\n    ? x.replace(/[\\u0000-\\u001f\\u007f]/g, '').slice(0, 200) : fail();\n  const clone = x => JSON.parse(JSON.stringify(x));\n  function optional(out, source, key, convert) {\n    if (source[key] !== undefined) out[key] = convert(source[key]);\n  }\n  function unique(values, key) {\n    const seen = new Set();\n    for (const value of values) { const k = key(value); if (seen.has(k)) fail(); seen.add(k); }\n    return values;\n  }\n  function ships(value) {\n    return unique(array(value, SHIPS.length).map(x => {\n      record(x); return { type: word(x.type, SHIPS), quantity: int(x.quantity) };\n    }), x => x.type);\n  }\n  function building(value) {\n    const x = record(value), out = { type: word(x.type, BUILDINGS), level: int(x.level) };\n    if (x.nextUpgrade === null) out.nextUpgrade = null;\n    else if (x.nextUpgrade !== undefined) {\n      const u = record(x.nextUpgrade);\n      out.nextUpgrade = { paCost: num(u.paCost), irCost: num(u.irCost), timeMs: num(u.timeMs), energyDelta: num(u.energyDelta, true) };\n    }\n    if (x.unlockRequirement !== undefined && x.unlockRequirement !== null) {\n      const u = record(x.unlockRequirement);\n      out.unlockRequirement = { type: word(u.type, BUILDINGS), level: int(u.level), met: bool(u.met) };\n    }\n    return out;\n  }\n  function buildJob(value) {\n    const x = record(value);\n    return { id: id(x.id), type: word(x.type, BUILDINGS), targetLevel: int(x.targetLevel),\n      startedAt: stamp(x.startedAt), completesAt: stamp(x.completesAt) };\n  }\n  function shipJob(value) {\n    const x = record(value), out = { id: id(x.id), type: word(x.type, SHIPS),\n      kind: word(x.kind, ['recruit', 'scrap']), quantityTotal: int(x.quantityTotal),\n      quantityRemaining: int(x.quantityRemaining), startedAt: stamp(x.startedAt), nextCompletesAt: stamp(x.nextCompletesAt) };\n    if (out.quantityRemaining > out.quantityTotal) fail();\n    optional(out, x, 'heldReason', name);\n    return out;\n  }\n  function economy(value) {\n    if (value === undefined || value === null) return null;\n    const x = record(value), r = record(x.resources);\n    const out = { resources: { palladium: num(r.palladium), iridium: num(r.iridium), settledAt: stamp(r.settledAt) },\n      paCap: num(x.paCap), irCap: num(x.irCap), paRatePerMin: num(x.paRatePerMin, true),\n      irRatePerMin: num(x.irRatePerMin, true), energyCap: num(x.energyCap), energyUsed: num(x.energyUsed),\n      deficitMultiplier: num(x.deficitMultiplier), queueSlots: int(x.queueSlots),\n      queue: unique(array(x.queue, LIMITS.queue).map(buildJob), j => j.id) };\n    if (x.wealth !== undefined && x.wealth !== null) {\n      const w = record(x.wealth); out.wealth = { active: bool(w.active), unlocked: bool(w.unlocked) };\n    }\n    return out;\n  }\n  function shipyard(value) {\n    if (value === undefined || value === null) return null;\n    const x = record(value);\n    const types = unique(array(x.types, SHIPS.length).map(t => {\n      record(t); const s = record(t.stats), stats = {};\n      for (const key of ['paCost', 'irCost', 'buildTimeSec', 'scrapTimeSec', 'lyPerHour', 'upkeepPerDay']) optional(stats, s, key, num);\n      return { type: word(t.type, SHIPS), unlocked: bool(t.unlocked), shipyardLevelRequired: int(t.shipyardLevelRequired), stats };\n    }), t => t.type);\n    return { queueSlots: int(x.queueSlots), types, queue: unique(array(x.queue, LIMITS.queue).map(shipJob), j => j.id) };\n  }\n  function system(value) {\n    const x = record(value), out = { id: id(x.id), q: coord(x.q), r: coord(x.r), name: name(x.name),\n      buildings: unique(array(x.buildings, BUILDINGS.length).map(building), b => b.type),\n      fleet: x.fleet == null ? null : ships(x.fleet), economy: economy(x.economy), shipyard: shipyard(x.shipyard) };\n    optional(out, x, 'capturedAt', int); optional(out, x, 'score', num); optional(out, x, 'garrisonCap', int);\n    return out;\n  }\n  function systems(value) {\n    const list = unique(array(value, LIMITS.systems).map(system), s => s.id);\n    return unique(list, s => `${s.q},${s.r}`);\n  }\n  function transit(value) {\n    const x = record(value), out = { id: id(x.id),\n      fromQ: x.fromQ === null ? null : coord(x.fromQ), fromR: x.fromR === null ? null : coord(x.fromR),\n      toQ: coord(x.toQ), toR: coord(x.toR), ships: ships(x.ships), arrivesAt: stamp(x.arrivesAt),\n      recalledAt: x.recalledAt === null ? null : stamp(x.recalledAt) };\n    if ((out.fromQ === null) !== (out.fromR === null)) fail();\n    // Only these fields are needed for identity/counts. Phase strings are bounded;\n    // the native renderer distinguishes returning from all other phase values.\n    optional(out, x, 'phase', name);\n    optional(out, x, 'kind', v => word(v, ['combat', 'trade', 'deal']));\n    optional(out, x, 'departsAt', stamp);\n    return out;\n  }\n  function transits(value) {\n    const out = [], byId = new Map();\n    for (const raw of array(value, LIMITS.transits)) {\n      const t = transit(raw), old = byId.get(t.id);\n      if (old) { if (JSON.stringify(old) !== JSON.stringify(t)) fail(); continue; }\n      byId.set(t.id, t); out.push(t);\n    }\n    return out;\n  }\n  function credits(value) {\n    if (value === undefined || value === null) return null;\n    const x = record(value); return { amount: num(x.amount, true), settledAt: stamp(x.settledAt),\n      incomePerDay: num(x.incomePerDay), upkeepPerDay: num(x.upkeepPerDay), inDeficit: bool(x.inDeficit) };\n  }\n  function selfPlayer(value, initial) {\n    const x = record(value), out = { id: id(x.id), owned: systems(x.owned) };\n    // Absence is deliberately distinct from an empty array in the native reducer.\n    if (initial || x.transits !== undefined) out.transits = x.transits === undefined ? null : transits(x.transits);\n    if (initial || x.credits !== undefined) out.credits = credits(x.credits);\n    if (x.eliminatedAt !== undefined) out.eliminatedAt = x.eliminatedAt === null ? null : stamp(x.eliminatedAt);\n    return out;\n  }\n  // Public identity/coordinate claims only. This is deliberately NOT a complete\n  // galaxy census: native rivals may also arrive through region/star replies,\n  // which this passive world-event observer does not consume. Missing cells\n  // are unknown, never evidence of a dormant or safe target.\n  function ownerPlayer(value) {\n    const x = record(value), out = { id: id(x.id), owned: unique(array(x.owned, LIMITS.systems).map(item => {\n      record(item); return { q: coord(item.q), r: coord(item.r) };\n    }), item => `${item.q},${item.r}`) };\n    optional(out, x, 'name', name);\n    return out;\n  }\n  function ownershipPlayers(value) {\n    const list = unique(array(value, LIMITS.players).map(ownerPlayer), player => player.id);\n    let count = 0; const seen = new Set();\n    for (const player of list) for (const item of player.owned) {\n      const key = `${item.q},${item.r}`;\n      if (++count > LIMITS.systems || seen.has(key)) fail();\n      seen.add(key);\n    }\n    return list;\n  }\n  function projectOwnershipInit(world) {\n    try { return { version: 1, complete: false, players: ownershipPlayers(world.players) }; }\n    catch { return null; }\n  }\n  function projectOwnershipDelta(payload) {\n    try {\n      const out = { removed: [], updated: [], added: [], invalidated: false };\n      if (payload.removed?.playerIds !== undefined) out.removed = unique(array(payload.removed.playerIds, LIMITS.players).map(id), x => x);\n      for (const group of ['updated', 'added']) {\n        if (payload[group]?.players !== undefined) {\n          out[group] = unique(array(payload[group].players, LIMITS.players).map(ownerPlayer), player => player.id);\n        }\n      }\n      // Native dirty-sector events refresh rival ownership from region replies.\n      // We cannot retain old claims when those replacement replies are unseen.\n      if (payload.updated?.dirtySectors !== undefined) {\n        const dirty = array(payload.updated.dirtySectors, LIMITS.systems);\n        out.invalidated = dirty.length > 0;\n      }\n      return out;\n    } catch { return null; }\n  }\n  // Private, current-generation indices. No DTO or permission is cached here.\n  // Each coordinate has one owner; changing a small native delta does not scan\n  // or clone every other player. Fresh wire DTOs are made only for publication.\n  function indexOwnership(value) {\n    if (!value) return null;\n    const state = { players: new Map(), coordinates: new Map() };\n    for (const player of value.players) {\n      const cells = new Map(player.owned.map(cell => [`${cell.q},${cell.r}`, cell]));\n      state.players.set(player.id, { id: player.id, ...(player.name === undefined ? {} : { name: player.name }), cells });\n      for (const key of cells.keys()) state.coordinates.set(key, player.id);\n    }\n    return state;\n  }\n  function reduceOwnership(previous, delta) {\n    if (!previous || !delta || delta.invalidated) return null;\n    if (!delta.removed.length && !delta.updated.length && !delta.added.length) return previous;\n    try {\n      const players = previous.players, coordinates = previous.coordinates;\n      // A failure below drops this whole private generation. No partially\n      // mutated state is ever published or returned to a consumer.\n      for (const id of delta.removed) {\n        const old = players.get(id);\n        if (old) { for (const key of old.cells.keys()) coordinates.delete(key); players.delete(id); }\n      }\n      const replacements = new Map(), touched = new Set(), claims = new Set();\n      for (const player of [...delta.updated, ...delta.added]) {\n        touched.add(player.id);\n        for (const cell of player.owned) claims.add(`${cell.q},${cell.r}`);\n      }\n      for (const player of delta.updated) {\n        const old = players.get(player.id);\n        if (old && !player.owned.length) {\n          // Native [] retains ownership. A name/economy-only update must not\n          // traverse a large owner's unchanged coordinate index.\n          players.set(player.id, { id: player.id, ...(player.name === undefined ? {} : { name: player.name }), cells: old.cells });\n          continue;\n        }\n        const cells = new Map(player.owned.map(cell => [`${cell.q},${cell.r}`, cell]));\n        // Remove old index entries first, then install all final claims. This\n        // preserves ambiguity detection between players touched in one delta.\n        if (old) for (const key of old.cells.keys()) coordinates.delete(key);\n        const next = { id: player.id, ...(player.name === undefined ? {} : { name: player.name }), cells };\n        players.set(player.id, next); replacements.set(player.id, next);\n      }\n      for (const player of delta.added) if (!players.has(player.id)) {\n        const next = { id: player.id, ...(player.name === undefined ? {} : { name: player.name }),\n          cells: new Map(player.owned.map(cell => [`${cell.q},${cell.r}`, cell])) };\n        players.set(player.id, next); replacements.set(player.id, next);\n      }\n      // Native captures prune only players absent from both touched sets,\n      // including claims from added records ignored for an existing player.\n      for (const key of claims) {\n        const owner = coordinates.get(key);\n        if (owner !== undefined && !touched.has(owner)) {\n          players.get(owner).cells.delete(key); coordinates.delete(key);\n        }\n      }\n      if (players.size > LIMITS.players) return null;\n      for (const player of replacements.values()) for (const key of player.cells.keys()) {\n        if (coordinates.has(key)) return null;\n        coordinates.set(key, player.id);\n        if (coordinates.size > LIMITS.systems) return null;\n      }\n      return previous;\n    } catch { return null; }\n  }\n  function validatedOwnership(value, selfId, owned, connected) {\n    if (!connected || value === null || value === undefined) return null;\n    try {\n      const x = record(value);\n      if (x.version !== 1 || x.complete !== false) fail();\n      const players = ownershipPlayers(x.players), self = players.find(player => player.id === selfId);\n      if (!self || self.owned.length !== owned.length) fail();\n      const ownKeys = new Set(owned.map(item => `${item.q},${item.r}`));\n      if (self.owned.some(item => !ownKeys.has(`${item.q},${item.r}`))) fail();\n      return { version: 1, complete: false, players };\n    } catch { return null; }\n  }\n  function boundedJson(text) {\n    let depth = 0, nodes = 0, quoted = false, escaped = false;\n    for (let i = 0; i < text.length; i++) {\n      const c = text[i];\n      if (quoted) { if (escaped) escaped = false; else if (c === '\\\\') escaped = true; else if (c === '\"') quoted = false; continue; }\n      if (c === '\"') { quoted = true; if (++nodes > LIMITS.nodes) fail(); }\n      else if (c === '[' || c === '{') { if (++depth > LIMITS.depth || ++nodes > LIMITS.nodes) fail(); }\n      else if (c === ']' || c === '}') { if (--depth < 0) fail(); }\n      else if (c === ',' && ++nodes > LIMITS.nodes) fail();\n    }\n    if (quoted || depth !== 0) fail();\n    return JSON.parse(text);\n  }\n  function projectInit(payload) {\n    const p = record(payload), selfId = id(p.selfId), world = record(p.world);\n    const list = array(world.players, LIMITS.players), seen = new Set();\n    let self = null;\n    for (const raw of list) {\n      const player = record(raw), key = id(player.id); if (seen.has(key)) fail(); seen.add(key);\n      if (key === selfId) self = selfPlayer(player, true);\n    }\n    if (!self) fail();\n    const configVersion = p.config && ['string', 'number'].includes(typeof p.config.version)\n      ? String(p.config.version).slice(0, 100) : '';\n    return { kind: 'init', selfId, self, serverNow: int(p.serverNow), configVersion, ownership: projectOwnershipInit(world) };\n  }\n  function projectDelta(payload, selfId) {\n    if (!selfId || !UUID.test(selfId)) fail();\n    const p = record(payload), out = { kind: 'delta', removedSelf: false, selfUpdate: null, selfAdded: null, claims: [] };\n    if (p.removed !== undefined) {\n      const removed = record(p.removed);\n      if (removed.playerIds !== undefined) out.removedSelf = array(removed.playerIds, LIMITS.players).some(x => id(x) === selfId);\n    }\n    const seen = new Set(), claimKeys = new Set();\n    for (const group of ['updated', 'added']) {\n      if (p[group] === undefined) continue;\n      const data = record(p[group]); if (data.players === undefined) continue;\n      for (const raw of array(data.players, LIMITS.players)) {\n        const player = record(raw), key = id(player.id), seenKey = `${group}:${key}`;\n        if (seen.has(seenKey)) fail(); seen.add(seenKey);\n        if (key === selfId) {\n          const field = group === 'updated' ? 'selfUpdate' : 'selfAdded'; out[field] = selfPlayer(player, false);\n        } else {\n          // Only coordinates of other owners' new claims affect self ownership.\n          for (const item of array(player.owned, LIMITS.systems)) {\n            record(item); const q = coord(item.q), r = coord(item.r), k = `${q},${r}`;\n            if (!claimKeys.has(k)) { claimKeys.add(k); out.claims.push({ q, r }); }\n            if (out.claims.length > LIMITS.systems) fail();\n          }\n        }\n      }\n    }\n    out.ownership = projectOwnershipDelta(p);\n    return out;\n  }\n  /** Returns a sanitized event, {kind:'ignore'}, or {kind:'invalid'}; never raw payloads. */\n  function parseFrame(data, selfId = '') {\n    if (typeof data !== 'string') return { kind: 'invalid' };\n    if (data.length > LIMITS.frame) return { kind: 'invalid' };\n    if (data === '1' || data === '41' || data.startsWith('44')) return { kind: 'lost' };\n    // Binary Socket.IO event envelopes cannot be reconstructed by this observer.\n    if (data.startsWith('45') || data.startsWith('46')) return { kind: 'invalid' };\n    if (!data.startsWith('42')) return { kind: 'ignore' };\n    const packet = /^42(?:[0-9]{1,12})?(\\[.*)$/s.exec(data);\n    if (!packet) return { kind: 'invalid' };\n    const payloadText = packet[1];\n    // Discard session.token/chat/etc before JSON parsing or retaining their bodies.\n    const event = /^\\[\\s*\"(world\\.init|world\\.delta|session\\.displaced)\"\\s*[,\\]]/.exec(payloadText)?.[1];\n    if (!event) return { kind: 'ignore' };\n    if (event === 'session.displaced') return { kind: 'lost' };\n    try {\n      const value = boundedJson(payloadText);\n      if (!Array.isArray(value) || value.length !== 2 || value[0] !== event) fail();\n      // A recognized delta cannot be projected onto a player before its init.\n      // Validate the bounded JSON envelope/object, but retain no payload or IDs.\n      if (event === 'world.delta' && selfId === '') { record(value[1]); return { kind: 'missing-init' }; }\n      return event === 'world.init' ? projectInit(value[1]) : projectDelta(value[1], selfId);\n    } catch { return { kind: 'invalid' }; }\n  }\n  function createReducer({ galaxy, now = Date.now } = {}) {\n    if (!GALAXY.test(galaxy || '') || typeof now !== 'function') throw new TypeError('Invalid observer scope');\n    let generation = 0, epoch = 0, revision = 0, current = null, connected = false, reason = 'awaiting-init';\n    let receivedAt = 0, serverNow = null, lastInitServerNow = null, configVersion = '', ownership = null;\n    function invalidate(why) { connected = false; current = null; ownership = null; receivedAt = 0; serverNow = null; reason = why; }\n    function beginConnection() { generation++; lastInitServerNow = null; invalidate('awaiting-init'); return generation; }\n    function loseConnection(token, why = 'connection-lost') {\n      if (token !== generation) return false;\n      invalidate(['connection-lost', 'stopped', 'malformed', 'session-lost', 'missing-init'].includes(why) ? why : 'connection-lost');\n      return true;\n    }\n    function ingest(data, token = generation) {\n      if (token !== generation) return false;\n      const event = parseFrame(data, current?.id || '');\n      if (event.kind === 'ignore') return false;\n      if (event.kind === 'invalid') { invalidate('malformed'); return true; }\n      if (event.kind === 'lost') { invalidate('session-lost'); return true; }\n      if (event.kind === 'missing-init') { invalidate('missing-init'); return true; }\n      const observedAt = now();\n      if (!Number.isSafeInteger(observedAt) || observedAt < 0) { invalidate('malformed'); return true; }\n      if (event.kind === 'init') {\n        if (lastInitServerNow !== null && event.serverNow < lastInitServerNow) { invalidate('malformed'); return true; }\n        epoch++; revision = 0; current = event.self; ownership = indexOwnership(event.ownership); connected = true; reason = '';\n        serverNow = event.serverNow; lastInitServerNow = event.serverNow; configVersion = event.configVersion; receivedAt = observedAt; return true;\n      }\n      if (!current || !connected) { invalidate('missing-init'); return true; }\n      if (event.removedSelf) { invalidate('session-lost'); return true; }\n      // Native applyDelta replaces the self record, retaining owned on [], and\n      // retaining omitted transits/credits. Added self is ignored when it exists.\n      if (event.selfUpdate) {\n        const next = event.selfUpdate, old = current;\n        current = { ...next, owned: next.owned.length ? next.owned : old.owned,\n          transits: own(next, 'transits') ? next.transits : old.transits,\n          credits: own(next, 'credits') ? next.credits : old.credits,\n          eliminatedAt: own(next, 'eliminatedAt') ? next.eliminatedAt : old.eliminatedAt };\n      }\n      // Captures prune only players absent from this delta's added/updated sets.\n      if (!event.selfUpdate && !event.selfAdded && event.claims.length) {\n        const keys = new Set(event.claims.map(x => `${x.q},${x.r}`));\n        current = { ...current, owned: current.owned.filter(x => !keys.has(`${x.q},${x.r}`)) };\n      }\n      ownership = reduceOwnership(ownership, event.ownership);\n      revision++; receivedAt = observedAt; return true;\n    }\n    // Scalar metadata never materializes or validates a full ownership census.\n    function stamp() { return { generation, epoch, revision, connected, observedAt: receivedAt }; }\n    function facts() {\n      const transitShips = Object.fromEntries(SHIPS.map(x => [x, 0]));\n      if (!current) return { complete: false, reason, transitShips };\n      let complete = current.owned.length > 0 && Array.isArray(current.transits) && !current.eliminatedAt;\n      for (const s of current.owned) {\n        const yardLevel = s.buildings.find(x => x.type === 'shipyard')?.level;\n        if (!s.economy || !s.fleet || (yardLevel !== 0 && !s.shipyard)) complete = false;\n      }\n      for (const t of current.transits || []) for (const ship of t.ships) {\n        if (transitShips[ship.type] === null) continue;\n        const total = transitShips[ship.type] + ship.quantity;\n        if (!Number.isSafeInteger(total)) { complete = false; transitShips[ship.type] = null; }\n        else if (transitShips[ship.type] !== null) transitShips[ship.type] = total;\n      }\n      return { complete: complete && connected,\n        reason: current.eliminatedAt ? 'eliminated' : complete ? '' : 'incomplete-data', transitShips };\n    }\n    function coherentOwnership() {\n      if (!current || !connected || !ownership) return false;\n      const self = ownership.players.get(current.id);\n      if (!self || self.cells.size !== current.owned.length) return false;\n      return current.owned.every(item => self.cells.has(`${item.q},${item.r}`));\n    }\n    function canDeferPublication() {\n      // Scheduling only: the wire receiver still revalidates every DTO.\n      return facts().complete && coherentOwnership();\n    }\n    function ownershipProjection() {\n      if (!coherentOwnership()) return null;\n      return { version: 1, complete: false, players: [...ownership.players.values()].map(player => ({\n        id: player.id, ...(player.name === undefined ? {} : { name: player.name }),\n        owned: [...player.cells.values()].map(cell => ({ q: cell.q, r: cell.r })),\n      })) };\n    }\n    function snapshot() {\n      const out = { version: VERSION, galaxy, selfId: current?.id || '', scope: current ? `${galaxy}/${current.id}` : '',\n        epoch, revision, generation, observedAt: receivedAt, serverNow, configVersion, connected,\n        ...facts(), systems: [], transits: [], credits: null, ownership: null };\n      if (!current) return out;\n      out.systems = clone(current.owned); out.transits = clone(current.transits || []); out.credits = clone(current.credits || null);\n      out.ownership = ownershipProjection();\n      return out;\n    }\n    return Object.freeze({ beginConnection, loseConnection, ingest, snapshot, stamp, canDeferPublication });\n  }\n\n  // Revalidate the unprivileged page-to-content bridge without invoking input\n  // accessors, toJSON, iterators, or prototype hooks. JSON text is preferred.\n  function plainCopy(value) {\n    let nodes = 0, bytes = 0;\n    function visit(x, depth) {\n      if (++nodes > LIMITS.nodes || depth > LIMITS.depth) fail();\n      if (x === null || typeof x === 'boolean') return x;\n      if (typeof x === 'number') return Number.isFinite(x) ? x : fail();\n      if (typeof x === 'string') { bytes += x.length; if (bytes > LIMITS.frame) fail(); return x; }\n      if (!object(x) && !Array.isArray(x)) fail();\n      const proto = Object.getPrototypeOf(x);\n      if (Array.isArray(x) ? proto !== Array.prototype : proto !== Object.prototype && proto !== null) fail();\n      const out = Array.isArray(x) ? [] : Object.create(null);\n      const keys = Object.keys(x); if (keys.length > LIMITS.nodes) fail();\n      for (const key of keys) {\n        bytes += key.length; if (bytes > LIMITS.frame) fail();\n        const d = Object.getOwnPropertyDescriptor(x, key);\n        if (!d || !own(d, 'value')) fail();\n        Object.defineProperty(out, key, { value: visit(d.value, depth + 1), enumerable: true, writable: true, configurable: true });\n      }\n      if (Array.isArray(x) && (x.length > LIMITS.nodes || keys.length !== x.length)) fail();\n      return out;\n    }\n    return visit(value, 0);\n  }\n  function validateSnapshot(input) {\n    try {\n      if (typeof input === 'string' && input.length > LIMITS.frame) fail();\n      const p = record(typeof input === 'string' ? boundedJson(input) : plainCopy(input));\n      if (p.version !== VERSION || !GALAXY.test(p.galaxy || '')) fail();\n      const connected = bool(p.connected), selfId = p.selfId === '' ? '' : id(p.selfId);\n      if (p.scope !== (selfId ? `${p.galaxy}/${selfId}` : '') || (connected && !selfId)) fail();\n      const out = { version: VERSION, galaxy: p.galaxy, selfId, scope: p.scope,\n        epoch: int(p.epoch), revision: int(p.revision), generation: int(p.generation),\n        observedAt: int(p.observedAt), serverNow: p.serverNow === null ? null : int(p.serverNow),\n        configVersion: typeof p.configVersion === 'string' && p.configVersion.length <= 100 ? p.configVersion : fail(),\n        connected, complete: bool(p.complete), reason: word(p.reason, ['', 'awaiting-init', 'connection-lost',\n          'stopped', 'malformed', 'session-lost', 'missing-init', 'eliminated', 'incomplete-data']),\n        systems: systems(p.systems), transits: transits(p.transits),\n        transitShips: Object.fromEntries(SHIPS.map(type => [type, 0])), credits: credits(p.credits) };\n      if (!selfId && (out.systems.length || out.transits.length || out.credits)) fail();\n      // Older page observers omit ownership. Invalid/incomplete public claims\n      // close the ally guard, without discarding otherwise valid own economy.\n      out.ownership = validatedOwnership(p.ownership, selfId, out.systems, connected);\n      for (const t of out.transits) for (const ship of t.ships) {\n        const n = out.transitShips[ship.type];\n        if (n !== null) out.transitShips[ship.type] = Number.isSafeInteger(n + ship.quantity) ? n + ship.quantity : null;\n      }\n      record(p.transitShips);\n      for (const type of SHIPS) if (p.transitShips[type] !== out.transitShips[type]) fail();\n      if (out.complete) {\n        if (!connected || !selfId || out.epoch < 1 || out.generation < 1 || out.serverNow === null\n          || !out.systems.length || out.reason !== '' || Object.values(out.transitShips).some(x => x === null)) fail();\n        for (const s of out.systems) {\n          const level = s.buildings.find(x => x.type === 'shipyard')?.level;\n          if (!s.economy || !s.fleet || (level !== 0 && !s.shipyard)) fail();\n        }\n      }\n      return out;\n    } catch { return null; }\n  }\n  function isGameSocket(value) {\n    if (typeof value !== 'string' || value.length > 4096) return false;\n    try {\n      const u = new URL(value);\n      return u.protocol === 'wss:' && u.hostname === 'api.oldlight.io' && !u.port && !u.username && !u.password\n        && u.pathname === '/socket.io/' && u.searchParams.getAll('EIO').length === 1 && u.searchParams.getAll('transport').length === 1\n        && u.searchParams.get('EIO') === '4' && u.searchParams.get('transport') === 'websocket';\n    } catch { return false; }\n  }\n  /** Page-world only. It never initiates/changes a connection, or accesses send. */\n  function installPageObserver({ channel, emit, onPending } = {}) {\n    if (typeof channel !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(channel) || typeof emit !== 'function'\n      || onPending !== undefined && typeof onPending !== 'function') throw new TypeError('Invalid observer channel');\n    const location = realm.location;\n    const galaxy = location?.origin === 'https://oldlight.io'\n      ? /^\\/game\\/galaxy\\/([A-Za-z0-9_-]{1,64})(?:\\/|$)/.exec(location.pathname)?.[1] : null;\n    const Native = realm.WebSocket, descriptor = Object.getOwnPropertyDescriptor(realm, 'WebSocket');\n    if (!galaxy || typeof Native !== 'function' || !descriptor || !own(descriptor, 'value')\n      || (!descriptor.writable && !descriptor.configurable)) throw new Error('Observer unavailable');\n    const reducer = createReducer({ galaxy, now: () => Date.now() });\n    const watched = new WeakSet();\n    let stopped = false, active = null, lastError = false, publishTimer = null;\n    const later = realm.setTimeout.bind(realm), cancel = realm.clearTimeout.bind(realm);\n    const publish = (defer = false) => {\n      if (stopped) return;\n      // A synchronous, scalar-only bridge marker revokes the prior snapshot\n      // before either a timer or MessagePort delivery can lag the native event.\n      // It is optional for direct consumers and never touches game state.\n      try { onPending?.(reducer.stamp()); } catch { lastError = true; }\n      if (defer) {\n        if (publishTimer === null) publishTimer = later(() => { publishTimer = null; publish(); }, 0);\n        return;\n      }\n      if (publishTimer !== null) { cancel(publishTimer); publishTimer = null; }\n      try { emit({ channel, snapshot: reducer.snapshot() }); } catch { lastError = true; }\n    };\n    function detach() {\n      if (!active) return;\n      for (const [type, fn] of active.listeners) active.socket.removeEventListener(type, fn);\n      active = null;\n    }\n    function watch(socket) {\n      // Constructor and handler discovery can see the same socket. Never reset\n      // its epoch, or let a detached older socket become active a second time.\n      if (watched.has(socket)) return;\n      watched.add(socket);\n      detach(); const token = reducer.beginConnection();\n      const onMessage = event => {\n        if (stopped || active?.socket !== socket || event.isTrusted !== true) return;\n        if (reducer.ingest(event.data, token)) {\n          // Unknown ownership closes dispatch immediately, even while the own\n          // economy remains complete. Valid updates still wait for native UI.\n          // Do not copy all owners for every frame just to choose that timing.\n          publish(reducer.canDeferPublication());\n        }\n      };\n      const onLost = () => {\n        if (stopped || active?.socket !== socket) return;\n        reducer.loseConnection(token); publish(); detach();\n      };\n      const listeners = [['message', onMessage], ['close', onLost], ['error', onLost]];\n      active = { socket, listeners };\n      for (const [type, fn] of listeners) socket.addEventListener(type, fn);\n      publish();\n    }\n    let Wrapped;\n    Wrapped = new Proxy(Native, { construct(target, args, newTarget) {\n      // Construction and all static/prototype behavior remain native. Unknown\n      // sockets pass through untouched. We do not inspect protocols or send().\n      const socket = Reflect.construct(target, args, newTarget);\n      if (!stopped && isGameSocket(args[0])) {\n        try { watch(socket); } catch { reducer.loseConnection(reducer.snapshot().generation, 'malformed'); publish(); }\n      }\n      return socket;\n    } });\n    Object.defineProperty(realm, 'WebSocket', { ...descriptor, value: Wrapped });\n    // Engine.IO caches the constructor before opening its socket, then assigns\n    // onmessage immediately after construction. A prototype accessor remains\n    // visible to that cached constructor. Keep the original callback/getter and\n    // setter behavior; discover only still-CONNECTING native sockets. This does\n    // not enumerate or recover sockets whose handlers were already registered.\n    const prototype = Native.prototype;\n    const messageDescriptor = Object.getOwnPropertyDescriptor(prototype, 'onmessage');\n    const urlGetter = Object.getOwnPropertyDescriptor(prototype, 'url')?.get;\n    const stateGetter = Object.getOwnPropertyDescriptor(prototype, 'readyState')?.get;\n    let handlerSetter = null;\n    if (messageDescriptor?.configurable && typeof messageDescriptor.get === 'function'\n      && typeof messageDescriptor.set === 'function' && typeof urlGetter === 'function' && typeof stateGetter === 'function') {\n      const set = function (value) {\n        // The native setter runs first, including its brand checks and errors.\n        const result = Reflect.apply(messageDescriptor.set, this, [value]);\n        if (!stopped && !watched.has(this)) {\n          try {\n            // Native getters bypass shadow properties supplied on an instance.\n            if (Reflect.apply(stateGetter, this, []) === 0 && isGameSocket(Reflect.apply(urlGetter, this, []))) watch(this);\n          } catch {\n            reducer.loseConnection(reducer.snapshot().generation, 'malformed'); publish();\n          }\n        }\n        return result;\n      };\n      try {\n        Object.defineProperty(prototype, 'onmessage', { ...messageDescriptor, set });\n        handlerSetter = set;\n      } catch { /* Keep constructor-only observation when the accessor is unavailable. */ }\n    }\n    publish();\n    return Object.freeze({\n      status: () => ({ installed: !stopped, emissionError: lastError, ...reducer.snapshot() }),\n      stop() {\n        if (stopped) return;\n        reducer.loseConnection(reducer.snapshot().generation, 'stopped'); publish(); stopped = true; detach();\n        if (realm.WebSocket === Wrapped) Object.defineProperty(realm, 'WebSocket', descriptor);\n        const currentHandler = Object.getOwnPropertyDescriptor(prototype, 'onmessage');\n        if (handlerSetter && currentHandler?.set === handlerSetter && currentHandler.get === messageDescriptor.get\n          && currentHandler.enumerable === messageDescriptor.enumerable && currentHandler.configurable === messageDescriptor.configurable) {\n          Object.defineProperty(prototype, 'onmessage', messageDescriptor);\n        }\n      },\n    });\n  }\n  return Object.freeze({ VERSION, LIMITS, SHIPS, parseFrame, createReducer, validateSnapshot, isGameSocket, installPageObserver });\n});" });
     Object.defineProperty(globalThis, 'OldLightEmpireBridge', { configurable: false, value: bridge });
   } catch (_) { phase = 'unavailable'; error = 'bridge-create-failed'; }
 })();
@@ -2768,7 +2932,7 @@ return Object.freeze({create});
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.15.2';
+  const SCRIPT_VERSION = '1.16.0';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -2813,10 +2977,15 @@ return Object.freeze({create});
   let missionTargetResolver = null;
   let attackRetry = null;
   const retryOriginChecks = new Map();
+  const allyProtection = createAllyProtection({ getContext: missionContext,
+    getWorld: () => globalThis.OldLightEmpireBridge?.snapshot?.() || null,
+    onChange: () => { missionAdapter?.cancel(null, 'La protección de aliados ha cambiado. Revisa el destino.'); schedule(); } });
   const shiftPresets = createShiftPresetMenu({
     isEnabled: () => settings.shiftPresetShortcut && !missionAdapter?.isBusy() && !attackRetry?.isBusy(), onPreset: offerPresetMission,
     readPresetCache: readMissionPresetCache, savePresetCache: saveMissionPresetCache,
     canUseEmptyFleet: () => missionContext().selectionCount === 1 && SHIPS.every(([id]) => fleetCounts(id)?.parked === 0),
+    checkPreset: checkProtectedPreset,
+    onNativeInteraction: event => empireAdapter?.observeInteraction(event),
     captureEmptyTarget: (button, quantities, key) => missionAdapter?.captureRadial(button, quantities, key),
     onEmptyPreset: offerEmptyPresetMission });
   const notifier = createNotifier({ onSettingsChange: settingsChanged });
@@ -2865,7 +3034,8 @@ return Object.freeze({create});
   missionTargetResolver = createMissionTargetResolver({ getContext: missionContext, canAct: canOperateMission });
   missionAdapter = createNativeMissionAdapter({ getContext: missionContext, getFleet: fleetCounts,
     canAct: job => canOperateMission() && isCurrentMissionClaim(job) && isRetryMissionAllowed(job), onBusyChange: schedule, onChange: schedule,
-    resolveTarget: (job, options) => missionTargetResolver.resolveTarget(job, options) });
+    resolveTarget: (job, options) => missionTargetResolver.resolveTarget(job, options),
+    checkTarget: (job, previous) => allyProtection.check(job, previous) });
   fleetWait = createFleetWaitQueue({
     getContext: missionQueueContext, getFleet: currentMissionFleet,
     openFleetEditor: openMissionFleetEditor,
@@ -4053,7 +4223,7 @@ return Object.freeze({create});
     const minimums = el('section');
     minimums.dataset.fleetView = 'minimums';
     for (const child of [...ui.fleetDetails.children]) {
-      if (child.tagName !== 'SUMMARY' && child !== ui.attackRetryContainer && child !== ui.fleetWaitContainer) minimums.append(child);
+      if (child.tagName !== 'SUMMARY' && child !== ui.allyProtectionContainer && child !== ui.attackRetryContainer && child !== ui.fleetWaitContainer) minimums.append(child);
     }
     const definitions = [
       ['minimums', 'Mínimos', minimums],
@@ -4198,6 +4368,11 @@ return Object.freeze({create});
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.16.0', title: 'Jugadores protegidos', changes: [
+        'Añade una lista local por cuenta y galaxia para bloquear envíos automáticos hacia jugadores protegidos. Empieza sin configurar; no incluye a nadie al actualizar.',
+        'Comprueba propietario y ámbito antes del clic final. Nombres sin ID o propiedad desconocida pausan envíos; Shift cancela saltos imperiales pendientes y el lector agrupa ráfagas sin retirar guardas.',
+        'La lista queda fuera de Drive, copias y métricas. No cancela flotas ya enviadas ni cubre órdenes manuales o cambios de dueño durante el viaje. Validación offline.',
+      ] },
       { version: '1.15.2', title: 'Pausa por interacción y ayuda de roles', changes: [
         'Muestra los segundos restantes de la pausa de interacción. Unifica clics, teclado, rueda y gestos del juego sin contar la actividad dentro del Helper.',
         'Una interrupción conocida ya no se confunde con una selección fallida permanente. Editar un campo pausa el recorrido hasta salir de él, sin añadir otros 15 segundos.',
@@ -4604,6 +4779,7 @@ return Object.freeze({create});
               <div class="fleet-choices" role="list" aria-label="Mínimos y prioridad de naves"></div>
               <label class="count-away"><input type="checkbox">Contar también las naves en misión</label>
               <div class="priority-tools"><span class="hint">Se descuenta la producción en cola</span><button type="button" class="reset-ships">Restablecer orden</button></div>
+              <div data-field="ally-protection"></div>
               <div data-field="attack-retry"></div>
               <div data-field="fleet-wait"></div>
               <div class="fleet-shortcut"><label><input type="checkbox" data-setting="shift-preset-shortcut"><span><kbd>Shift</kbd> + clic para mostrar presets</span></label>
@@ -4614,7 +4790,7 @@ return Object.freeze({create});
             <div class="settings-page" data-page="data" id="oldlight-settings-data" role="tabpanel" tabindex="0" aria-labelledby="oldlight-tab-data" hidden>
               <div class="backup-card"><h3>Copias de seguridad</h3>
                 <p class="page-intro">Los cambios se guardan automáticamente en este navegador.</p>
-                <div class="backup-actions"><button type="button" data-action="export-settings">Exportar todo</button><button type="button" data-action="choose-import-settings">Importar copia</button></div>
+                <div class="backup-actions"><button type="button" data-action="export-settings">Exportar configuración</button><button type="button" data-action="choose-import-settings">Importar copia</button></div>
                 <input type="file" data-action="import-settings" accept=".json,application/json" hidden>
                 <p class="backup-warning">La copia incluye tus credenciales de Telegram. Importar sustituye la configuración actual.</p>
                 <p class="backup-status" data-field="backup-status" role="status" aria-live="polite"></p>
@@ -4674,6 +4850,7 @@ return Object.freeze({create});
         items: new Map(),
         fleetDetails: shadow.querySelector('.fleet-details'),
         fleetChoices: shadow.querySelector('.fleet-choices'),
+        allyProtectionContainer: shadow.querySelector('[data-field="ally-protection"]'),
         attackRetryContainer: shadow.querySelector('[data-field="attack-retry"]'),
         fleetWaitContainer: shadow.querySelector('[data-field="fleet-wait"]'),
         countAway: shadow.querySelector('.count-away input'),
@@ -4885,6 +5062,7 @@ return Object.freeze({create});
       }
       notifier.mount(ui.notificationContainer);
       levelTargets.mount(ui.levelTargetContainer);
+      allyProtection.mount(ui.allyProtectionContainer);
       attackRetry.mount(ui.attackRetryContainer);
       fleetWait.mount(ui.fleetWaitContainer);
       if (driveBackup) driveBackup.mount(ui.driveContainer);
@@ -5245,7 +5423,7 @@ return Object.freeze({create});
         link.click();
         setTimeout(() => URL.revokeObjectURL(url), 2000);
         metrics.record('backup.exported');
-        setText(ui.backupStatus, 'Copia exportada. Incluye toda la configuración guardada.');
+        setText(ui.backupStatus, 'Copia exportada. No incluye la lista local de jugadores protegidos.');
       } catch { metrics.record('backup.failed'); setText(ui.backupStatus, 'No se pudo exportar la configuración.'); }
     });
     ui.chooseImport.addEventListener('click', event => {
@@ -5746,6 +5924,7 @@ return Object.freeze({create});
   }
 
   function step() {
+    if (typeof allyProtection !== 'undefined') allyProtection.render();
     const panel = document.querySelector(PANEL);
     const fleetPanel = document.querySelector(FLEET_PANEL);
     if ((!panel && !fleetPanel) || !document.body) {
@@ -6337,10 +6516,173 @@ return Object.freeze({create});
   }
   // END UPGRADE ETA ESTIMATOR
 
+  // BEGIN ALLY PROTECTION
+  // Account/galaxy-local deny list. Never bundled into settings export, Drive,
+  // metrics or public releases. Names can only deny; they never authorize a send.
+  function createAllyProtection({ getContext, getWorld, storage = localStorage, now = Date.now,
+    onChange = () => {} } = {}) {
+    const PREFIX = 'old-light-protected-players:v1:';
+    const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const SCOPE = /^[A-Za-z0-9_-]{1,64}\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const MAX_AGE_MS = 120000;
+    const alias = value => typeof value === 'string' && value.length <= 200
+      ? value.normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase() : '';
+    const blocked = (code, message) => ({ allowed: false, enabled: true, code, message });
+    let mounted = null, renderKey = '', feedback = '', feedbackScope = '';
+    function scope() {
+      try { const s = getContext().scope; return SCOPE.test(s || '') ? s : ''; } catch { return ''; }
+    }
+    function read(expected = scope()) {
+      if (!SCOPE.test(expected)) throw new Error('No se ha identificado la cuenta y la galaxia.');
+      const raw = storage.getItem(PREFIX + expected);
+      if (raw === null) return { version: 1, scope: expected, players: [] };
+      if (typeof raw !== 'string' || raw.length > 60000) throw new Error('La protección guardada no se puede leer.');
+      const value = JSON.parse(raw), seen = new Set();
+      if (!value || value.version !== 1 || value.scope !== expected || !Array.isArray(value.players) || value.players.length > 128
+        || Object.keys(value).some(k => !['version', 'scope', 'players'].includes(k))) throw new Error('La protección guardada no es válida.');
+      value.players = value.players.map(p => {
+        if (!p || typeof p !== 'object' || Array.isArray(p) || Object.keys(p).some(k => !['id', 'alias'].includes(k))
+          || typeof p.id !== 'string' || (p.id !== '' && !UUID.test(p.id)) || typeof p.alias !== 'string'
+          || (p.alias !== '' && !alias(p.alias)) || (!p.id && !p.alias)) throw new Error('La protección guardada no es válida.');
+        const result = { id: p.id.toLowerCase(), alias: alias(p.alias) }, key = result.id || 'alias:' + result.alias;
+        if (seen.has(key)) throw new Error('La protección contiene entradas duplicadas.');
+        seen.add(key); return result;
+      });
+      return value;
+    }
+    function world(expected) {
+      const w = getWorld(), at = now();
+      if (!w || w.version !== 1 || w.scope !== expected || w.selfId !== expected.split('/')[1]
+        || w.connected !== true || !Number.isSafeInteger(w.observedAt) || w.observedAt < 0 || w.observedAt > at
+        || at - w.observedAt > MAX_AGE_MS || !Number.isSafeInteger(w.epoch) || w.epoch < 1
+        || !Number.isSafeInteger(w.generation) || w.generation < 1 || !Number.isSafeInteger(w.revision) || w.revision < 0
+        || w.ownership?.version !== 1 || !Array.isArray(w.ownership.players) || w.ownership.players.length > 10000) return null;
+      const ids = new Set(), coordinates = new Set();
+      for (const p of w.ownership.players) {
+        if (!p || !UUID.test(p.id || '') || ids.has(p.id) || !Array.isArray(p.owned) || p.owned.length > 10000
+          || (p.name !== undefined && (typeof p.name !== 'string' || p.name.length > 200))) return null;
+        ids.add(p.id);
+        for (const c of p.owned) {
+          if (!c || !Number.isSafeInteger(c.q) || !Number.isSafeInteger(c.r) || Math.abs(c.q) > 10000000 || Math.abs(c.r) > 10000000) return null;
+          const key = `${c.q},${c.r}`; if (coordinates.has(key)) return null; coordinates.add(key);
+        }
+      }
+      return w;
+    }
+    function check(job, previous = null) {
+      try {
+        const s = scope(), config = read(s);
+        // Even an unconfigured list keeps the originating account/galaxy. A
+        // context switch must not erase an in-flight shortcut's earlier guard.
+        if (previous && previous.scope !== s) return blocked('scope', 'La cuenta o la galaxia ha cambiado. Revisa el envío antes de continuar.');
+        if (!config.players.length) return { allowed: true, enabled: false, token: { scope: s } };
+        const spec = job?.spec || job, point = spec?.target?.coordinate;
+        if (!spec || spec.scope !== s || !point || !Number.isSafeInteger(point.q) || !Number.isSafeInteger(point.r)) {
+          return blocked('scope', 'Protección de aliados: la cuenta o el destino no están verificados.');
+        }
+        const w = world(s);
+        if (!w) return blocked('ownership', 'Protección de aliados: falta propiedad reciente del juego. Envío pausado.');
+        const owner = w.ownership.players.find(p => p.owned.some(c => c.q === point.q && c.r === point.r));
+        if (!owner) return blocked('unknown-owner', 'Protección de aliados: el propietario del destino es desconocido. Envío pausado.');
+        if (config.players.some(p => p.id === owner.id || (p.alias && p.alias === alias(owner.name)))) {
+          return blocked('protected', 'Destino protegido: el helper no enviará esta flota.');
+        }
+        // An unresolved name cannot establish enduring identity, e.g. after a
+        // rename. Pause other attacks too until the user binds a verified ID.
+        if (config.players.some(p => !p.id)) return blocked('unresolved-alias', 'Hay un aliado pendiente de identificar por ID. Los envíos esperan para evitar atacarlo tras un cambio de nombre.');
+        const token = { scope: s, q: point.q, r: point.r, ownerId: owner.id, epoch: w.epoch, generation: w.generation };
+        if (previous && (previous.scope !== s || previous.q !== point.q || previous.r !== point.r
+          || previous.ownerId !== owner.id || previous.epoch !== w.epoch || previous.generation !== w.generation)) {
+          return blocked('owner-changed', 'La propiedad del destino o la sesión ha cambiado. Revisa la misión antes de reanudarla.');
+        }
+        return { allowed: true, enabled: true, token };
+      } catch { return blocked('storage', 'No se puede verificar la protección de aliados. Envío pausado; revisa sus ajustes.'); }
+    }
+    function active() { try { return read().players.length > 0; } catch { return true; } }
+    function save(config) {
+      if (config.scope !== scope()) throw new Error('La cuenta o la galaxia ha cambiado.');
+      const raw = JSON.stringify(config); storage.setItem(PREFIX + config.scope, raw);
+      if (storage.getItem(PREFIX + config.scope) !== raw) throw new Error('No se pudo verificar el guardado de la protección.');
+      renderKey = ''; onChange(); render();
+    }
+    function add({ id = '', name = '', expectedScope = scope() } = {}) {
+      const s = scope();
+      if (s !== expectedScope) throw new Error('La cuenta o la galaxia ha cambiado. Revisa el formulario.');
+      const config = read(s), label = alias(name);
+      if (typeof id !== 'string' || id && !UUID.test(id) || !id && !label) throw new Error('Introduce un nombre exacto o un ID de jugador válido.');
+      id = id.toLowerCase();
+      if (id === s.split('/')[1]) throw new Error('Ese ID pertenece a tu propia cuenta.');
+      if (id) {
+        const current = world(s), player = current?.ownership.players.find(p => p.id === id);
+        if (!player || label && alias(player.name) !== label) throw new Error('El ID y el nombre deben coincidir con datos recientes del juego.');
+      }
+      // A matching display name must never erase another stable identity.
+      // Name-only additions also cannot degrade an already bound protection.
+      if (!id) {
+        const bound = config.players.find(p => p.id && label && p.alias === label);
+        if (bound) return bound;
+      }
+      let index = config.players.findIndex(p => id ? p.id === id : !p.id && p.alias === label);
+      if (id && index < 0 && label) index = config.players.findIndex(p => !p.id && p.alias === label);
+      const next = { id, alias: label || (index >= 0 ? config.players[index].alias : '') };
+      if (index >= 0) config.players[index] = next; else config.players.push(next);
+      if (config.players.length > 128) throw new Error('Límite de 128 jugadores protegidos.');
+      save(config); return next;
+    }
+    function remove(index, expectedScope, expectedEntry) {
+      const config = read();
+      if (config.scope !== expectedScope || JSON.stringify(config.players[index]) !== expectedEntry) throw new Error('La lista ha cambiado. Revísala de nuevo.');
+      config.players.splice(index, 1); save(config);
+    }
+    function mount(container) {
+      mounted = container; renderKey = ''; render();
+    }
+    function render() {
+      if (!mounted) return;
+      let config, state;
+      try { config = read(); if (feedbackScope !== config.scope) feedback = ''; state = JSON.stringify([config, feedback]); }
+      catch { config = null; state = 'error'; }
+      if (state === renderKey) return;
+      renderKey = state;
+      const doc = mounted.ownerDocument, el = (tag, value) => { const n = doc.createElement(tag); if (value) n.textContent = value; return n; };
+      const details = el('details'), summary = el('summary', !config ? 'Jugadores protegidos · revisar configuración'
+        : config.players.length ? 'Jugadores protegidos' : 'Jugadores protegidos · sin configurar'); details.append(summary);
+      details.dataset.allyProtection = ''; details.style.cssText = 'margin:12px 0;padding:12px;border:1px solid var(--ol-border,#456177);border-radius:8px;overflow-wrap:anywhere';
+      const status = el('p', !config ? 'No se puede leer esta protección. Los envíos del helper quedan bloqueados.' : config.players.length
+        ? `${config.players.length} jugador(es) protegidos en esta cuenta y galaxia. Propietario desconocido: envío pausado.`
+        : 'Protección sin configurar: no hay jugadores protegidos en esta cuenta y galaxia.'); status.setAttribute('role', 'status'); details.append(status);
+      details.append(el('p', 'Solo en este navegador. No se incluye en copias ni en Drive. No cancela flotas ya enviadas ni controla clics manuales del juego.'));
+      details.append(el('p', 'El juego no ofrece defensa compartida ni visibilidad de ataques a terceros. Enviar flotas de combate a otro jugador lo ataca.'));
+      if (config) {
+        details.append(el('p', `Galaxia ${config.scope.split('/')[0]} · Cuenta ${config.scope.split('/')[1]}`));
+        config.players.forEach((p, i) => {
+          const row = el('p', `${p.alias || 'Jugador'} · ${p.id || 'ID pendiente: envíos pausados'}`), button = el('button', 'Quitar protección'); button.type = 'button';
+          button.addEventListener('click', () => { try { remove(i, config.scope, JSON.stringify(p)); } catch (e) { feedback = e.message; feedbackScope = scope(); renderKey = ''; render(); } });
+          row.append(button); details.append(row);
+        });
+        const form = el('form'), name = el('input'), id = el('input'), submit = el('button', 'Proteger jugador');
+        name.type = id.type = 'text'; name.maxLength = 200; id.maxLength = 36;
+        name.placeholder = 'Nombre exacto'; id.placeholder = 'ID verificado (opcional)';
+        name.setAttribute('aria-label', 'Nombre del jugador protegido'); id.setAttribute('aria-label', 'ID del jugador protegido');
+        name.style.cssText = id.style.cssText = 'display:block;width:100%;box-sizing:border-box;margin:6px 0';
+        submit.type = 'submit'; form.append(name, id, submit);
+        form.addEventListener('submit', event => { event.preventDefault(); try { add({ id: id.value.trim(), name: name.value, expectedScope: config.scope }); feedback = 'Protección guardada. Los envíos existentes también la comprobarán.'; } catch(e) { feedback = e.message; } feedbackScope = scope(); renderKey = ''; render(); });
+        details.append(form);
+        const hints = el('p', 'Un nombre sin ID bloquea los envíos. El ID debe verificarse con el juego antes de reanudarlos.'); details.append(hints);
+      }
+      if (feedback) details.append(el('p', feedback));
+      const open = mounted.querySelector('details')?.open; details.open = Boolean(open);
+      mounted.replaceChildren(details);
+    }
+    return { check, active, add, mount, render };
+  }
+  // END ALLY PROTECTION
+
   // BEGIN SHIFT PRESETS
   function createShiftPresetMenu({ isEnabled = () => true, onPreset = null,
     readPresetCache = () => [], savePresetCache = () => {}, canUseEmptyFleet = () => false,
-    captureEmptyTarget = null, onEmptyPreset = null } = {}) {
+    captureEmptyTarget = null, onEmptyPreset = null, checkPreset = () => ({ allowed: true }),
+    onNativeInteraction = () => {} } = {}) {
     const MENU_ID = 'oldlight-shift-presets-menu';
     const NATIVE_GUARD_MS = 130;
     const MASK_ATTRIBUTE = 'data-oldlight-preset-preparing';
@@ -6756,9 +7098,21 @@ return Object.freeze({create});
       }
       const expectedQuantities = presetQuantities(preset);
       if (!expectedQuantities) { handToNative(current); return; }
+      const protectedPreset = () => {
+        try {
+          const result = nativeAction(() => checkPreset({ dialog: current.dialog, quantities: expectedQuantities,
+            presetKey: presetKey(preset), previous: current.protection }));
+          if (result?.allowed !== true) { current.protectionError = result?.message || 'La protección de aliados no permite este envío.'; return false; }
+          current.protection = result; return true;
+        } catch { current.protectionError = 'No se pudo comprobar la protección de aliados.'; return false; }
+      };
       current.confirmGuard = event => {
         if (event.target !== confirm) return;
-        if (current.permitConfirm && !current.confirmed) { current.confirmed = true; return; }
+        if (current.permitConfirm && !current.confirmed && validDialog(current)
+          && routeKey(routeElement(current.dialog)) === current.openedRoute
+          && quantitiesMatch(current.dialog, expectedQuantities) && stockComplete(current.dialog, expectedQuantities)
+          && current.dialog.querySelector('[data-field="dispatch-confirm"]') === confirm
+          && !confirm.disabled && protectedPreset()) { current.confirmed = true; return; }
         event.preventDefault(); event.stopImmediatePropagation();
       };
       window.addEventListener('click', current.confirmGuard, true);
@@ -6783,10 +7137,11 @@ return Object.freeze({create});
       if (shortage) {
         handToNative(current, 'No hay suficientes naves para este preset. Revisa las cantidades antes de enviar.'); return;
       }
+      if (!protectedPreset()) { handToNative(current, current.protectionError); return; }
       current.phase = 'submitted';
       current.permitConfirm = true;
       try { nativeAction(() => confirm.click()); } finally { current.permitConfirm = false; }
-      if (!current.confirmed) { handToNative(current); return; }
+      if (!current.confirmed) { handToNative(current, current.protectionError); return; }
       // Special native confirmations (e.g. ending beginner protection) remain in charge.
       if (document.querySelectorAll('dialog[open]').length > 1) handToNative(current);
       else current.timer = setTimeout(() => handToNative(current), 4000);
@@ -6844,6 +7199,10 @@ return Object.freeze({create});
       if (!enabled() || !(canvas instanceof HTMLCanvasElement) || canvas.id !== 'stage'
           || event.button !== 0 || event.pointerType !== 'mouse' || !event.shiftKey || !plain(event)
           || document.querySelector('dialog[open]') || document.body.classList.contains('ui-hidden')) return;
+      // This window-capture shortcut consumes the real gesture before the
+      // document listener. Revoke pending imperial navigation through the same
+      // trusted/Helper classifier first; synthetic native replays never reach here.
+      try { onNativeInteraction(event); } catch { cancel(); return; }
       gesture = { canvas, pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY,
         shiftKey: event.shiftKey, altKey: event.altKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey };
       // Pixi receives down on the canvas but up on window capture. Retain down so
@@ -6898,7 +7257,7 @@ return Object.freeze({create});
   // No network methods are used: all dispatches pass through the game's buttons.
   function createNativeMissionAdapter({
     getContext, getFleet, canAct = () => true, onBusyChange = () => {},
-    onChange = () => {}, resolveTarget = null,
+    onChange = () => {}, resolveTarget = null, checkTarget = () => ({ allowed: true }),
   } = {}) {
     const SHIPS = ['probe', 'marauder', 'sentinel', 'vanguard'];
     const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -7331,6 +7690,17 @@ return Object.freeze({create});
     async function dispatch(job) {
       const spec = specOf(job), jobId = job?.id;
       if (destroyed || !spec || typeof jobId !== 'string') return result('paused', 'La misión guardada no tiene un origen, destino o preset válido.');
+      let protection, protectionError = '';
+      const protectedTarget = () => {
+        const next = checkTarget(job, protection?.token || null);
+        if (next?.allowed !== true) {
+          protectionError = next?.message || 'La protección de aliados impide este envío.';
+          throw new Error(protectionError);
+        }
+        protectionError = '';
+        protection = next; return true;
+      };
+      try { protectedTarget(); } catch (e) { return result('paused', e.message); }
       const claim = attemptKey(job);
       if (attempted.has(claim)) return result('uncertain', 'Esta misión ya pasó al juego. Comprueba sus movimientos antes de volver a enviarla.');
       if (active || capturing) return result('waiting', 'Hay otra misión en preparación.');
@@ -7403,6 +7773,7 @@ return Object.freeze({create});
           throw new Error('El destino o su tipo de misión ha cambiado. Se ha pausado la preparación.');
         }
         assertOperation(operation);
+        protectedTarget();
         if (!enough(spec.quantities)) return outcome = result('waiting', 'Las naves disponibles han cambiado; se esperará al preset completo.');
         const amountsMode = spec.target.mode === 'amounts';
         const directAmounts = amountsMode || customMode;
@@ -7424,7 +7795,7 @@ return Object.freeze({create});
               && inputsMatch(dialog, spec.quantities) && enough(spec.quantities)
               && (!amountsMode || isAttackAction(confirm))
               && (!customMode || confirmationMissionAction(confirm) === operation.missionAction)
-              && !confirm.disabled && !readError(dialog);
+              && !confirm.disabled && !readError(dialog) && protectedTarget();
           } catch (_) { /* A failed check must also prevent the native send. */ }
           if (allowed) {
             operation.confirmed = true; attempted.add(claim); return;
@@ -7444,9 +7815,11 @@ return Object.freeze({create});
         if (confirm.disabled || error) { expose(operation); return outcome = result('paused', error || 'El juego no permite enviar esta misión. Revisa el despacho.'); }
         const onClose = () => { operation.closed = true; };
         dialog.addEventListener('close', onClose, { once: true, signal: operation.controller.signal });
+        protectedTarget();
         operation.permitConfirm = true;
         try { confirm.click(); } finally { operation.permitConfirm = false; }
         if (!operation.confirmed) {
+          if (protectionError) throw new Error(protectionError);
           // A context change in another capture listener can block this click
           // before it reaches the game. Retry only with the same verified form;
           // route, action and composition changes still require review.
@@ -10377,6 +10750,14 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     if (!offerPresetMission({ ...options, dialog })) { dialog.remove(); return false; }
     dialog.showModal();
     return true;
+  }
+
+  function checkProtectedPreset({ dialog, quantities, presetKey, previous = null }) {
+    if (!allyProtection.active() && !previous?.spec) return allyProtection.check(null, previous?.token || null);
+    const capture = previous?.spec ? { spec: previous.spec } : missionAdapter.capture(dialog, quantities, presetKey);
+    if (!capture?.spec) return { allowed: false, message: capture?.message || 'No se pudo comprobar el destino protegido.' };
+    const result = allyProtection.check(capture.spec, previous?.token || null);
+    return { ...result, spec: capture.spec };
   }
 
   function offerPresetMission({ dialog, quantities, presetKey, shortage = true, capture: knownCapture = null }) {
@@ -15149,7 +15530,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const native = globalThis.OldLightEmpireAdapter;
     const bridge = globalThis.OldLightEmpireBridge;
     if (core && runtime && native) {
-      empireAdapter = native.create({ getWorld: () => bridge?.snapshot?.() || null, document,
+      empireAdapter = native.create({ getWorld: () => bridge?.snapshot?.({ includeOwnership: false }) || null, document,
         getObservationStatus: () => ({ ...bridge?.status?.(), bootstrap: globalThis.OldLightEmpireBootstrapStatus?.() }),
         getContext: () => ({ ...missionContext(), systemId: systemId() || '',
           settled: !hudBlocked() && !document.querySelector(`${PANEL} .b-loading, ${FLEET_PANEL} .b-loading`) }),
@@ -15186,6 +15567,9 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     attributeFilter: ['disabled', 'aria-disabled', 'aria-hidden', 'aria-label', 'hidden', 'inert', 'class', 'style', 'title', 'data-tutorial', 'data-mobile-mode', 'data-star-tab'],
   });
   window.addEventListener('storage', event => {
+    if (event.key === null || event.key?.startsWith('old-light-protected-players:v1:')) {
+      allyProtection.render(); schedule();
+    }
     if (event.key !== KEY && event.key !== null) return;
     shiftPresets.cancel();
     ui?.cancelPriorityDrag?.();

@@ -64,7 +64,10 @@ function harness() {
   const document = { readyState: 'loading', documentElement: parent, head: null, currentScript: null,
     createElement(tag) {
       assert.equal(tag, 'div');
-      return { textContent: '', isConnected: false, handlers: new Set(),
+      return { textContent: '', isConnected: false, handlers: new Set(), attributes: new Map(),
+        setAttribute(name, value) { this.attributes.set(name, String(value)); },
+        getAttribute(name) { return this.attributes.get(name) ?? null; },
+        removeAttribute(name) { this.attributes.delete(name); },
         remove() { this.isConnected = false; },
         addEventListener(type, fn) { this.handlers.add(fn); },
         removeEventListener(type, fn) { this.handlers.delete(fn); },
@@ -147,6 +150,24 @@ test('review: cached native constructor reaches isolated adapter only after the 
   assert.equal(callbackDone, true); assert.equal(h.adapter.isAvailable(), false);
   h.flush();
   assert.equal(h.adapter.isAvailable(), true); assert.equal(h.adapter.readRoster().systems.length, 1);
+  assert.equal(h.errors.length, 0); assert.equal(h.privateReads, 0);
+});
+
+test('review: observed delta revokes all empire adapter authority before the pending port delivery', () => {
+  const h = harness(), s = h.socket(); s.onmessage = () => {};
+  h.emit(s); h.flush();
+  assert.equal(h.adapter.isAvailable(), true);
+  const revision = h.bridge.snapshot().revision;
+  h.emit(s, '42' + JSON.stringify(['world.delta', { updated: { players: [{ id: SELF, owned: [], transits: [] }] } }]));
+  assert.equal(h.bridge.snapshot(), null, 'the previous census is unusable immediately after the native event');
+  assert.equal(h.bridge.status().connected, false);
+  assert.equal(h.adapter.isAvailable(), false);
+  assert.equal(h.adapter.readRoster(), null);
+  assert.equal(h.adapter.readSnapshots(), null);
+  assert.equal(h.adapter.readTransitCensus(), null);
+  h.flush();
+  assert.equal(h.bridge.snapshot().revision, revision + 1);
+  assert.equal(h.adapter.isAvailable(), true);
   assert.equal(h.errors.length, 0); assert.equal(h.privateReads, 0);
 });
 

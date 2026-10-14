@@ -5,6 +5,9 @@ function create({realm=globalThis,document=realm.document,observer,observerSourc
   let current=null,stopped=false,failed=false,installed=false,reason='awaiting-native-init',lastEpoch=-1,lastRevision=-1,port=null,container=null,ackTimer=null,watcher=null;
   const subscribers=new Set(),channel='oldlight_empire_'+realm.crypto.randomUUID().replace(/-/g,'');
   const eventName='oldlight-empire-bootstrap';
+  const pendingAttribute='data-oldlight-empire-pending';
+  const stamp=value=>JSON.stringify([value.generation,value.epoch,value.revision,value.connected,value.observedAt]);
+  function settled(){try{return !!current&&container?.getAttribute(pendingAttribute)===stamp(current);}catch{return false;}}
   const notify=()=>{for(const fn of subscribers){try{fn();}catch{}}try{onChange();}catch{}};
   function invalidate(message){current=null;reason=message;notify();}
   function cleanupBootstrap(){
@@ -36,7 +39,7 @@ function create({realm=globalThis,document=realm.document,observer,observerSourc
     // GM_addElement executes static page code, never a privileged closure. Its
     // synchronous return happens AFTER execution, so the listener must already
     // exist. A bounded ACK also tolerates delayed insertion without guessing.
-    const textContent=`(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected||!['loading','interactive','complete'].includes(document.readyState))return;target.remove();${observerSource}\nconst api=globalThis.OldLightEmpireObserver;const channel=${JSON.stringify(channel)};\nconst pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;\ntry{handle=api.installPageObserver({channel,emit:value=>{const data=JSON.stringify(value.snapshot);if(ready)send(data);else pending=data;}});\ntarget.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);\n}catch(_){try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();}})();`;
+    const textContent=`(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected||!['loading','interactive','complete'].includes(document.readyState))return;target.remove();${observerSource}\nconst api=globalThis.OldLightEmpireObserver;const channel=${JSON.stringify(channel)};\nconst pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;\ntry{handle=api.installPageObserver({channel,onPending:value=>{target.removeAttribute(${JSON.stringify(pendingAttribute)});target.setAttribute(${JSON.stringify(pendingAttribute)},JSON.stringify([value.generation,value.epoch,value.revision,value.connected,value.observedAt]));},emit:value=>{const data=JSON.stringify(value.snapshot);if(ready)send(data);else pending=data;}});\ntarget.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);\n}catch(_){try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();}})();`;
     try{
       parent.appendChild(container);
       ackTimer=realm.setTimeout(()=>{ackTimer=null;if(!installed&&!stopped)fail('observer-injection-unavailable');},2000);
@@ -49,10 +52,10 @@ function create({realm=globalThis,document=realm.document,observer,observerSourc
     if(!container&&!failed){watcher=new realm.MutationObserver(()=>{inject();if(container||failed)watcher.disconnect();});watcher.observe(document,{childList:true,subtree:true});}
   }
   return Object.freeze({
-    snapshot(){return current?JSON.parse(JSON.stringify(current)):null;},
+    snapshot({includeOwnership=true}={}){return settled()?JSON.parse(JSON.stringify(includeOwnership?current:{...current,ownership:null})):null;},
     subscribe(fn){if(typeof fn!=='function')return()=>{};subscribers.add(fn);return()=>subscribers.delete(fn);},
-    status:()=>({installed,reason,observed:!!current,connected:current?.connected===true,
-      connectionObserved:!!current&&current.generation>0,complete:current?.complete===true}),
+    status:()=>({installed,reason,observed:!!current,connected:settled()&&current.connected===true,
+      connectionObserved:!!current&&current.generation>0,complete:settled()&&current.complete===true}),
     stop(){if(stopped)return;stopped=true;cleanupBootstrap();port?.removeEventListener('message',receive);port?.close();current=null;subscribers.clear();},
   });
 }

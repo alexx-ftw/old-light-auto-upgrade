@@ -58,6 +58,7 @@ function fixture({ mode = 'sync', permission = true, source = FIXED_SOURCE, root
     remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(node => node !== this); this.parentNode = null; }
     setAttribute(name, value) { this.attributes.set(name, String(value)); }
     getAttribute(name) { return this.attributes.get(name) ?? null; }
+    removeAttribute(name) { this.attributes.delete(name); }
     addEventListener(type, fn) { if (!this.handlers.has(type)) this.handlers.set(type, new Set()); this.handlers.get(type).add(fn); }
     removeEventListener(type, fn) { this.handlers.get(type)?.delete(fn); }
     dispatchEvent(event) {
@@ -251,7 +252,7 @@ test('grant review: observer installation failure never acknowledges an installe
 test('grant review: initial synchronous observer emission waits for a live content listener', () => {
   const reducer = observer.createReducer({ galaxy: 'alpha', now: () => NOW });
   const snapshot = reducer.snapshot();
-  const h = fixture({ source: `globalThis.OldLightEmpireObserver = { installPageObserver({emit}) { emit({snapshot:${JSON.stringify(snapshot)}}); return {}; } };` });
+  const h = fixture({ source: `globalThis.OldLightEmpireObserver = { installPageObserver({emit,onPending}) { const snapshot=${JSON.stringify(snapshot)};onPending(snapshot);emit({snapshot}); return {}; } };` });
   assert.equal(h.app.status().installed, true); h.advance(0);
   assert.deepEqual(h.app.snapshot(), snapshot);
   assert.equal(h.app.status().observed, true); assert.equal(h.app.status().connected, false);

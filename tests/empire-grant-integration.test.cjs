@@ -89,6 +89,7 @@ function harness({ grant = 'available', rootAvailable = true, readyState = 'load
     get parentElement() { return this.parentNode; }
     setAttribute(name, value) { this.attributes.set(name, String(value)); if (name === 'hidden') this.hidden = true; }
     getAttribute(name) { return this.attributes.get(name) ?? null; }
+    removeAttribute(name) { this.attributes.delete(name); if (name === 'hidden') this.hidden = false; }
     addEventListener(type, fn) {
       if (!this.listeners.has(type)) this.listeners.set(type, new Set());
       this.listeners.get(type).add(fn);
@@ -261,7 +262,18 @@ test('constructor cached before generated bootstrap is observed at the native on
   assert.deepEqual(Array.from(snapshot.systems, system => system.id), [A, B]);
   assert.equal(snapshot.transitShips.probe, 0);
   assert.equal(JSON.stringify(snapshot).includes(SECRET), false);
-  assert.equal(h.deliveries.some(value => typeof value !== 'string' || value.includes(SECRET) || value.includes(OTHER)), false);
+  assert.equal(h.deliveries.some(value => typeof value !== 'string' || value.includes(SECRET)), false);
+  for (const delivery of h.deliveries) {
+    const { ownership, ...ownData } = JSON.parse(delivery);
+    assert.equal(JSON.stringify(ownData).includes(OTHER), false, 'rival identity is limited to public ownership projection');
+    if (ownership) {
+      assert.equal(ownership.version, 1); assert.equal(ownership.complete, false);
+      assert.deepEqual(ownership.players, [
+        { id: SELF, owned: [{ q: 1, r: 2 }, { q: 2, r: 2 }] },
+        { id: OTHER, owned: [] },
+      ]);
+    }
+  }
   snapshot.systems[0].name = 'changed'; assert.notEqual(h.app.snapshot().systems[0].name, 'changed');
   assert.equal(h.sockets.length, 1); assert.equal(h.NativeWebSocket.prototype.send, h.originalSend);
   assert.deepEqual(h.violations, []); assert.deepEqual(h.gameActions, []);

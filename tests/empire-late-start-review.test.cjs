@@ -78,10 +78,13 @@ function fixture(options = {}) {
     }
   }
   class Element {
-    constructor(tag) { this.tagName = tag.toUpperCase(); this.children = []; this.parentNode = null; this.listeners = new Map(); }
+    constructor(tag) { this.tagName = tag.toUpperCase(); this.children = []; this.parentNode = null; this.listeners = new Map(); this.attributes = new Map(); }
     get isConnected() { return this === document.documentElement || Boolean(this.parentNode?.isConnected); }
     appendChild(child) { child.remove(); child.parentNode = this; this.children.push(child); return child; }
     remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(child => child !== this); this.parentNode = null; }
+    setAttribute(name, value) { this.attributes.set(name, String(value)); }
+    getAttribute(name) { return this.attributes.get(name) ?? null; }
+    removeAttribute(name) { this.attributes.delete(name); }
     addEventListener(type, fn) { if (!this.listeners.has(type)) this.listeners.set(type, new Set()); this.listeners.get(type).add(fn); }
     removeEventListener(type, fn) { this.listeners.get(type)?.delete(fn); }
     dispatchEvent(event) { event.target = this; for (const fn of [...this.listeners.get(event.type) || []]) fn(event); return true; }
