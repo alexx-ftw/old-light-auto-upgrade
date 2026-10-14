@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.16.5
+// @version      1.16.6
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -601,9 +601,9 @@ return Object.freeze({create});
   const CSS = `
 .oldlight-empire{font:13px/1.45 system-ui,sans-serif;color:#e5eef6;background:#0c141d;border:1px solid #456177;border-radius:12px;padding:14px;box-sizing:border-box;max-width:100%;color-scheme:dark;container:empire-panel / inline-size}
 .oldlight-empire *{box-sizing:border-box}.oldlight-empire h2{font-size:18px;margin:0}.oldlight-empire h3{font-size:14px;margin:0 0 9px}.oldlight-empire p{margin:7px 0}.oldlight-empire button,.oldlight-empire select,.oldlight-empire input{font:inherit;min-height:38px;border-radius:7px;border:1px solid #456177;background:#152432;color:inherit;padding:7px;max-width:100%}.oldlight-empire input[type=checkbox]{min-height:20px}.oldlight-empire button{cursor:pointer}.oldlight-empire button:disabled{cursor:not-allowed;opacity:.55}.oldlight-empire :focus-visible{outline:2px solid #7edec0;outline-offset:2px}.oldlight-empire .empire-head{display:flex;align-items:center;gap:8px;justify-content:space-between}.oldlight-empire .empire-hint{font-size:12px;color:#aebdcc}.oldlight-empire .empire-status{border:1px solid #55715f;border-radius:8px;padding:9px;background:#172c28}.oldlight-empire .empire-warning{color:#ffcf8e}.oldlight-empire .empire-error{color:#ffaeae}.oldlight-empire .empire-goals{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}.oldlight-empire .empire-goals label{display:grid;gap:4px}.oldlight-empire .empire-goals input{width:100%}.oldlight-empire .empire-card{border:1px solid #344c60;border-radius:9px;padding:10px;margin-top:9px}.oldlight-empire .empire-card[data-stale=true]{border-style:dashed}.oldlight-empire .empire-card h3{overflow-wrap:anywhere}.oldlight-empire .empire-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.oldlight-empire .empire-controls label{display:flex;gap:5px;align-items:center}.oldlight-empire .empire-numbers{font-variant-numeric:tabular-nums;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin:8px 0}.oldlight-empire .empire-numbers div{padding:7px;background:#111f2b;border-radius:6px;overflow-wrap:anywhere}.oldlight-empire .empire-numbers small{display:block;color:#aebdcc}.oldlight-empire .empire-fleets{display:grid;gap:3px;font-size:12px;color:#bdcbd7}.oldlight-empire .empire-progress{font-size:12px;color:#b1dccf}.oldlight-empire .empire-empty{padding:14px 0;color:#aebdcc}.oldlight-empire[hidden]{display:none}
-.oldlight-empire .empire-head{flex-wrap:wrap}.oldlight-empire .empire-head>*{min-width:0;overflow-wrap:anywhere}.oldlight-empire .empire-goals label{min-width:0;overflow-wrap:anywhere}.oldlight-empire .empire-goals input{min-width:0}.oldlight-empire .empire-edit-status{display:block;font-size:11px;line-height:1.45;margin:0;color:#aebdcc;overflow-wrap:anywhere}.oldlight-empire .empire-edit-status:empty{display:none}.oldlight-empire .empire-edit-status[data-state=invalid],.oldlight-empire .empire-edit-status[data-state=error]{color:#ffaeae}.oldlight-empire .empire-edit-status[data-state=draft]{color:#ffcf8e}.oldlight-empire .empire-edit-status[data-state=saved]{color:#7edec0}.oldlight-empire [aria-invalid=true]{border-color:#ffaeae}.oldlight-empire .empire-help{margin:12px 0;padding:9px 10px;border:1px solid #344c60;border-radius:8px;background:#111f2b}.oldlight-empire .empire-help summary,.oldlight-empire .empire-role-details summary{cursor:pointer;min-height:28px;padding:4px 0;font-weight:600;overflow-wrap:anywhere}.oldlight-empire .empire-controls select{min-width:0}.oldlight-empire .empire-controls label{max-width:100%;flex-wrap:wrap}.oldlight-empire .empire-systems-heading{margin-top:16px}.oldlight-empire .empire-role-details{font-size:12px;color:#aebdcc;margin-top:6px}
+.oldlight-empire .empire-head{flex-wrap:wrap}.oldlight-empire .empire-head>*{min-width:0;overflow-wrap:anywhere}.oldlight-empire .empire-goals label{min-width:0;overflow-wrap:anywhere}.oldlight-empire .empire-goals input{min-width:0}.oldlight-empire .empire-edit-status{display:block;font-size:11px;line-height:1.45;margin:0;color:#aebdcc;overflow-wrap:anywhere}.oldlight-empire .empire-edit-status:empty{display:none}.oldlight-empire .empire-edit-status[data-state=invalid],.oldlight-empire .empire-edit-status[data-state=error]{color:#ffaeae}.oldlight-empire .empire-edit-status[data-state=draft]{color:#ffcf8e}.oldlight-empire .empire-edit-status[data-state=saved]{color:#7edec0}.oldlight-empire [aria-invalid=true]{border-color:#ffaeae}.oldlight-empire :is(.empire-help,.empire-recovery){margin:12px 0;padding:9px 10px;border:1px solid #344c60;border-radius:8px;background:#111f2b}.oldlight-empire :is(.empire-help,.empire-recovery) summary,.oldlight-empire .empire-role-details summary{cursor:pointer;min-height:28px;padding:4px 0;font-weight:600;overflow-wrap:anywhere}.oldlight-empire .empire-controls select{min-width:0}.oldlight-empire .empire-controls label{max-width:100%;flex-wrap:wrap}.oldlight-empire .empire-systems-heading{margin-top:16px}.oldlight-empire .empire-role-details{font-size:12px;color:#aebdcc;margin-top:6px}
 @container empire-panel (max-width:340px){.oldlight-empire .empire-head{align-items:flex-start;flex-direction:column}.oldlight-empire .empire-goals,.oldlight-empire .empire-numbers{grid-template-columns:minmax(0,1fr)}}
-@media(pointer:coarse){.oldlight-empire button,.oldlight-empire select,.oldlight-empire input:not([type=checkbox]),.oldlight-empire .empire-help summary,.oldlight-empire .empire-role-details summary{min-height:44px}}
+@media(pointer:coarse){.oldlight-empire button,.oldlight-empire select,.oldlight-empire input:not([type=checkbox]),.oldlight-empire :is(.empire-help,.empire-recovery) summary,.oldlight-empire .empire-role-details summary{min-height:44px}}
 @media(max-width:400px){.oldlight-empire{padding:10px}.oldlight-empire button,.oldlight-empire select,.oldlight-empire input{min-height:44px}.oldlight-empire .empire-head{align-items:flex-start;flex-direction:column}}
 `;
   // Reuse the formatter: constructing locale machinery per resource/ship on
@@ -613,7 +613,8 @@ return Object.freeze({create});
   const text = (node, value) => { if (node.textContent !== value) node.textContent = value; };
   const attribute = (node, key, value) => { if (node.getAttribute(key) !== value) node.setAttribute(key, value); };
   const property = (node, key, value) => { if (node[key] !== value) node[key] = value; };
-  function create({ document, core, getState, setConfig, canEnable = () => false, isVisible = () => true, now = Date.now }) {
+  function create({ document, core, getState, setConfig, canEnable = () => false, getRecovery = () => null, isVisible = () => true, now = Date.now }) {
+    let recoveryHelp, recoveryReason, recoveryStart, recoveryKey = '';
     let root, style, status, toggle, total, fleetSummary, productionSummary, error, list, empty, overview;
     const panelId = ++panelSequence;
     let helpSequence = 0;
@@ -659,6 +660,7 @@ return Object.freeze({create});
     function observeScope(scope) {
       if (destroyed || observedScope === scope) return;
       observedScope = scope; scopeEpoch++;
+      if (recoveryHelp) { property(recoveryHelp, 'open', false); recoveryKey = ''; }
       if (renderedScope === scope) return;
       renderedScope = null; goalEdits.clear();
       if (error) text(error, '');
@@ -717,6 +719,7 @@ return Object.freeze({create});
       const raw = new Map((state.snapshots || []).map(row => [row.systemId, row]));
       text(status, state.status || REASONS[state.plan?.reason] || 'Preparando datos del imperio.');
       if (status.className.split(/\s+/).includes('empire-warning') !== !state.ready) status.classList.toggle('empire-warning', !state.ready);
+      renderRecovery(scopeChanged);
       text(toggle, cfg.enabled ? 'Detener imperio' : 'Activar imperio');
       property(toggle, 'disabled', !cfg.enabled && !canEnable()); attribute(toggle, 'aria-pressed', String(cfg.enabled));
       property(toggle, 'title', toggle.disabled ? 'Falta verificar el catálogo, el selector y el censo nativo de flotas.' : 'Activa o detiene el recorrido automático de sistemas.');
@@ -777,12 +780,45 @@ return Object.freeze({create});
       for (const [id, nodes] of cards) if (!retained.has(id)) { nodes.card.remove(); cards.delete(id); }
       property(empty, 'hidden', roster.length > 0);
     }
+    function renderRecovery(scopeChanged) {
+      const messages = {
+        'connection-unobserved': 'No se ha visto una conexión del juego desde que arrancó el lector. Esto no demuestra que el juego esté desconectado.',
+        'initial-state-wait': 'Se detectó una conexión nueva; todavía no llegó un estado inicial válido.',
+        'missing-init': 'Se observaron actualizaciones, pero falta el estado inicial. No basta para reconstruir el censo.',
+        'connection-lost': 'Se perdió la conexión observada. Hace falta una nueva conexión y su estado inicial válido.',
+      };
+      const stages = { loading: 'documento cargando', interactive: 'documento parseado', complete: 'documento cargado', unknown: 'estado del documento desconocido' };
+      let value = null;
+      try { value = getRecovery(); } catch { /* Help is never necessary for safety. */ }
+      const read = key => {
+        try { const item = value && Object.getOwnPropertyDescriptor(value, key); return item && Object.hasOwn(item, 'value') ? item.value : null; }
+        catch { return null; }
+      };
+      const reason = read('reason'), stage = read('readyState');
+      const known = typeof reason === 'string' && Object.hasOwn(messages, reason);
+      const key = known ? reason : '';
+      if (scopeChanged || recoveryKey !== key || !known) property(recoveryHelp, 'open', false);
+      if (!known && recoveryHelp.contains?.(root.getRootNode?.().activeElement)) status.focus?.({ preventScroll: true });
+      recoveryKey = key; property(recoveryHelp, 'hidden', !known);
+      text(recoveryReason, known ? messages[reason] : '');
+      text(recoveryStart, known ? `Inicio del lector: ${typeof stage === 'string' && Object.hasOwn(stages, stage) ? stages[stage] : stages.unknown}. No indica cuándo se abrió la conexión.` : '');
+    }
     function mount(container) {
       if (root || destroyed) throw new Error('El panel ya está montado o destruido.');
       style = el('style', CSS); root = el('section', undefined, 'oldlight-empire'); root.setAttribute('aria-label', 'Gestión del imperio');
       const head = el('div', undefined, 'empire-head'); toggle = el('button', 'Activar imperio'); toggle.type = 'button'; head.append(el('h2', 'Imperio'), toggle);
       toggle.addEventListener('click', () => { if (!currentScope()) return; const cfg = policy({}); if (!cfg.enabled && !canEnable()) return; save({ ...cfg, enabled: !cfg.enabled }); });
-      status = el('p', '', 'empire-status'); status.setAttribute('role', 'status');
+      status = el('p', '', 'empire-status'); status.setAttribute('role', 'status'); status.setAttribute('tabindex', '-1');
+      recoveryHelp = el('details', undefined, 'empire-recovery'); recoveryHelp.hidden = true;
+      recoveryReason = el('p', '', 'empire-hint'); recoveryStart = el('p', '', 'empire-hint');
+      const recoverySteps = el('ol', undefined, 'empire-hint');
+      recoverySteps.append(el('li', 'Pausa el Helper y guarda cualquier edición pendiente.'),
+        el('li', 'Recarga esta pestaña del juego.'),
+        el('li', 'Revisa el censo en Imperio antes de reanudar.'));
+      recoveryHelp.append(el('summary', 'Cómo recuperar el lector'), recoveryReason,
+        el('p', 'Si el juego sigue cargando, espera. Una reconexión natural con un estado inicial válido también recupera el lector.', 'empire-hint'),
+        el('p', 'Si el aviso persiste con el juego cargado:', 'empire-hint'), recoverySteps, recoveryStart,
+        el('p', 'Si se repite después de recargar, informa de la versión del Helper y del diagnóstico de inicio. Evita recargar en bucle.', 'empire-hint'));
       total = el('p', '', 'empire-hint'); overview = el('p'); fleetSummary = el('p', '', 'empire-hint');
       productionSummary = el('p', '', 'empire-production-summary');
       const goals = el('div', undefined, 'empire-goals');
@@ -845,7 +881,7 @@ return Object.freeze({create});
         el('p', 'Equilibrado y Astillero reciben producción de flota. Industria y Defensa no reciben producción imperial adicional en esta fase.', 'empire-hint'),
         el('p', 'El reparto requiere Atender. Los roles reordenan prioridades, no excluyen otros edificios: respetan tus edificios marcados y las reglas de Depot/Reactor. No organizan patrullas, ataques ni transportes.', 'empire-hint'),
         el('p', 'Con la sincronización de Drive conectada, se comparten objetivos, roles y Atender. Activar o detener Imperio sigue siendo una decisión local.', 'empire-hint'));
-      root.append(head, status, total, overview, fleetSummary, productionSummary, el('h3', 'Objetivos para todo el imperio'), scopeHelp, goals,
+      root.append(head, status, recoveryHelp, total, overview, fleetSummary, productionSummary, el('h3', 'Objetivos para todo el imperio'), scopeHelp, goals,
         error, help, el('h3', 'Sistemas del imperio', 'empire-systems-heading'), list, empty);
       container.append(style, root); render();
       return root;
@@ -1538,7 +1574,7 @@ return Object.freeze({create});
       const raw = read();
       if (!raw || typeof raw !== 'object') return null;
       const out = {};
-      for (const key of ['installed', 'observed', 'connected']) {
+      for (const key of ['installed', 'observed', 'connected', 'connectionObserved', 'complete']) {
         const value = get(raw, key);
         if (value !== undefined && typeof value !== 'boolean') return null;
         out[key] = value;
@@ -1791,7 +1827,7 @@ return Object.freeze({create});
           return 'Canal del observador instalado; esperando los primeros datos del observador nativo.';
         }
         if (diagnostic.connected === false && observationGeneration === 0) {
-          return 'Canal del observador instalado; esperando la conexión nativa del juego. Si ya estaba abierta al arrancar el lector, su estado inicial pudo quedar fuera de observación.';
+          return 'Lector instalado; esperando la conexión nativa del juego.';
         }
         if (diagnostic.connected === false && diagnostic.reason === 'awaiting-init') {
           return 'Canal del observador instalado; esperando el estado inicial de la cuenta.';
@@ -1802,6 +1838,18 @@ return Object.freeze({create});
         return 'Se intentó iniciar el observador nativo, pero todavía no se ha confirmado su instalación.';
       }
       return 'Estado del observador nativo desconocido; esperando un censo completo y verificado de la cuenta.';
+    }
+    // Presentation only: fixed categories from the private bridge, never an
+    // alternative source of account identity, census or action authority.
+    function getRecovery() {
+      if (disposed) return null;
+      const diagnostic = observationStatus(options.getObservationStatus);
+      if (diagnostic?.installed !== true || diagnostic.observed !== true || diagnostic.connected !== false) return null;
+      let reason = '';
+      if (diagnostic.reason === 'awaiting-init' && diagnostic.connectionObserved === false) reason = 'connection-unobserved';
+      else if (diagnostic.reason === 'awaiting-init' && diagnostic.connectionObserved === true) reason = 'initial-state-wait';
+      else if (diagnostic.connectionObserved === true && ['missing-init', 'connection-lost'].includes(diagnostic.reason)) reason = diagnostic.reason;
+      return reason ? Object.freeze({ reason, readyState: diagnostic.bootstrap?.readyState || 'unknown' }) : null;
     }
     function readRoster() {
       const current = world();
@@ -1999,7 +2047,7 @@ return Object.freeze({create});
     }
     return Object.freeze({ readRoster, readSnapshots, readTransitCensus, readActive, readBundle, selectSystem, canNavigate,
       isAvailable: () => world()?.complete === true,
-      getStatus, observeInteraction: onManual, dispose });
+      getStatus, getRecovery, observeInteraction: onManual, dispose });
   }
   return Object.freeze({ create, projectResources, nativeAwayBySystem });
 });
@@ -3133,7 +3181,7 @@ return Object.freeze({create});
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.16.5';
+  const SCRIPT_VERSION = '1.16.6';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -4583,6 +4631,11 @@ return Object.freeze({create});
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.16.6', title: 'Recuperación guiada del lector imperial', changes: [
+        'Aviso breve cuando el lector no observa la conexión. Cómo recuperar el lector muestra los pasos solo al desplegarlo.',
+        'Distingue conexión no observada, espera del estado inicial y conexión perdida. Explica cómo pausar, recargar y comprobar el censo antes de reanudar.',
+        'No fuerza recargas ni conexiones y no reconstruye un estado inicial perdido. Mantiene todas las guardas; Brave/Violentmonkey y Drive reales siguen pendientes.',
+      ] },
       { version: '1.16.5', title: 'Pausa fiable durante el recorrido imperial', changes: [
         'Pausar revoca al instante los saltos imperiales pendientes. Reanudar rápido no revive el recorrido anterior ni exige reiniciar Imperio.',
         'Conserva los bloqueos por selección sin confirmar, las pausas independientes y las comprobaciones de datos antes de actuar. No repite pedidos.',
@@ -16010,6 +16063,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       getState: () => empireController.state(),
       setConfig: value => { const saved = empireController.setConfig(value); settingsChanged(); schedule(); return saved; },
       canEnable: () => empireAdapter.isAvailable(),
+      getRecovery: () => empireAdapter.getRecovery(),
       isVisible: () => settings.activeTab === 'empire' && !settings.minimized && !document.hidden && !host?.hidden });
     empirePanel.mount(shadow.querySelector('[data-page="empire"]'));
   }

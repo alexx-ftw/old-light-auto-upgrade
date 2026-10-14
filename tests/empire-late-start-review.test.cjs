@@ -270,3 +270,38 @@ test('late-start review: delayed execution with unknown readiness cannot install
   assert.equal(h.page.WebSocket, h.NativeWebSocket); assert.equal(h.sockets.length, 0);
   assert.deepEqual(h.effects, []);
 });
+
+
+test('delayed page injection exposes a missed socket safely and a natural reconnect clears recovery', () => {
+  const h = fixture({ readyState: 'loading', delayed: true });
+  const old = new h.NativeWebSocket(SOCKET); old.onmessage = () => {};
+  h.records.get(old).readyState = 1; h.fire(old, initial());
+  h.document.readyState = 'complete'; h.execute();
+  const app = h.content.OldLightEmpireAdapter.create({
+    getWorld: () => h.bridge.snapshot(),
+    getObservationStatus: () => ({ ...h.bridge.status(), bootstrap: h.content.OldLightEmpireBootstrapStatus() }),
+    getContext: () => ({}), getHudSnapshot: () => null, now: () => h.bridge.snapshot()?.observedAt || NOW,
+  });
+  assert.equal(h.bridge.status().installed, true); assert.equal(h.bridge.status().connectionObserved, false);
+  assert.equal(h.bridge.snapshot().generation, 0); assert.equal(app.isAvailable(), false);
+  assert.ok(app.getStatus().length < 90);
+  assert.deepEqual(JSON.parse(JSON.stringify(app.getRecovery())), { reason: 'connection-unobserved', readyState: 'loading' });
+  h.fire(old, delta()); h.flush(60000);
+  assert.equal(h.sockets.length, 1); assert.equal(app.isAvailable(), false); assert.deepEqual(h.effects, []);
+  const next = new h.NativeWebSocket(SOCKET); next.onmessage = () => {}; h.flush();
+  assert.equal(app.getRecovery().reason, 'initial-state-wait'); assert.equal(app.isAvailable(), false);
+  h.fire(next, delta()); assert.equal(app.getRecovery().reason, 'missing-init'); assert.equal(app.isAvailable(), false);
+  h.fire(next, initial());
+  // The native observation, not the help or any timer, establishes readiness.
+  assert.equal(app.getRecovery(), null); assert.equal(app.isAvailable(), true);
+  assert.equal(h.sockets.length, 2); assert.deepEqual(h.effects, []);
+});
+
+test('shipping panel wires the passive recovery reader without a game mutation callback', () => {
+  const source = fs.readFileSync(path.join(root, 'old-light-auto-upgrade.user.js'), 'utf8');
+  const start = source.indexOf('  function installEmpirePanel(shadow) {');
+  const end = source.indexOf('  try {', start);
+  const integration = source.slice(start, end);
+  assert.match(integration, /getRecovery: \(\) => empireAdapter\.getRecovery\(\)/);
+  assert.doesNotMatch(integration, /location\.reload|new WebSocket|\.send\(/);
+});

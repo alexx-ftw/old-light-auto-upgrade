@@ -1704,6 +1704,147 @@
         "Reproducir la causal temporal con el mismo harness contra base y candidata; contrastar que Resume permite trabajo nuevo únicamente con los guards existentes.",
         "Verificar el commit final limpio y gate completo con dos pasadas idempotentes; no reutilizar resultados tras cambiar bytes."
       ]
+    },
+    {
+      "id": "observer-passive-recovery-guidance",
+      "feedback": "Aviso persistente de canal instalado sin conexión observada; faltaba una recuperación manual clara y compacta. La captura no demuestra la causa ni autoriza reconstruir un inicio perdido.",
+      "beforeFail": {
+        "revision": "4601edec7e467476f92e86340ad755870de4735b",
+        "command": "node --test tests/empire-diagnostics.test.cjs tests/empire-panel.test.cjs tests/empire-observer-cached-constructor.test.cjs tests/empire-late-start-review.test.cjs",
+        "observedFailure": "Los cuatro archivos finales copiados sin cambios sobre git archive de la base dieron 89 pruebas, 81 aprobadas y 8 fallidas: mensaje demasiado largo, API/ayuda/cableado ausentes. La reconexión pasiva ya funcionaba y se conserva. La regresión de foco/cambio de cuenta oculto se añadió después.",
+        "evidence": "docs/observer-recovery-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/empire-diagnostics.test.cjs",
+          "name": "unobserved socket has a short status and an explicit read-only recovery diagnostic"
+        },
+        {
+          "file": "tests/empire-diagnostics.test.cjs",
+          "name": "recovery distinguishes missing init and observed connection without granting readiness"
+        },
+        {
+          "file": "tests/empire-diagnostics.test.cjs",
+          "name": "recovery ignores absent malformed and accessor-based diagnostic flags"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "observer recovery is compact collapsed help with manual steps and no effects"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "observer recovery closes on success, scope and diagnosis changes without hiding other errors"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "recovery accepts only fixed categories and never renders arbitrary diagnostic content"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "recovery focus stays visible and hidden account round trips close stale help"
+        },
+        {
+          "file": "tests/empire-observer-cached-constructor.test.cjs",
+          "name": "late reader remains passive until a genuine native reconnection supplies a new init"
+        },
+        {
+          "file": "tests/empire-late-start-review.test.cjs",
+          "name": "delayed page injection exposes a missed socket safely and a natural reconnect clears recovery"
+        },
+        {
+          "file": "tests/empire-late-start-review.test.cjs",
+          "name": "shipping panel wires the passive recovery reader without a game mutation callback"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Inserción diferida después de un socket ya abierto, aunque bootstrap comenzó loading.",
+          "expected": "Queda sin censo; ayuda manual sin atribuir causalidad por readyState y sin tráfico extra.",
+          "regression": {
+            "file": "tests/empire-late-start-review.test.cjs",
+            "name": "delayed page injection exposes a missed socket safely and a natural reconnect clears recovery"
+          }
+        },
+        {
+          "scenario": "El propio juego establece una conexión futura y entrega delta antes de init.",
+          "expected": "Delta no habilita acciones; solo init completo y de confianza quita la recuperación.",
+          "regression": {
+            "file": "tests/empire-observer-cached-constructor.test.cjs",
+            "name": "late reader remains passive until a genuine native reconnection supplies a new init"
+          }
+        },
+        {
+          "scenario": "Abrir ayuda, volver a renderizar, cambiar diagnóstico o identidad y recuperar conexión.",
+          "expected": "Sin escrituras ni órdenes; apertura estable y cierre/ocultación cuando cambia el estado.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "observer recovery closes on success, scope and diagnosis changes without hiding other errors"
+          }
+        },
+        {
+          "scenario": "Recuperación mientras el foco está en ayuda y A→B→A con panel oculto.",
+          "expected": "El foco no queda oculto y la ayuda anterior queda cerrada.",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "recovery focus stays visible and hidden account round trips close stale help"
+          }
+        },
+        {
+          "scenario": "Diagnósticos desconocidos, getters o campos mal tipados.",
+          "expected": "No revelar contenido arbitrario ni conceder disponibilidad.",
+          "regression": {
+            "file": "tests/empire-diagnostics.test.cjs",
+            "name": "recovery ignores absent malformed and accessor-based diagnostic flags"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Brave/Violentmonkey con Drive y sesión real",
+          "reason": "No ejecutado; no se prueban órdenes reales. La causa de la captura no está confirmada."
+        },
+        {
+          "scope": "Prueba visual local Chromium",
+          "reason": "El entorno impidió arrancar Chromium; la sintaxis del script visual no equivale a ejecutar sus checks. Otras rutas visuales deben informarse por separado."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Confirmar que no cambia observador, puente, permisos, Drive ni autoridad de pedidos y que no promete recuperar init perdido.",
+        "Reproducir el orden loading→socket previo→inyección tardía→conexión futura con nuevo init sin efectos de red o recarga.",
+        "Contrastar UI compacta, ayuda contextual, foco y cierre ante cambio de estado o cuenta, incluyendo panel oculto.",
+        "Verificar clasificación con flags fijos, integración real en userscript y regeneración reproducible; distinguir nuevo arreglo de UX de límites ya preservados."
+      ]
+    },
+    {
+      "id": "readme-current-release-version",
+      "feedback": "La revisión independiente encontró que la introducción del README seguía en 1.16.5 aunque metadata, constante y changelog eran 1.16.6.",
+      "beforeFail": {
+        "revision": "4b5aabcd0cdcd7adafb7d5b9533a505043f35d2a",
+        "command": "node --test tests/helper-changelog.test.cjs",
+        "observedFailure": "Con el mismo harness y nueva regresión: 21 casos, 20 aprobados y 1 fallo por '1.16.5' !== '1.16.6'. Tras corregir la introducción: 21/21.",
+        "evidence": "docs/observer-recovery-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/helper-changelog.test.cjs",
+          "name": "README current version and newest section match the installed release"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Se actualizan metadata, constante y changelog, pero queda vieja la versión visible del README.",
+          "expected": "La regresión falla hasta igualar versión actual y sección más reciente con la versión instalada.",
+          "regression": {
+            "file": "tests/helper-changelog.test.cjs",
+            "name": "README current version and newest section match the installed release"
+          }
+        }
+      ],
+      "qaGaps": [],
+      "independentReviewCriteria": [
+        "Confirmar coincidencia de versión visible del README, sección reciente, metadatos, constante y changelog.",
+        "Comprobar que la comparación detecta una versión antigua sin exigir que las notas históricas se renumeren."
+      ]
     }
   ]
 }

@@ -177,3 +177,39 @@ test('diagnostics cannot override a verified census or survive disposal as a rea
   assert.equal(h.app.isAvailable(), true); assert.doesNotMatch(h.app.getStatus(), /arrancó después/);
   h.app.dispose(); assert.equal(h.app.isAvailable(), false); assert.match(h.app.getStatus(), /detenido/);
 });
+
+
+test('unobserved socket has a short status and an explicit read-only recovery diagnostic', () => {
+  const h = fixture(status('awaiting-init', { connectionObserved: false, complete: false,
+    bootstrap: bootstrap('attempted', 'complete') }), { generation: 0 });
+  assert.ok(h.app.getStatus().length < 90);
+  assert.deepEqual(h.app.getRecovery(), { reason: 'connection-unobserved', readyState: 'complete' });
+  assert.equal(h.app.isAvailable(), false); assert.equal(h.app.readRoster(), null);
+});
+
+test('recovery distinguishes missing init and observed connection without granting readiness', () => {
+  for (const [reason, connectionObserved, expected] of [
+    ['awaiting-init', true, 'initial-state-wait'], ['missing-init', true, 'missing-init'],
+    ['connection-lost', true, 'connection-lost'],
+  ]) {
+    const h = fixture(status(reason, { connectionObserved, complete: false }));
+    assert.deepEqual(h.app.getRecovery(), { reason: expected, readyState: 'unknown' });
+    assert.equal(h.app.isAvailable(), false); assert.equal(h.app.readRoster(), null);
+  }
+  const h = fixture(status('awaiting-init', { connectionObserved: false }));
+  h.diagnostic = status('', { connected: true, connectionObserved: true, complete: true });
+  h.world = validWorld(); assert.equal(h.app.getRecovery(), null); assert.equal(h.app.isAvailable(), true);
+  h.app.dispose(); assert.equal(h.app.getRecovery(), null);
+});
+
+test('recovery ignores absent malformed and accessor-based diagnostic flags', () => {
+  for (const value of [{}, status('awaiting-init'), status('awaiting-init', { connectionObserved: 'false' }),
+    status('awaiting-init', { connectionObserved: false, complete: 'false' }),
+    status('malformed', { connectionObserved: true }),
+    status('awaiting-init', { installed: false, connectionObserved: false })]) {
+    assert.equal(fixture(value).app.getRecovery(), null);
+  }
+  let accesses = 0; const value = status('awaiting-init');
+  Object.defineProperty(value, 'connectionObserved', { get() { accesses++; return false; } });
+  assert.equal(fixture(value).app.getRecovery(), null); assert.equal(accesses, 0);
+});

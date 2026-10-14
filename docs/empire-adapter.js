@@ -59,7 +59,7 @@
       const raw = read();
       if (!raw || typeof raw !== 'object') return null;
       const out = {};
-      for (const key of ['installed', 'observed', 'connected']) {
+      for (const key of ['installed', 'observed', 'connected', 'connectionObserved', 'complete']) {
         const value = get(raw, key);
         if (value !== undefined && typeof value !== 'boolean') return null;
         out[key] = value;
@@ -312,7 +312,7 @@
           return 'Canal del observador instalado; esperando los primeros datos del observador nativo.';
         }
         if (diagnostic.connected === false && observationGeneration === 0) {
-          return 'Canal del observador instalado; esperando la conexión nativa del juego. Si ya estaba abierta al arrancar el lector, su estado inicial pudo quedar fuera de observación.';
+          return 'Lector instalado; esperando la conexión nativa del juego.';
         }
         if (diagnostic.connected === false && diagnostic.reason === 'awaiting-init') {
           return 'Canal del observador instalado; esperando el estado inicial de la cuenta.';
@@ -323,6 +323,18 @@
         return 'Se intentó iniciar el observador nativo, pero todavía no se ha confirmado su instalación.';
       }
       return 'Estado del observador nativo desconocido; esperando un censo completo y verificado de la cuenta.';
+    }
+    // Presentation only: fixed categories from the private bridge, never an
+    // alternative source of account identity, census or action authority.
+    function getRecovery() {
+      if (disposed) return null;
+      const diagnostic = observationStatus(options.getObservationStatus);
+      if (diagnostic?.installed !== true || diagnostic.observed !== true || diagnostic.connected !== false) return null;
+      let reason = '';
+      if (diagnostic.reason === 'awaiting-init' && diagnostic.connectionObserved === false) reason = 'connection-unobserved';
+      else if (diagnostic.reason === 'awaiting-init' && diagnostic.connectionObserved === true) reason = 'initial-state-wait';
+      else if (diagnostic.connectionObserved === true && ['missing-init', 'connection-lost'].includes(diagnostic.reason)) reason = diagnostic.reason;
+      return reason ? Object.freeze({ reason, readyState: diagnostic.bootstrap?.readyState || 'unknown' }) : null;
     }
     function readRoster() {
       const current = world();
@@ -520,7 +532,7 @@
     }
     return Object.freeze({ readRoster, readSnapshots, readTransitCensus, readActive, readBundle, selectSystem, canNavigate,
       isAvailable: () => world()?.complete === true,
-      getStatus, observeInteraction: onManual, dispose });
+      getStatus, getRecovery, observeInteraction: onManual, dispose });
   }
   return Object.freeze({ create, projectResources, nativeAwayBySystem });
 });

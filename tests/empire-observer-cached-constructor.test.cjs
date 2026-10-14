@@ -295,3 +295,26 @@ test('unavailable or nonconfigurable native accessors retain constructor-only fa
     h.control.stop();
   }
 });
+
+
+test('late reader remains passive until a genuine native reconnection supplies a new init', () => {
+  const h = harness({ beforeInstall({ NativeWebSocket, records }) {
+    const old = new NativeWebSocket(SOCKET); old.onmessage = () => {};
+    records.get(old).readyState = 1;
+  } });
+  const old = h.sockets[0];
+  h.dispatch(old, 'message', initial());
+  h.dispatch(old, 'message', '42["world.delta",{}]');
+  assert.equal(h.control.status().generation, 0); assert.equal(h.control.status().complete, false);
+  assert.equal(h.sockets.length, 1); assert.equal(h.sent.length, 0); assert.equal(h.records.get(old).closed, 0);
+  // The native game creates the next connection. The reader never triggers it.
+  const replacement = new h.NativeWebSocket(SOCKET); replacement.onmessage = () => {};
+  assert.equal(h.control.status().generation, 1); assert.equal(h.control.status().complete, false);
+  h.dispatch(replacement, 'message', '42["world.delta",{}]');
+  assert.equal(h.control.status().reason, 'missing-init'); assert.equal(h.control.status().complete, false);
+  h.dispatch(replacement, 'message', initial());
+  assert.equal(h.control.status().complete, true); assert.equal(h.control.status().systems[0].id, SYSTEM);
+  h.dispatch(old, 'message', '41'); assert.equal(h.control.status().complete, true);
+  assert.equal(h.sent.length, 0); assert.equal(h.records.get(old).closed, 0);
+  assert.equal(h.records.get(replacement).closed, 0); assert.equal(h.sockets.length, 2);
+});

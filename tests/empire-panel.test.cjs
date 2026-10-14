@@ -60,7 +60,7 @@ const all = root => [root, ...root.children.flatMap(all)];
 const byLabel = (root, label) => all(root).find(node => node.getAttribute('aria-label') === label);
 const withClass = (root, name) => all(root).filter(node => node.className.split(/\s+/).includes(name));
 
-function harness({ ids = [A, B], capable = true, shadow = false, visible = true } = {}) {
+function harness({ ids = [A, B], capable = true, shadow = false, visible = true, recovery = null } = {}) {
   const document = new Document(), container = document.createElement('main');
   const host = document.createElement('div'), root = shadow ? new Element('#shadow-root', document) : document;
   document.append(host); root.append(container); if (shadow) document.activeElement = host;
@@ -74,6 +74,7 @@ function harness({ ids = [A, B], capable = true, shadow = false, visible = true 
     transitCensus: { scope: SCOPE, censusId: 'source-1', observedAt: clock, ships: Object.fromEntries(core.DEFAULT_SHIPS.map(ship => [ship, 0])) },
   };
   const app = panel.create({ document, core, now: () => clock, canEnable: () => capable, isVisible: () => visible,
+    getRecovery: () => typeof recovery === 'function' ? recovery() : recovery,
     getState: () => (reads++, { ...data, plan: data.cachedPlan || core.plan(data.config, data.snapshots, { scope: data.scope, now: clock, maxAgeMs: data.maxAgeMs,
       expectedIds: data.roster.systems.map(row => row.id), transitCensus: data.transitCensus }) }),
     setConfig: value => {
@@ -86,6 +87,7 @@ function harness({ ids = [A, B], capable = true, shadow = false, visible = true 
   });
   app.mount(container);
   return { app, document, container, root, data,
+    get recovery() { return recovery; }, set recovery(value) { recovery = value; },
     get reads() { return reads; }, get visible() { return visible; }, set visible(value) { visible = value; },
     get clock() { return clock; }, set clock(value) { clock = value; },
     get capable() { return capable; }, set capable(value) { capable = value; },
@@ -617,4 +619,55 @@ test('nested saves of different goals finish independently without clearing the 
     if (fails) assert.match(h.error.textContent, /No se pudo guardar/); else assert.equal(h.error.textContent, '');
     assert.ok(messages.every(node => node.textContent !== 'Guardando…'));
   }
+});
+
+
+test('observer recovery is compact collapsed help with manual steps and no effects', () => {
+  const h = harness({ capable: false, recovery: { reason: 'connection-unobserved', readyState: 'complete' } });
+  const help = withClass(h.container, 'empire-recovery')[0];
+  assert.ok(help); assert.equal(help.tagName, 'DETAILS'); assert.equal(help.hidden, false);
+  assert.equal(Boolean(help.open), false);
+  assert.equal(help.children[0].tagName, 'SUMMARY');
+  assert.equal(help.children[0].textContent, 'Cómo recuperar el lector');
+  assert.match(help.textContent, /Pausa el Helper/);
+  assert.match(help.textContent, /Recarga esta pestaña/);
+  assert.match(help.textContent, /antes de reanudar/);
+  assert.match(help.textContent, /documento cargado/);
+  assert.match(help.textContent, /No indica cuándo se abrió/);
+  assert.equal(all(help).filter(node => ['BUTTON', 'A', 'INPUT'].includes(node.tagName)).length, 0);
+  help.open = true; h.app.render();
+  assert.equal(help.open, true); assert.equal(h.writes, 0); assert.equal(h.toggle.disabled, true);
+});
+
+test('observer recovery closes on success, scope and diagnosis changes without hiding other errors', () => {
+  const h = harness({ recovery: { reason: 'connection-unobserved', readyState: 'loading' } });
+  const help = withClass(h.container, 'empire-recovery')[0];
+  assert.ok(help); help.open = true; h.data.status = 'Guardia de seguridad activa'; h.app.render();
+  assert.equal(help.open, true); assert.ok(h.paragraphs().includes('Guardia de seguridad activa'));
+  h.recovery = { reason: 'missing-init', readyState: 'loading' }; h.app.render();
+  assert.equal(help.open, false); assert.match(help.textContent, /actualizaciones.*falta el estado inicial/);
+  help.open = true; h.data.scope = 'beta/player'; h.app.render(); assert.equal(help.open, false);
+  help.open = true; h.recovery = null; h.app.render();
+  assert.equal(help.hidden, true); assert.equal(help.open, false); assert.equal(h.writes, 0);
+});
+
+test('recovery accepts only fixed categories and never renders arbitrary diagnostic content', () => {
+  for (const recovery of [null, {}, { reason: 'SECRET', readyState: 'SECRET' }, () => { throw Error('SECRET'); }]) {
+    const h = harness({ recovery }); const help = withClass(h.container, 'empire-recovery')[0];
+    assert.ok(help); assert.equal(help.hidden, true); assert.equal(h.container.textContent.includes('SECRET'), false);
+    assert.equal(h.writes, 0);
+  }
+});
+
+
+test('recovery focus stays visible and hidden account round trips close stale help', () => {
+  const h = harness({ recovery: { reason: 'connection-unobserved', readyState: 'complete' } });
+  const help = withClass(h.container, 'empire-recovery')[0], summary = help.children[0];
+  help.contains = node => all(help).includes(node); summary.focus();
+  h.recovery = null; h.app.render();
+  assert.equal(h.document.activeElement, withClass(h.container, 'empire-status')[0]);
+  h.recovery = { reason: 'connection-unobserved', readyState: 'complete' }; h.app.render();
+  help.open = true; h.visible = false;
+  h.app.observeScope('beta/player'); h.app.observeScope(SCOPE); h.visible = true; h.app.render();
+  assert.equal(help.open, false); assert.equal(h.writes, 0);
 });
