@@ -51,7 +51,8 @@ function create({realm=globalThis,document=realm.document,observer,observerSourc
   return Object.freeze({
     snapshot(){return current?JSON.parse(JSON.stringify(current)):null;},
     subscribe(fn){if(typeof fn!=='function')return()=>{};subscribers.add(fn);return()=>subscribers.delete(fn);},
-    status:()=>({installed,reason,observed:!!current,connected:current?.connected===true}),
+    status:()=>({installed,reason,observed:!!current,connected:current?.connected===true,
+      connectionObserved:!!current&&current.generation>0,complete:current?.complete===true}),
     stop(){if(stopped)return;stopped=true;cleanupBootstrap();port?.removeEventListener('message',receive);port?.close();current=null;subscribers.clear();},
   });
 }

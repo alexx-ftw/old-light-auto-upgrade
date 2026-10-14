@@ -1,5 +1,7 @@
 # Validación de la gestión imperial 1.14.3
 
+Este documento conserva el registro del hotfix de rendimiento y sus comprobaciones en aquel hito. El cierre y los resultados de la entrega posterior están en la [validación de 1.15.0](empire-combined-validation.md); las referencias históricas a validación pendiente no bloquean por sí solas esa entrega.
+
 ## Alcance
 
 Base de contenido: release 1.14.2, publicada en el commit `bad7632ea45ab5c8959ac04c3edb3aeb8d38f47e`. El modo imperial es opt-in. La corrección 1.14.3 mantiene exactamente sus cinco grants, `@inject-into content`, `@run-at document-start`, el observador nativo y el puente de Drive. Reduce cálculos, lecturas y renderizados duplicados y agrupa ráfagas mientras Imperio está activo. No añade capacidades de juego ni sincronización de la política imperial.

@@ -171,11 +171,11 @@ test('Metrics controls need explicit trusted consent, support preview, and prese
 test('Feature handlers count only explicit helper navigation, including keyboard-generated clicks', () => {
   const h = panelHarness();
   h.action('metrics-toggle').checked = true; h.action('metrics-toggle').fire('change');
-  for (const dataset of [{ settingsTab: 'fleet' }, { fleetViewTab: 'campaigns' }, { settingsTab: 'https://private' }]) {
+  for (const dataset of [{ settingsTab: 'empire' }, { settingsTab: 'fleet' }, { fleetViewTab: 'campaigns' }, { settingsTab: 'https://private' }]) {
     h.shadow.fire('click', { isTrusted: false, composedPath: () => [{ dataset, matches: () => true }] });
   }
   h.shadow.fire('click', { composedPath: () => [{ value: 'password', matches: () => false }] });
-  assert.deepEqual(counts(h.metrics), { 'ui.tab.fleet': 1, 'ui.fleet.campaigns': 1 });
+  assert.deepEqual(counts(h.metrics), { 'ui.tab.empire': 1, 'ui.tab.fleet': 1, 'ui.fleet.campaigns': 1 });
 });
 
 test('Export downloads only the exact sanitized metrics document after a trusted click', async () => {
@@ -249,4 +249,29 @@ test('Opt-out succeeds across tabs even when the revoking browser lacks secure r
   assert.equal(first.metrics.isEnabled(), false);
   assert.equal(JSON.parse(h.storage.get(consentKey)).enabled, false);
   assert.match(h.field('metrics-status').textContent, /Desactivadas/);
+});
+
+
+test('Imperial consent text describes fixed local startup categories and report export is exact', async () => {
+  const h = panelHarness();
+  const text = h.nodes.map(node => node.textContent).join(' ');
+  for (const expected of [/Opcional y desactivado inicialmente/, /apertura de Imperio/,
+    /cambios de estado de su lector/, /No envía datos a ningún servidor/,
+    /no contiene tramas del juego ni textos de error/, /al activar no se recupera el historial anterior/,
+    /No se incluye en las copias ni se sincroniza por Drive/]) assert.match(text, expected);
+  h.action('metrics-toggle').checked = true;
+  h.action('metrics-toggle').fire('change');
+  h.metrics.observeEmpireStatus('missing_init');
+  h.metrics.observeEmpireStatus('missing_init');
+  h.metrics.record('ui.tab.empire');
+  h.action('metrics-preview').fire('click');
+  const report = JSON.parse(h.nodes.find(node => node.id === 'oldlight-metrics-report').value);
+  assert.deepEqual(Object.keys(report).sort(), ['days', 'schema', 'version']);
+  assert.deepEqual(report.days[0].counts, { 'empire.observer.missing_init': 1, 'ui.tab.empire': 1 });
+  h.action('metrics-export').fire('click');
+  assert.equal(h.urls.length, 1);
+  assert.deepEqual(JSON.parse(await h.urls[0].text()), report);
+  h.action('metrics-toggle').checked = false;
+  h.action('metrics-toggle').fire('change');
+  assert.deepEqual(JSON.parse(h.nodes.find(node => node.id === 'oldlight-metrics-report').value).days, []);
 });

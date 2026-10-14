@@ -15,6 +15,10 @@
   const BUILDINGS = Object.freeze(['command_center', 'reactor', 'palladium_extractor', 'iridium_extractor',
     'warehouse', 'shipyard', 'trade_hub']);
   const SHIPS = Object.freeze(['probe', 'marauder', 'sentinel', 'vanguard']);
+  const EMPIRE_ROLES = new Set(['balanced', 'industry', 'shipyard', 'defense']);
+  const MAX_EMPIRE_SYSTEMS = 1024;
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const EMPIRE_SYSTEM_KEY = /^empire\.systems\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.(role|enabled)$/;
   const EVENTS = Object.freeze([
     'request.sent', 'building.queued', 'ships.queued', 'building.completed', 'fleet.changed', 'game.toast',
     'game.reports', 'game.messages', 'game.level_target', 'attack.retry', 'request.failed', 'request.rejected',
@@ -31,6 +35,7 @@
     ...EVENTS.map(type => `notifications.events.${type}`),
     ...BUILDINGS.map(id => `levelTargets.targets.${id}`),
     'attackRetries.enabled', 'attackRetries.autoMinimums', 'attackRetries.produceMissing', 'attackRetries.maxRetries',
+    ...SHIPS.map(id => `empire.fleetTargets.${id}`),
   ]);
   const MISSING = Object.freeze({ missing: true });
 
@@ -44,6 +49,21 @@
   function define(target, key, value) {
     Object.defineProperty(target, key, { configurable: true, enumerable: true, writable: true, value });
   }
+  function dataAt(object, key) {
+    const descriptor = Object.getOwnPropertyDescriptor(object, key);
+    if (!descriptor || !own(descriptor, 'value') || !descriptor.enumerable) fail('Object accessors and non-JSON keys are not supported.');
+    return descriptor.value;
+  }
+  function empireKey(key) { return key.startsWith('empire.'); }
+  function validKey(key) { return ALLOWED.has(key) || EMPIRE_SYSTEM_KEY.test(key); }
+  function checkEmpireSystems(...objects) {
+    const ids = new Set();
+    for (const object of objects) for (const key of Object.keys(object)) {
+      const match = EMPIRE_SYSTEM_KEY.exec(key);
+      if (match) ids.add(match[1]);
+    }
+    if (ids.size > MAX_EMPIRE_SYSTEMS) fail('Empire exceeds the 1024 systems limit.');
+  }
 
   function cloneJson(value, seen = new Set()) {
     if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
@@ -55,12 +75,15 @@
     if (seen.has(value)) fail('Circular values are not supported.');
     if (!Array.isArray(value) && !isRecord(value)) fail('Only plain JSON objects are supported.');
     if (Object.getOwnPropertySymbols(value).length) fail('Symbol keys are not supported.');
+    if (Object.getOwnPropertyNames(value).length !== Object.keys(value).length + (Array.isArray(value) ? 1 : 0)) {
+      fail('Non-JSON keys are not supported.');
+    }
     seen.add(value);
     let result;
     if (Array.isArray(value)) {
       result = new Array(value.length);
       for (let i = 0; i < value.length; i += 1) {
-        if (own(value, i)) result[i] = cloneJson(value[i], seen);
+        if (own(value, i)) result[i] = cloneJson(dataAt(value, String(i)), seen);
       }
       for (const key of Object.keys(value)) {
         if (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length) fail('Arrays cannot have extra properties.');
@@ -96,7 +119,7 @@
         const parts = [];
         for (let i = 0; i < item.length; i += 1) {
           if (!own(item, i)) fail('Canonical JSON does not allow sparse arrays.');
-          parts.push(encode(item[i]));
+          parts.push(encode(dataAt(item, String(i))));
         }
         encoded = `[${parts.join(',')}]`;
       } else {
@@ -149,6 +172,7 @@
     const allowed = new Set(expected);
     for (const key of Object.keys(value)) {
       if (PROTOTYPE_KEYS.has(key) || !allowed.has(key)) fail(`${label} contains an unknown or unsafe key.`);
+      dataAt(value, key);
     }
   }
   function integer(value, min, max) { return Number.isSafeInteger(value) && value >= min && value <= max; }
@@ -173,8 +197,11 @@
     return typeof value[first] === 'boolean' && integer(value[second], 0, MAX_TIME);
   }
   function validRegisterValue(key, value) {
-    if (!ALLOWED.has(key)) return false;
+    if (!validKey(key)) return false;
     if (value === null) return true;
+    if (key.startsWith('empire.fleetTargets.')) return integer(value, 0, 1000000);
+    const system = EMPIRE_SYSTEM_KEY.exec(key);
+    if (system) return system[2] === 'role' ? EMPIRE_ROLES.has(value) : typeof value === 'boolean';
     if (key === 'settings.enabled' || key === 'settings.countAway' || key === 'settings.shiftPresetShortcut'
         || key === 'notifications.browserEnabled' || key === 'notifications.telegramEnabled'
         || key === 'notifications.paused' || key === 'notifications.browserPaused'
@@ -201,14 +228,17 @@
     return false;
   }
   function validateFlat(value, label = 'Register values') {
-    exactKeys(value, [...ALLOWED], label);
+    if (!isRecord(value)) fail(`${label} must be an object.`);
+    exactKeys(value, Object.keys(value), label);
     const clean = {};
     for (const key of Object.keys(value)) {
+      if (!validKey(key)) fail(`${label} contains an unknown or unsafe key.`);
       const item = copy(value[key]);
       checkedCanonical(item);
       if (!validRegisterValue(key, item)) fail(`${label} contains an invalid value for ${key}.`);
       define(clean, key, item);
     }
+    checkEmpireSystems(clean);
     checkSize(clean);
     return clean;
   }
@@ -221,7 +251,7 @@
     exactKeys(document.fields, Object.keys(document.fields), 'Sync fields');
     const fields = {};
     for (const key of Object.keys(document.fields)) {
-      if (PROTOTYPE_KEYS.has(key) || !ALLOWED.has(key)) fail('Sync document contains an unknown or unsafe field key.');
+      if (PROTOTYPE_KEYS.has(key) || !validKey(key)) fail('Sync document contains an unknown or unsafe field key.');
       const entry = document.fields[key];
       exactKeys(entry, ['stamp', 'value'], 'Sync field');
       if (!validStamp(entry.stamp)) fail('Sync document contains an invalid stamp.');
@@ -230,6 +260,7 @@
       checkedCanonical(value);
       define(fields, key, { stamp: [...entry.stamp], value });
     }
+    checkEmpireSystems(fields);
     const clean = { format: FORMAT, schemaVersion: SCHEMA_VERSION, scope, fields };
     checkSize(clean);
     return clean;
@@ -239,10 +270,12 @@
     exactKeys(state, ['document', 'observed'], 'Sync state');
     const document = validateDocument(state.document, scope);
     const observed = validateFlat(state.observed, 'Observed values');
+    checkEmpireSystems(document.fields, observed);
+    checkSize({ document, observed });
     return { document, observed };
   }
 
-  function pick(object, key) { return isRecord(object) && own(object, key) ? object[key] : null; }
+  function pick(object, key) { return isRecord(object) && own(object, key) ? dataAt(object, key) : null; }
   function getAt(root, path) {
     let value = root;
     for (const part of path) {
@@ -272,6 +305,95 @@
     'attackRetries.produceMissing': ['attackRetries', 'produceMissing'],
     'attackRetries.maxRetries': ['attackRetries', 'maxRetries'],
   });
+
+  // The envelope is account-bound. Names, the global actuator switch and all runtime
+  // data remain local; only the explicit per-field policy below reaches the wire.
+  function empireConfig(backup) {
+    const empire = pick(backup, 'empire');
+    if (empire === null) return null;
+    if (!isRecord(empire)) fail('Empire backup must be an object.');
+    exactKeys(empire, Object.keys(empire), 'Empire backup');
+    const scope = pick(backup, 'profile');
+    if (!scopeValid(scope) || pick(empire, 'scope') !== scope) fail('Empire backup scope does not match its profile.');
+    const config = pick(empire, 'config');
+    if (!isRecord(config)) fail('Empire config must be an object.');
+    exactKeys(config, Object.keys(config), 'Empire config');
+    if (pick(config, 'schemaVersion') !== 1) fail('Unsupported empire config schema.');
+    if (own(config, 'enabled') && typeof pick(config, 'enabled') !== 'boolean') fail('Empire enabled must be a boolean.');
+    const rawTargets = own(config, 'fleetTargets') ? pick(config, 'fleetTargets') : {};
+    if (!isRecord(rawTargets)) fail('Empire fleet targets must be an object.');
+    exactKeys(rawTargets, Object.keys(rawTargets), 'Empire fleet targets');
+    const targets = {};
+    for (const id of SHIPS) {
+      const target = own(rawTargets, id) ? pick(rawTargets, id) : 0;
+      if (!integer(target, 0, 1000000)) fail(`Empire fleet target ${id} is invalid.`);
+      define(targets, id, target);
+    }
+    const rawSystems = own(config, 'systems') ? pick(config, 'systems') : {};
+    if (!isRecord(rawSystems)) fail('Empire systems must be an object.');
+    exactKeys(rawSystems, Object.keys(rawSystems), 'Empire systems');
+    if (Object.keys(rawSystems).length > MAX_EMPIRE_SYSTEMS) fail('Empire exceeds the 1024 systems limit.');
+    const systems = {};
+    for (const key of Object.keys(rawSystems)) {
+      if (!UUID.test(key)) fail('Empire contains an invalid system UUID.');
+      const id = key.toLowerCase();
+      if (own(systems, id)) fail('Empire contains colliding system UUIDs.');
+      const row = pick(rawSystems, key);
+      if (!isRecord(row)) fail('Empire system must be an object.');
+      exactKeys(row, Object.keys(row), 'Empire system');
+      const role = own(row, 'role') ? pick(row, 'role') : 'balanced';
+      const enabled = own(row, 'enabled') ? pick(row, 'enabled') : false;
+      if (!EMPIRE_ROLES.has(role) || typeof enabled !== 'boolean') fail('Empire system policy is invalid.');
+      define(systems, id, { row, role, enabled });
+    }
+    return { config, scope, targets, systems };
+  }
+
+  function projectEmpire(backup, result) {
+    const empire = empireConfig(backup);
+    // A not-yet-mounted runtime is not an intentional deletion. A present config
+    // always projects all four targets, even when its systems map is empty.
+    if (!empire) return;
+    for (const id of SHIPS) define(result, `empire.fleetTargets.${id}`, empire.targets[id]);
+    for (const [id, row] of Object.entries(empire.systems)) {
+      define(result, `empire.systems.${id}.role`, row.role);
+      define(result, `empire.systems.${id}.enabled`, row.enabled);
+    }
+  }
+
+  function overlayEmpire(backup, incoming) {
+    const keys = Object.keys(incoming).filter(empireKey);
+    if (!keys.length) return;
+    if (!scopeValid(pick(backup, 'profile'))) fail('Empire backup requires a valid profile scope.');
+    const local = empireConfig(backup);
+    let config;
+    if (local) {
+      config = local.config;
+      define(config, 'fleetTargets', copy(local.targets));
+      const systems = {};
+      for (const [id, { row, role, enabled }] of Object.entries(local.systems)) {
+        define(systems, id, { ...row, role, enabled });
+      }
+      define(config, 'systems', systems);
+      if (!own(config, 'enabled')) define(config, 'enabled', false);
+    } else {
+      config = { schemaVersion: 1, enabled: false,
+        fleetTargets: Object.fromEntries(SHIPS.map(id => [id, 0])), systems: {} };
+      define(backup, 'empire', { scope: pick(backup, 'profile'), config });
+    }
+    for (const key of keys) {
+      const value = incoming[key];
+      const match = EMPIRE_SYSTEM_KEY.exec(key);
+      if (match) {
+        const [, id, field] = match;
+        if (!own(config.systems, id)) define(config.systems, id, { name: '', role: 'balanced', enabled: false });
+        define(config.systems[id], field, value === null ? (field === 'role' ? 'balanced' : false) : value);
+      } else {
+        define(config.fleetTargets, key.slice('empire.fleetTargets.'.length), value === null ? 0 : value);
+      }
+    }
+    if (Object.keys(config.systems).length > MAX_EMPIRE_SYSTEMS) fail('Empire exceeds the 1024 systems limit.');
+  }
 
   function project(backup) {
     if (!isRecord(backup)) fail('Backup must be an object.');
@@ -309,6 +431,7 @@
     });
     define(result, 'attackRetries.produceMissing', pick(retries, 'produceMissing'));
     define(result, 'attackRetries.maxRetries', pick(retries, 'maxRetries'));
+    projectEmpire(backup, result);
     return copy(result);
   }
 
@@ -316,7 +439,9 @@
     if (!isRecord(backup)) fail('Backup must be an object.');
     const incoming = validateFlat(values);
     const result = copy(backup);
+    overlayEmpire(result, incoming);
     for (const [key, value] of Object.entries(incoming)) {
+      if (empireKey(key)) continue;
       let path = SIMPLE_PATHS[key];
       if (key.startsWith('settings.shipMinimums.')) path = ['settings', 'shipMinimums', key.slice('settings.shipMinimums.'.length)];
       else if (key.startsWith('notifications.events.')) path = ['notifications', 'events', key.slice('notifications.events.'.length)];
@@ -370,13 +495,13 @@
 
   function create(options) {
     if (!isRecord(options)) fail('create requires an options object.');
-    const actor = options.actor;
-    const scope = options.scope;
+    const actor = pick(options, 'actor');
+    const scope = pick(options, 'scope');
     if (!actorValid(actor)) fail('Invalid sync actor.');
     if (!scopeValid(scope)) fail('Invalid sync scope.');
-    const now = options.now === undefined ? () => Date.now() : options.now;
+    const now = !own(options, 'now') || pick(options, 'now') === undefined ? () => Date.now() : pick(options, 'now');
     if (typeof now !== 'function') fail('now must be a function.');
-    const loaded = validateState(options.state === undefined ? null : options.state, scope);
+    const loaded = validateState(own(options, 'state') ? pick(options, 'state') : null, scope);
     let fields = loaded.document ? copy(loaded.document.fields) : {};
     let observed = copy(loaded.observed);
     let lastMs = -1;
@@ -410,37 +535,53 @@
         lastMs = stamp[0]; lastCounter = stamp[1];
       }
     }
+    function transaction(action) {
+      const before = { fields, observed, lastMs, lastCounter };
+      fields = copy(fields); observed = copy(observed);
+      try {
+        action();
+        checkEmpireSystems(fields, observed);
+        const result = makeDocument();
+        checkSize({ document: result, observed });
+        return result;
+      } catch (error) {
+        ({ fields, observed, lastMs, lastCounter } = before);
+        throw error;
+      }
+    }
     function capture(flatValues) {
       const incoming = validateFlat(flatValues);
-      const allKeys = new Set([...Object.keys(incoming), ...Object.keys(observed)]);
-      for (const key of [...allKeys].sort()) {
-        const present = own(incoming, key);
-        if (!present && !own(observed, key)) continue;
-        const value = present ? incoming[key] : null;
-        const hasObserved = own(observed, key);
-        const sameObserved = hasObserved && equal(observed[key], value);
-        const current = fields[key];
-        const sameRegister = current && equal(current.value, value);
-        if (!current) {
-          write(key, value, !hasObserved || sameObserved ? [0, 0, actor] : nextStamp());
-          define(observed, key, copy(value));
-        } else if (!hasObserved) {
-          // A loaded remote register without an observation is authoritative until the caller
-          // accepts it; the current browser value may just be an old local default.
-          define(observed, key, copy(value));
-        } else if (sameRegister) {
-          define(observed, key, copy(value));
-        } else if (sameObserved) {
-          // A merge can replace the register before the caller applies it. Retain the observation
-          // until the projected backup matches the merged value.
-          continue;
-        } else {
-          write(key, value);
-          define(observed, key, copy(value));
+      const hasEmpire = Object.keys(incoming).some(empireKey);
+      return transaction(() => {
+        const allKeys = new Set([...Object.keys(incoming), ...Object.keys(observed)]);
+        for (const key of [...allKeys].sort()) {
+          if (!hasEmpire && empireKey(key)) continue;
+          const present = own(incoming, key);
+          if (!present && !own(observed, key)) continue;
+          const value = present ? incoming[key] : null;
+          const hasObserved = own(observed, key);
+          const sameObserved = hasObserved && equal(observed[key], value);
+          const current = fields[key];
+          const sameRegister = current && equal(current.value, value);
+          if (!current) {
+            write(key, value, !hasObserved || sameObserved ? [0, 0, actor] : nextStamp());
+            define(observed, key, copy(value));
+          } else if (!hasObserved) {
+            // A loaded remote register without an observation is authoritative until the caller
+            // accepts it; the current browser value may just be an old local default.
+            define(observed, key, copy(value));
+          } else if (sameRegister) {
+            define(observed, key, copy(value));
+          } else if (sameObserved) {
+            // A merge can replace the register before the caller applies it. Retain the observation
+            // until the projected backup matches the merged value.
+            continue;
+          } else {
+            write(key, value);
+            define(observed, key, copy(value));
+          }
         }
-      }
-      checkSize(makeDocument());
-      return makeDocument();
+      });
     }
     function merge(documents) {
       const list = Array.isArray(documents) ? documents : [documents];
@@ -458,7 +599,8 @@
         }
       }
       const candidate = makeDocument(nextFields);
-      checkSize(candidate);
+      checkEmpireSystems(nextFields, observed);
+      checkSize({ document: candidate, observed });
       fields = nextFields;
       for (const entry of Object.values(fields)) {
         const [ms, counter] = entry.stamp;
@@ -467,15 +609,21 @@
       return copy(candidate);
     }
     function accept(flatValues) {
-      observed = validateFlat(flatValues, 'Accepted values');
+      const incoming = validateFlat(flatValues, 'Accepted values');
+      if (!Object.keys(incoming).some(empireKey)) {
+        for (const key of Object.keys(observed).filter(empireKey)) define(incoming, key, copy(observed[key]));
+      }
+      checkEmpireSystems(fields, incoming);
+      checkSize({ document: makeDocument(), observed: incoming });
+      observed = incoming;
       return copy(observed);
     }
     function promoteSeeds() {
-      for (const key of Object.keys(fields).sort()) {
-        if (fields[key].stamp[0] === 0 && fields[key].stamp[1] === 0) write(key, fields[key].value);
-      }
-      checkSize(makeDocument());
-      return makeDocument();
+      return transaction(() => {
+        for (const key of Object.keys(fields).sort()) {
+          if (fields[key].stamp[0] === 0 && fields[key].stamp[1] === 0) write(key, fields[key].value);
+        }
+      });
     }
     function document() { return copy(makeDocument()); }
     function state() {

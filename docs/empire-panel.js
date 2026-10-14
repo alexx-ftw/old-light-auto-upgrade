@@ -133,7 +133,8 @@
       list = el('div'); empty = el('p', 'Falta verificar la lista nativa completa de sistemas propios. El recorrido automático permanece bloqueado.', 'empire-empty');
       root.append(head, status, total, overview, fleetSummary, el('h3', 'Objetivos para todo el imperio'), goals,
         el('p', 'Los objetivos cuentan base, misiones y construcción. Los recursos permanecen en cada sistema; la suma es informativa.', 'empire-hint'),
-        el('p', 'Equilibrado y Astillero reciben producción de flota. Industria y Defensa no reciben producción imperial adicional en esta fase.', 'empire-hint'), error, list, empty);
+        el('p', 'Equilibrado y Astillero reciben producción de flota. Industria y Defensa no reciben producción imperial adicional en esta fase.', 'empire-hint'),
+        el('p', 'Con la sincronización de Drive conectada, se comparten objetivos, roles y Atender. Activar o detener Imperio sigue siendo una decisión local.', 'empire-hint'), error, list, empty);
       container.append(style, root); render();
       return root;
     }

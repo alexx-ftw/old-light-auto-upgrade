@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.14.3
+// @version      1.15.0
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -598,7 +598,8 @@ return Object.freeze({create});
       list = el('div'); empty = el('p', 'Falta verificar la lista nativa completa de sistemas propios. El recorrido automático permanece bloqueado.', 'empire-empty');
       root.append(head, status, total, overview, fleetSummary, el('h3', 'Objetivos para todo el imperio'), goals,
         el('p', 'Los objetivos cuentan base, misiones y construcción. Los recursos permanecen en cada sistema; la suma es informativa.', 'empire-hint'),
-        el('p', 'Equilibrado y Astillero reciben producción de flota. Industria y Defensa no reciben producción imperial adicional en esta fase.', 'empire-hint'), error, list, empty);
+        el('p', 'Equilibrado y Astillero reciben producción de flota. Industria y Defensa no reciben producción imperial adicional en esta fase.', 'empire-hint'),
+        el('p', 'Con la sincronización de Drive conectada, se comparten objetivos, roles y Atender. Activar o detener Imperio sigue siendo una decisión local.', 'empire-hint'), error, list, empty);
       container.append(style, root); render();
       return root;
     }
@@ -824,6 +825,9 @@ return Object.freeze({create});
     try {
       const value = boundedJson(payloadText);
       if (!Array.isArray(value) || value.length !== 2 || value[0] !== event) fail();
+      // A recognized delta cannot be projected onto a player before its init.
+      // Validate the bounded JSON envelope/object, but retain no payload or IDs.
+      if (event === 'world.delta' && selfId === '') { record(value[1]); return { kind: 'missing-init' }; }
       return event === 'world.init' ? projectInit(value[1]) : projectDelta(value[1], selfId);
     } catch { return { kind: 'invalid' }; }
   }
@@ -844,6 +848,7 @@ return Object.freeze({create});
       if (event.kind === 'ignore') return false;
       if (event.kind === 'invalid') { invalidate('malformed'); return true; }
       if (event.kind === 'lost') { invalidate('session-lost'); return true; }
+      if (event.kind === 'missing-init') { invalidate('missing-init'); return true; }
       const observedAt = now();
       if (!Number.isSafeInteger(observedAt) || observedAt < 0) { invalidate('malformed'); return true; }
       if (event.kind === 'init') {
@@ -1595,7 +1600,8 @@ function create({realm=globalThis,document=realm.document,observer,observerSourc
   return Object.freeze({
     snapshot(){return current?JSON.parse(JSON.stringify(current)):null;},
     subscribe(fn){if(typeof fn!=='function')return()=>{};subscribers.add(fn);return()=>subscribers.delete(fn);},
-    status:()=>({installed,reason,observed:!!current,connected:current?.connected===true}),
+    status:()=>({installed,reason,observed:!!current,connected:current?.connected===true,
+      connectionObserved:!!current&&current.generation>0,complete:current?.complete===true}),
     stop(){if(stopped)return;stopped=true;cleanupBootstrap();port?.removeEventListener('message',receive);port?.close();current=null;subscribers.clear();},
   });
 }
@@ -1622,7 +1628,7 @@ return Object.freeze({create});
   if (readyState === 'unknown') return;
   try {
     const bridge = globalThis.OldLightEmpireBridgeFactory.create({ realm: globalThis, document,
-      observer: globalThis.OldLightEmpireObserver, addElement: typeof GM_addElement === 'function' ? GM_addElement : null, observerSource: "/* Source-backed passive Old Light observer. No game connection or action API.\n * Evidence: galaxy-CqK10P8m.js, release 526e1feaf0acb4d2fcc1648f1c61eb81a26f0884.\n * Run in the page realm before the native socket registers its handlers.\n * Keep the privileged Helper and all GM/Drive storage in the content realm.\n */\n(function (root, factory) {\n  'use strict';\n  const api = factory(root);\n  if (typeof module === 'object' && module && module.exports) module.exports = api;\n  else Object.defineProperty(root, 'OldLightEmpireObserver', { configurable: true, value: api });\n})(typeof globalThis === 'object' ? globalThis : this, function (realm) {\n  'use strict';\n  const VERSION = 1;\n  const LIMITS = Object.freeze({ frame: 8 * 1024 * 1024, depth: 32, nodes: 250000,\n    players: 10000, systems: 10000, transits: 20000, queue: 128, string: 1024 });\n  const SHIPS = Object.freeze(['probe', 'marauder', 'sentinel', 'vanguard']);\n  const BUILDINGS = Object.freeze(['command_center', 'reactor', 'palladium_extractor',\n    'iridium_extractor', 'warehouse', 'shipyard', 'trade_hub']);\n  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\n  const GALAXY = /^[A-Za-z0-9_-]{1,64}$/;\n  const own = (x, key) => Object.prototype.hasOwnProperty.call(x, key);\n  const fail = () => { throw new Error('Unsupported game data'); };\n  const object = x => x !== null && typeof x === 'object' && !Array.isArray(x);\n  const record = x => object(x) ? x : fail();\n  const array = (x, max) => Array.isArray(x) && x.length <= max ? x : fail();\n  const num = (x, signed = false) => typeof x === 'number' && Number.isFinite(x)\n    && Math.abs(x) <= Number.MAX_SAFE_INTEGER && (signed || x >= 0) ? x : fail();\n  const int = x => Number.isSafeInteger(x) && x >= 0 ? x : fail();\n  const coord = x => Number.isSafeInteger(x) && Math.abs(x) <= 10000000 ? x : fail();\n  const id = x => typeof x === 'string' && UUID.test(x) ? x.toLowerCase() : fail();\n  const word = (x, values) => values.includes(x) ? x : fail();\n  const bool = x => typeof x === 'boolean' ? x : fail();\n  const stamp = x => typeof x === 'string' && x.length <= 64 && Number.isFinite(Date.parse(x))\n    && Date.parse(x) >= 0 ? x : fail();\n  const name = x => typeof x === 'string' && x.length <= LIMITS.string\n    ? x.replace(/[\\u0000-\\u001f\\u007f]/g, '').slice(0, 200) : fail();\n  const clone = x => JSON.parse(JSON.stringify(x));\n  function optional(out, source, key, convert) {\n    if (source[key] !== undefined) out[key] = convert(source[key]);\n  }\n  function unique(values, key) {\n    const seen = new Set();\n    for (const value of values) { const k = key(value); if (seen.has(k)) fail(); seen.add(k); }\n    return values;\n  }\n  function ships(value) {\n    return unique(array(value, SHIPS.length).map(x => {\n      record(x); return { type: word(x.type, SHIPS), quantity: int(x.quantity) };\n    }), x => x.type);\n  }\n  function building(value) {\n    const x = record(value), out = { type: word(x.type, BUILDINGS), level: int(x.level) };\n    if (x.nextUpgrade === null) out.nextUpgrade = null;\n    else if (x.nextUpgrade !== undefined) {\n      const u = record(x.nextUpgrade);\n      out.nextUpgrade = { paCost: num(u.paCost), irCost: num(u.irCost), timeMs: num(u.timeMs), energyDelta: num(u.energyDelta, true) };\n    }\n    if (x.unlockRequirement !== undefined && x.unlockRequirement !== null) {\n      const u = record(x.unlockRequirement);\n      out.unlockRequirement = { type: word(u.type, BUILDINGS), level: int(u.level), met: bool(u.met) };\n    }\n    return out;\n  }\n  function buildJob(value) {\n    const x = record(value);\n    return { id: id(x.id), type: word(x.type, BUILDINGS), targetLevel: int(x.targetLevel),\n      startedAt: stamp(x.startedAt), completesAt: stamp(x.completesAt) };\n  }\n  function shipJob(value) {\n    const x = record(value), out = { id: id(x.id), type: word(x.type, SHIPS),\n      kind: word(x.kind, ['recruit', 'scrap']), quantityTotal: int(x.quantityTotal),\n      quantityRemaining: int(x.quantityRemaining), startedAt: stamp(x.startedAt), nextCompletesAt: stamp(x.nextCompletesAt) };\n    if (out.quantityRemaining > out.quantityTotal) fail();\n    optional(out, x, 'heldReason', name);\n    return out;\n  }\n  function economy(value) {\n    if (value === undefined || value === null) return null;\n    const x = record(value), r = record(x.resources);\n    const out = { resources: { palladium: num(r.palladium), iridium: num(r.iridium), settledAt: stamp(r.settledAt) },\n      paCap: num(x.paCap), irCap: num(x.irCap), paRatePerMin: num(x.paRatePerMin, true),\n      irRatePerMin: num(x.irRatePerMin, true), energyCap: num(x.energyCap), energyUsed: num(x.energyUsed),\n      deficitMultiplier: num(x.deficitMultiplier), queueSlots: int(x.queueSlots),\n      queue: unique(array(x.queue, LIMITS.queue).map(buildJob), j => j.id) };\n    if (x.wealth !== undefined && x.wealth !== null) {\n      const w = record(x.wealth); out.wealth = { active: bool(w.active), unlocked: bool(w.unlocked) };\n    }\n    return out;\n  }\n  function shipyard(value) {\n    if (value === undefined || value === null) return null;\n    const x = record(value);\n    const types = unique(array(x.types, SHIPS.length).map(t => {\n      record(t); const s = record(t.stats), stats = {};\n      for (const key of ['paCost', 'irCost', 'buildTimeSec', 'scrapTimeSec', 'lyPerHour', 'upkeepPerDay']) optional(stats, s, key, num);\n      return { type: word(t.type, SHIPS), unlocked: bool(t.unlocked), shipyardLevelRequired: int(t.shipyardLevelRequired), stats };\n    }), t => t.type);\n    return { queueSlots: int(x.queueSlots), types, queue: unique(array(x.queue, LIMITS.queue).map(shipJob), j => j.id) };\n  }\n  function system(value) {\n    const x = record(value), out = { id: id(x.id), q: coord(x.q), r: coord(x.r), name: name(x.name),\n      buildings: unique(array(x.buildings, BUILDINGS.length).map(building), b => b.type),\n      fleet: x.fleet == null ? null : ships(x.fleet), economy: economy(x.economy), shipyard: shipyard(x.shipyard) };\n    optional(out, x, 'capturedAt', int); optional(out, x, 'score', num); optional(out, x, 'garrisonCap', int);\n    return out;\n  }\n  function systems(value) {\n    const list = unique(array(value, LIMITS.systems).map(system), s => s.id);\n    return unique(list, s => `${s.q},${s.r}`);\n  }\n  function transit(value) {\n    const x = record(value), out = { id: id(x.id),\n      fromQ: x.fromQ === null ? null : coord(x.fromQ), fromR: x.fromR === null ? null : coord(x.fromR),\n      toQ: coord(x.toQ), toR: coord(x.toR), ships: ships(x.ships), arrivesAt: stamp(x.arrivesAt),\n      recalledAt: x.recalledAt === null ? null : stamp(x.recalledAt) };\n    if ((out.fromQ === null) !== (out.fromR === null)) fail();\n    // Only these fields are needed for identity/counts. Phase strings are bounded;\n    // the native renderer distinguishes returning from all other phase values.\n    optional(out, x, 'phase', name);\n    optional(out, x, 'kind', v => word(v, ['combat', 'trade', 'deal']));\n    optional(out, x, 'departsAt', stamp);\n    return out;\n  }\n  function transits(value) {\n    const out = [], byId = new Map();\n    for (const raw of array(value, LIMITS.transits)) {\n      const t = transit(raw), old = byId.get(t.id);\n      if (old) { if (JSON.stringify(old) !== JSON.stringify(t)) fail(); continue; }\n      byId.set(t.id, t); out.push(t);\n    }\n    return out;\n  }\n  function credits(value) {\n    if (value === undefined || value === null) return null;\n    const x = record(value); return { amount: num(x.amount, true), settledAt: stamp(x.settledAt),\n      incomePerDay: num(x.incomePerDay), upkeepPerDay: num(x.upkeepPerDay), inDeficit: bool(x.inDeficit) };\n  }\n  function selfPlayer(value, initial) {\n    const x = record(value), out = { id: id(x.id), owned: systems(x.owned) };\n    // Absence is deliberately distinct from an empty array in the native reducer.\n    if (initial || x.transits !== undefined) out.transits = x.transits === undefined ? null : transits(x.transits);\n    if (initial || x.credits !== undefined) out.credits = credits(x.credits);\n    if (x.eliminatedAt !== undefined) out.eliminatedAt = x.eliminatedAt === null ? null : stamp(x.eliminatedAt);\n    return out;\n  }\n  function boundedJson(text) {\n    let depth = 0, nodes = 0, quoted = false, escaped = false;\n    for (let i = 0; i < text.length; i++) {\n      const c = text[i];\n      if (quoted) { if (escaped) escaped = false; else if (c === '\\\\') escaped = true; else if (c === '\"') quoted = false; continue; }\n      if (c === '\"') { quoted = true; if (++nodes > LIMITS.nodes) fail(); }\n      else if (c === '[' || c === '{') { if (++depth > LIMITS.depth || ++nodes > LIMITS.nodes) fail(); }\n      else if (c === ']' || c === '}') { if (--depth < 0) fail(); }\n      else if (c === ',' && ++nodes > LIMITS.nodes) fail();\n    }\n    if (quoted || depth !== 0) fail();\n    return JSON.parse(text);\n  }\n  function projectInit(payload) {\n    const p = record(payload), selfId = id(p.selfId), world = record(p.world);\n    const list = array(world.players, LIMITS.players), seen = new Set();\n    let self = null;\n    for (const raw of list) {\n      const player = record(raw), key = id(player.id); if (seen.has(key)) fail(); seen.add(key);\n      if (key === selfId) self = selfPlayer(player, true);\n    }\n    if (!self) fail();\n    const configVersion = p.config && ['string', 'number'].includes(typeof p.config.version)\n      ? String(p.config.version).slice(0, 100) : '';\n    return { kind: 'init', selfId, self, serverNow: int(p.serverNow), configVersion };\n  }\n  function projectDelta(payload, selfId) {\n    if (!selfId || !UUID.test(selfId)) fail();\n    const p = record(payload), out = { kind: 'delta', removedSelf: false, selfUpdate: null, selfAdded: null, claims: [] };\n    if (p.removed !== undefined) {\n      const removed = record(p.removed);\n      if (removed.playerIds !== undefined) out.removedSelf = array(removed.playerIds, LIMITS.players).some(x => id(x) === selfId);\n    }\n    const seen = new Set(), claimKeys = new Set();\n    for (const group of ['updated', 'added']) {\n      if (p[group] === undefined) continue;\n      const data = record(p[group]); if (data.players === undefined) continue;\n      for (const raw of array(data.players, LIMITS.players)) {\n        const player = record(raw), key = id(player.id), seenKey = `${group}:${key}`;\n        if (seen.has(seenKey)) fail(); seen.add(seenKey);\n        if (key === selfId) {\n          const field = group === 'updated' ? 'selfUpdate' : 'selfAdded'; out[field] = selfPlayer(player, false);\n        } else {\n          // Only coordinates of other owners' new claims affect self ownership.\n          for (const item of array(player.owned, LIMITS.systems)) {\n            record(item); const q = coord(item.q), r = coord(item.r), k = `${q},${r}`;\n            if (!claimKeys.has(k)) { claimKeys.add(k); out.claims.push({ q, r }); }\n            if (out.claims.length > LIMITS.systems) fail();\n          }\n        }\n      }\n    }\n    return out;\n  }\n  /** Returns a sanitized event, {kind:'ignore'}, or {kind:'invalid'}; never raw payloads. */\n  function parseFrame(data, selfId = '') {\n    if (typeof data !== 'string') return { kind: 'invalid' };\n    if (data.length > LIMITS.frame) return { kind: 'invalid' };\n    if (data === '1' || data === '41' || data.startsWith('44')) return { kind: 'lost' };\n    // Binary Socket.IO event envelopes cannot be reconstructed by this observer.\n    if (data.startsWith('45') || data.startsWith('46')) return { kind: 'invalid' };\n    if (!data.startsWith('42')) return { kind: 'ignore' };\n    const packet = /^42(?:[0-9]{1,12})?(\\[.*)$/s.exec(data);\n    if (!packet) return { kind: 'invalid' };\n    const payloadText = packet[1];\n    // Discard session.token/chat/etc before JSON parsing or retaining their bodies.\n    const event = /^\\[\\s*\"(world\\.init|world\\.delta|session\\.displaced)\"\\s*[,\\]]/.exec(payloadText)?.[1];\n    if (!event) return { kind: 'ignore' };\n    if (event === 'session.displaced') return { kind: 'lost' };\n    try {\n      const value = boundedJson(payloadText);\n      if (!Array.isArray(value) || value.length !== 2 || value[0] !== event) fail();\n      return event === 'world.init' ? projectInit(value[1]) : projectDelta(value[1], selfId);\n    } catch { return { kind: 'invalid' }; }\n  }\n  function createReducer({ galaxy, now = Date.now } = {}) {\n    if (!GALAXY.test(galaxy || '') || typeof now !== 'function') throw new TypeError('Invalid observer scope');\n    let generation = 0, epoch = 0, revision = 0, current = null, connected = false, reason = 'awaiting-init';\n    let receivedAt = 0, serverNow = null, lastInitServerNow = null, configVersion = '';\n    function invalidate(why) { connected = false; current = null; receivedAt = 0; serverNow = null; reason = why; }\n    function beginConnection() { generation++; lastInitServerNow = null; invalidate('awaiting-init'); return generation; }\n    function loseConnection(token, why = 'connection-lost') {\n      if (token !== generation) return false;\n      invalidate(['connection-lost', 'stopped', 'malformed', 'session-lost', 'missing-init'].includes(why) ? why : 'connection-lost');\n      return true;\n    }\n    function ingest(data, token = generation) {\n      if (token !== generation) return false;\n      const event = parseFrame(data, current?.id || '');\n      if (event.kind === 'ignore') return false;\n      if (event.kind === 'invalid') { invalidate('malformed'); return true; }\n      if (event.kind === 'lost') { invalidate('session-lost'); return true; }\n      const observedAt = now();\n      if (!Number.isSafeInteger(observedAt) || observedAt < 0) { invalidate('malformed'); return true; }\n      if (event.kind === 'init') {\n        if (lastInitServerNow !== null && event.serverNow < lastInitServerNow) { invalidate('malformed'); return true; }\n        epoch++; revision = 0; current = event.self; connected = true; reason = '';\n        serverNow = event.serverNow; lastInitServerNow = event.serverNow; configVersion = event.configVersion; receivedAt = observedAt; return true;\n      }\n      if (!current || !connected) { invalidate('missing-init'); return true; }\n      if (event.removedSelf) { invalidate('session-lost'); return true; }\n      // Native applyDelta replaces the self record, retaining owned on [], and\n      // retaining omitted transits/credits. Added self is ignored when it exists.\n      if (event.selfUpdate) {\n        const next = event.selfUpdate, old = current;\n        current = { ...next, owned: next.owned.length ? next.owned : old.owned,\n          transits: own(next, 'transits') ? next.transits : old.transits,\n          credits: own(next, 'credits') ? next.credits : old.credits,\n          eliminatedAt: own(next, 'eliminatedAt') ? next.eliminatedAt : old.eliminatedAt };\n      }\n      // Captures prune only players absent from this delta's added/updated sets.\n      if (!event.selfUpdate && !event.selfAdded && event.claims.length) {\n        const keys = new Set(event.claims.map(x => `${x.q},${x.r}`));\n        current = { ...current, owned: current.owned.filter(x => !keys.has(`${x.q},${x.r}`)) };\n      }\n      revision++; receivedAt = observedAt; return true;\n    }\n    function snapshot() {\n      const out = { version: VERSION, galaxy, selfId: current?.id || '', scope: current ? `${galaxy}/${current.id}` : '',\n        epoch, revision, generation, observedAt: receivedAt, serverNow, configVersion, connected,\n        complete: false, reason, systems: [], transits: [], transitShips: Object.fromEntries(SHIPS.map(x => [x, 0])), credits: null };\n      if (!current) return out;\n      out.systems = clone(current.owned); out.transits = clone(current.transits || []); out.credits = clone(current.credits || null);\n      let complete = current.owned.length > 0 && Array.isArray(current.transits) && !current.eliminatedAt;\n      for (const s of out.systems) {\n        const yardLevel = s.buildings.find(x => x.type === 'shipyard')?.level;\n        if (!s.economy || !s.fleet || (yardLevel !== 0 && !s.shipyard)) complete = false;\n      }\n      for (const t of out.transits) for (const ship of t.ships) {\n        if (out.transitShips[ship.type] === null) continue;\n        const total = out.transitShips[ship.type] + ship.quantity;\n        if (!Number.isSafeInteger(total)) { complete = false; out.transitShips[ship.type] = null; }\n        else if (out.transitShips[ship.type] !== null) out.transitShips[ship.type] = total;\n      }\n      out.complete = complete && connected;\n      out.reason = current.eliminatedAt ? 'eliminated' : complete ? '' : 'incomplete-data';\n      return out;\n    }\n    return Object.freeze({ beginConnection, loseConnection, ingest, snapshot });\n  }\n  // Revalidate the unprivileged page-to-content bridge without invoking input\n  // accessors, toJSON, iterators, or prototype hooks. JSON text is preferred.\n  function plainCopy(value) {\n    let nodes = 0, bytes = 0;\n    function visit(x, depth) {\n      if (++nodes > LIMITS.nodes || depth > LIMITS.depth) fail();\n      if (x === null || typeof x === 'boolean') return x;\n      if (typeof x === 'number') return Number.isFinite(x) ? x : fail();\n      if (typeof x === 'string') { bytes += x.length; if (bytes > LIMITS.frame) fail(); return x; }\n      if (!object(x) && !Array.isArray(x)) fail();\n      const proto = Object.getPrototypeOf(x);\n      if (Array.isArray(x) ? proto !== Array.prototype : proto !== Object.prototype && proto !== null) fail();\n      const out = Array.isArray(x) ? [] : Object.create(null);\n      const keys = Object.keys(x); if (keys.length > LIMITS.nodes) fail();\n      for (const key of keys) {\n        bytes += key.length; if (bytes > LIMITS.frame) fail();\n        const d = Object.getOwnPropertyDescriptor(x, key);\n        if (!d || !own(d, 'value')) fail();\n        Object.defineProperty(out, key, { value: visit(d.value, depth + 1), enumerable: true, writable: true, configurable: true });\n      }\n      if (Array.isArray(x) && (x.length > LIMITS.nodes || keys.length !== x.length)) fail();\n      return out;\n    }\n    return visit(value, 0);\n  }\n  function validateSnapshot(input) {\n    try {\n      if (typeof input === 'string' && input.length > LIMITS.frame) fail();\n      const p = record(typeof input === 'string' ? boundedJson(input) : plainCopy(input));\n      if (p.version !== VERSION || !GALAXY.test(p.galaxy || '')) fail();\n      const connected = bool(p.connected), selfId = p.selfId === '' ? '' : id(p.selfId);\n      if (p.scope !== (selfId ? `${p.galaxy}/${selfId}` : '') || (connected && !selfId)) fail();\n      const out = { version: VERSION, galaxy: p.galaxy, selfId, scope: p.scope,\n        epoch: int(p.epoch), revision: int(p.revision), generation: int(p.generation),\n        observedAt: int(p.observedAt), serverNow: p.serverNow === null ? null : int(p.serverNow),\n        configVersion: typeof p.configVersion === 'string' && p.configVersion.length <= 100 ? p.configVersion : fail(),\n        connected, complete: bool(p.complete), reason: word(p.reason, ['', 'awaiting-init', 'connection-lost',\n          'stopped', 'malformed', 'session-lost', 'missing-init', 'eliminated', 'incomplete-data']),\n        systems: systems(p.systems), transits: transits(p.transits),\n        transitShips: Object.fromEntries(SHIPS.map(type => [type, 0])), credits: credits(p.credits) };\n      if (!selfId && (out.systems.length || out.transits.length || out.credits)) fail();\n      for (const t of out.transits) for (const ship of t.ships) {\n        const n = out.transitShips[ship.type];\n        if (n !== null) out.transitShips[ship.type] = Number.isSafeInteger(n + ship.quantity) ? n + ship.quantity : null;\n      }\n      record(p.transitShips);\n      for (const type of SHIPS) if (p.transitShips[type] !== out.transitShips[type]) fail();\n      if (out.complete) {\n        if (!connected || !selfId || out.epoch < 1 || out.generation < 1 || out.serverNow === null\n          || !out.systems.length || out.reason !== '' || Object.values(out.transitShips).some(x => x === null)) fail();\n        for (const s of out.systems) {\n          const level = s.buildings.find(x => x.type === 'shipyard')?.level;\n          if (!s.economy || !s.fleet || (level !== 0 && !s.shipyard)) fail();\n        }\n      }\n      return out;\n    } catch { return null; }\n  }\n  function isGameSocket(value) {\n    if (typeof value !== 'string' || value.length > 4096) return false;\n    try {\n      const u = new URL(value);\n      return u.protocol === 'wss:' && u.hostname === 'api.oldlight.io' && !u.port && !u.username && !u.password\n        && u.pathname === '/socket.io/' && u.searchParams.getAll('EIO').length === 1 && u.searchParams.getAll('transport').length === 1\n        && u.searchParams.get('EIO') === '4' && u.searchParams.get('transport') === 'websocket';\n    } catch { return false; }\n  }\n  /** Page-world only. It never initiates/changes a connection, or accesses send. */\n  function installPageObserver({ channel, emit } = {}) {\n    if (typeof channel !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(channel) || typeof emit !== 'function') throw new TypeError('Invalid observer channel');\n    const location = realm.location;\n    const galaxy = location?.origin === 'https://oldlight.io'\n      ? /^\\/game\\/galaxy\\/([A-Za-z0-9_-]{1,64})(?:\\/|$)/.exec(location.pathname)?.[1] : null;\n    const Native = realm.WebSocket, descriptor = Object.getOwnPropertyDescriptor(realm, 'WebSocket');\n    if (!galaxy || typeof Native !== 'function' || !descriptor || !own(descriptor, 'value')\n      || (!descriptor.writable && !descriptor.configurable)) throw new Error('Observer unavailable');\n    const reducer = createReducer({ galaxy, now: () => Date.now() });\n    const watched = new WeakSet();\n    let stopped = false, active = null, lastError = false, publishTimer = null;\n    const later = realm.setTimeout.bind(realm), cancel = realm.clearTimeout.bind(realm);\n    const publish = (defer = false) => {\n      if (stopped) return;\n      if (defer) {\n        if (publishTimer === null) publishTimer = later(() => { publishTimer = null; publish(); }, 0);\n        return;\n      }\n      if (publishTimer !== null) { cancel(publishTimer); publishTimer = null; }\n      try { emit({ channel, snapshot: reducer.snapshot() }); } catch { lastError = true; }\n    };\n    function detach() {\n      if (!active) return;\n      for (const [type, fn] of active.listeners) active.socket.removeEventListener(type, fn);\n      active = null;\n    }\n    function watch(socket) {\n      // Constructor and handler discovery can see the same socket. Never reset\n      // its epoch, or let a detached older socket become active a second time.\n      if (watched.has(socket)) return;\n      watched.add(socket);\n      detach(); const token = reducer.beginConnection();\n      const onMessage = event => {\n        if (stopped || active?.socket !== socket || event.isTrusted !== true) return;\n        if (reducer.ingest(event.data, token)) publish(reducer.snapshot().complete);\n      };\n      const onLost = () => {\n        if (stopped || active?.socket !== socket) return;\n        reducer.loseConnection(token); publish(); detach();\n      };\n      const listeners = [['message', onMessage], ['close', onLost], ['error', onLost]];\n      active = { socket, listeners };\n      for (const [type, fn] of listeners) socket.addEventListener(type, fn);\n      publish();\n    }\n    let Wrapped;\n    Wrapped = new Proxy(Native, { construct(target, args, newTarget) {\n      // Construction and all static/prototype behavior remain native. Unknown\n      // sockets pass through untouched. We do not inspect protocols or send().\n      const socket = Reflect.construct(target, args, newTarget);\n      if (!stopped && isGameSocket(args[0])) {\n        try { watch(socket); } catch { reducer.loseConnection(reducer.snapshot().generation, 'malformed'); publish(); }\n      }\n      return socket;\n    } });\n    Object.defineProperty(realm, 'WebSocket', { ...descriptor, value: Wrapped });\n    // Engine.IO caches the constructor before opening its socket, then assigns\n    // onmessage immediately after construction. A prototype accessor remains\n    // visible to that cached constructor. Keep the original callback/getter and\n    // setter behavior; discover only still-CONNECTING native sockets. This does\n    // not enumerate or recover sockets whose handlers were already registered.\n    const prototype = Native.prototype;\n    const messageDescriptor = Object.getOwnPropertyDescriptor(prototype, 'onmessage');\n    const urlGetter = Object.getOwnPropertyDescriptor(prototype, 'url')?.get;\n    const stateGetter = Object.getOwnPropertyDescriptor(prototype, 'readyState')?.get;\n    let handlerSetter = null;\n    if (messageDescriptor?.configurable && typeof messageDescriptor.get === 'function'\n      && typeof messageDescriptor.set === 'function' && typeof urlGetter === 'function' && typeof stateGetter === 'function') {\n      const set = function (value) {\n        // The native setter runs first, including its brand checks and errors.\n        const result = Reflect.apply(messageDescriptor.set, this, [value]);\n        if (!stopped && !watched.has(this)) {\n          try {\n            // Native getters bypass shadow properties supplied on an instance.\n            if (Reflect.apply(stateGetter, this, []) === 0 && isGameSocket(Reflect.apply(urlGetter, this, []))) watch(this);\n          } catch {\n            reducer.loseConnection(reducer.snapshot().generation, 'malformed'); publish();\n          }\n        }\n        return result;\n      };\n      try {\n        Object.defineProperty(prototype, 'onmessage', { ...messageDescriptor, set });\n        handlerSetter = set;\n      } catch { /* Keep constructor-only observation when the accessor is unavailable. */ }\n    }\n    publish();\n    return Object.freeze({\n      status: () => ({ installed: !stopped, emissionError: lastError, ...reducer.snapshot() }),\n      stop() {\n        if (stopped) return;\n        reducer.loseConnection(reducer.snapshot().generation, 'stopped'); publish(); stopped = true; detach();\n        if (realm.WebSocket === Wrapped) Object.defineProperty(realm, 'WebSocket', descriptor);\n        const currentHandler = Object.getOwnPropertyDescriptor(prototype, 'onmessage');\n        if (handlerSetter && currentHandler?.set === handlerSetter && currentHandler.get === messageDescriptor.get\n          && currentHandler.enumerable === messageDescriptor.enumerable && currentHandler.configurable === messageDescriptor.configurable) {\n          Object.defineProperty(prototype, 'onmessage', messageDescriptor);\n        }\n      },\n    });\n  }\n  return Object.freeze({ VERSION, LIMITS, SHIPS, parseFrame, createReducer, validateSnapshot, isGameSocket, installPageObserver });\n});" });
+      observer: globalThis.OldLightEmpireObserver, addElement: typeof GM_addElement === 'function' ? GM_addElement : null, observerSource: "/* Source-backed passive Old Light observer. No game connection or action API.\n * Evidence: galaxy-CqK10P8m.js, release 526e1feaf0acb4d2fcc1648f1c61eb81a26f0884.\n * Run in the page realm before the native socket registers its handlers.\n * Keep the privileged Helper and all GM/Drive storage in the content realm.\n */\n(function (root, factory) {\n  'use strict';\n  const api = factory(root);\n  if (typeof module === 'object' && module && module.exports) module.exports = api;\n  else Object.defineProperty(root, 'OldLightEmpireObserver', { configurable: true, value: api });\n})(typeof globalThis === 'object' ? globalThis : this, function (realm) {\n  'use strict';\n  const VERSION = 1;\n  const LIMITS = Object.freeze({ frame: 8 * 1024 * 1024, depth: 32, nodes: 250000,\n    players: 10000, systems: 10000, transits: 20000, queue: 128, string: 1024 });\n  const SHIPS = Object.freeze(['probe', 'marauder', 'sentinel', 'vanguard']);\n  const BUILDINGS = Object.freeze(['command_center', 'reactor', 'palladium_extractor',\n    'iridium_extractor', 'warehouse', 'shipyard', 'trade_hub']);\n  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\n  const GALAXY = /^[A-Za-z0-9_-]{1,64}$/;\n  const own = (x, key) => Object.prototype.hasOwnProperty.call(x, key);\n  const fail = () => { throw new Error('Unsupported game data'); };\n  const object = x => x !== null && typeof x === 'object' && !Array.isArray(x);\n  const record = x => object(x) ? x : fail();\n  const array = (x, max) => Array.isArray(x) && x.length <= max ? x : fail();\n  const num = (x, signed = false) => typeof x === 'number' && Number.isFinite(x)\n    && Math.abs(x) <= Number.MAX_SAFE_INTEGER && (signed || x >= 0) ? x : fail();\n  const int = x => Number.isSafeInteger(x) && x >= 0 ? x : fail();\n  const coord = x => Number.isSafeInteger(x) && Math.abs(x) <= 10000000 ? x : fail();\n  const id = x => typeof x === 'string' && UUID.test(x) ? x.toLowerCase() : fail();\n  const word = (x, values) => values.includes(x) ? x : fail();\n  const bool = x => typeof x === 'boolean' ? x : fail();\n  const stamp = x => typeof x === 'string' && x.length <= 64 && Number.isFinite(Date.parse(x))\n    && Date.parse(x) >= 0 ? x : fail();\n  const name = x => typeof x === 'string' && x.length <= LIMITS.string\n    ? x.replace(/[\\u0000-\\u001f\\u007f]/g, '').slice(0, 200) : fail();\n  const clone = x => JSON.parse(JSON.stringify(x));\n  function optional(out, source, key, convert) {\n    if (source[key] !== undefined) out[key] = convert(source[key]);\n  }\n  function unique(values, key) {\n    const seen = new Set();\n    for (const value of values) { const k = key(value); if (seen.has(k)) fail(); seen.add(k); }\n    return values;\n  }\n  function ships(value) {\n    return unique(array(value, SHIPS.length).map(x => {\n      record(x); return { type: word(x.type, SHIPS), quantity: int(x.quantity) };\n    }), x => x.type);\n  }\n  function building(value) {\n    const x = record(value), out = { type: word(x.type, BUILDINGS), level: int(x.level) };\n    if (x.nextUpgrade === null) out.nextUpgrade = null;\n    else if (x.nextUpgrade !== undefined) {\n      const u = record(x.nextUpgrade);\n      out.nextUpgrade = { paCost: num(u.paCost), irCost: num(u.irCost), timeMs: num(u.timeMs), energyDelta: num(u.energyDelta, true) };\n    }\n    if (x.unlockRequirement !== undefined && x.unlockRequirement !== null) {\n      const u = record(x.unlockRequirement);\n      out.unlockRequirement = { type: word(u.type, BUILDINGS), level: int(u.level), met: bool(u.met) };\n    }\n    return out;\n  }\n  function buildJob(value) {\n    const x = record(value);\n    return { id: id(x.id), type: word(x.type, BUILDINGS), targetLevel: int(x.targetLevel),\n      startedAt: stamp(x.startedAt), completesAt: stamp(x.completesAt) };\n  }\n  function shipJob(value) {\n    const x = record(value), out = { id: id(x.id), type: word(x.type, SHIPS),\n      kind: word(x.kind, ['recruit', 'scrap']), quantityTotal: int(x.quantityTotal),\n      quantityRemaining: int(x.quantityRemaining), startedAt: stamp(x.startedAt), nextCompletesAt: stamp(x.nextCompletesAt) };\n    if (out.quantityRemaining > out.quantityTotal) fail();\n    optional(out, x, 'heldReason', name);\n    return out;\n  }\n  function economy(value) {\n    if (value === undefined || value === null) return null;\n    const x = record(value), r = record(x.resources);\n    const out = { resources: { palladium: num(r.palladium), iridium: num(r.iridium), settledAt: stamp(r.settledAt) },\n      paCap: num(x.paCap), irCap: num(x.irCap), paRatePerMin: num(x.paRatePerMin, true),\n      irRatePerMin: num(x.irRatePerMin, true), energyCap: num(x.energyCap), energyUsed: num(x.energyUsed),\n      deficitMultiplier: num(x.deficitMultiplier), queueSlots: int(x.queueSlots),\n      queue: unique(array(x.queue, LIMITS.queue).map(buildJob), j => j.id) };\n    if (x.wealth !== undefined && x.wealth !== null) {\n      const w = record(x.wealth); out.wealth = { active: bool(w.active), unlocked: bool(w.unlocked) };\n    }\n    return out;\n  }\n  function shipyard(value) {\n    if (value === undefined || value === null) return null;\n    const x = record(value);\n    const types = unique(array(x.types, SHIPS.length).map(t => {\n      record(t); const s = record(t.stats), stats = {};\n      for (const key of ['paCost', 'irCost', 'buildTimeSec', 'scrapTimeSec', 'lyPerHour', 'upkeepPerDay']) optional(stats, s, key, num);\n      return { type: word(t.type, SHIPS), unlocked: bool(t.unlocked), shipyardLevelRequired: int(t.shipyardLevelRequired), stats };\n    }), t => t.type);\n    return { queueSlots: int(x.queueSlots), types, queue: unique(array(x.queue, LIMITS.queue).map(shipJob), j => j.id) };\n  }\n  function system(value) {\n    const x = record(value), out = { id: id(x.id), q: coord(x.q), r: coord(x.r), name: name(x.name),\n      buildings: unique(array(x.buildings, BUILDINGS.length).map(building), b => b.type),\n      fleet: x.fleet == null ? null : ships(x.fleet), economy: economy(x.economy), shipyard: shipyard(x.shipyard) };\n    optional(out, x, 'capturedAt', int); optional(out, x, 'score', num); optional(out, x, 'garrisonCap', int);\n    return out;\n  }\n  function systems(value) {\n    const list = unique(array(value, LIMITS.systems).map(system), s => s.id);\n    return unique(list, s => `${s.q},${s.r}`);\n  }\n  function transit(value) {\n    const x = record(value), out = { id: id(x.id),\n      fromQ: x.fromQ === null ? null : coord(x.fromQ), fromR: x.fromR === null ? null : coord(x.fromR),\n      toQ: coord(x.toQ), toR: coord(x.toR), ships: ships(x.ships), arrivesAt: stamp(x.arrivesAt),\n      recalledAt: x.recalledAt === null ? null : stamp(x.recalledAt) };\n    if ((out.fromQ === null) !== (out.fromR === null)) fail();\n    // Only these fields are needed for identity/counts. Phase strings are bounded;\n    // the native renderer distinguishes returning from all other phase values.\n    optional(out, x, 'phase', name);\n    optional(out, x, 'kind', v => word(v, ['combat', 'trade', 'deal']));\n    optional(out, x, 'departsAt', stamp);\n    return out;\n  }\n  function transits(value) {\n    const out = [], byId = new Map();\n    for (const raw of array(value, LIMITS.transits)) {\n      const t = transit(raw), old = byId.get(t.id);\n      if (old) { if (JSON.stringify(old) !== JSON.stringify(t)) fail(); continue; }\n      byId.set(t.id, t); out.push(t);\n    }\n    return out;\n  }\n  function credits(value) {\n    if (value === undefined || value === null) return null;\n    const x = record(value); return { amount: num(x.amount, true), settledAt: stamp(x.settledAt),\n      incomePerDay: num(x.incomePerDay), upkeepPerDay: num(x.upkeepPerDay), inDeficit: bool(x.inDeficit) };\n  }\n  function selfPlayer(value, initial) {\n    const x = record(value), out = { id: id(x.id), owned: systems(x.owned) };\n    // Absence is deliberately distinct from an empty array in the native reducer.\n    if (initial || x.transits !== undefined) out.transits = x.transits === undefined ? null : transits(x.transits);\n    if (initial || x.credits !== undefined) out.credits = credits(x.credits);\n    if (x.eliminatedAt !== undefined) out.eliminatedAt = x.eliminatedAt === null ? null : stamp(x.eliminatedAt);\n    return out;\n  }\n  function boundedJson(text) {\n    let depth = 0, nodes = 0, quoted = false, escaped = false;\n    for (let i = 0; i < text.length; i++) {\n      const c = text[i];\n      if (quoted) { if (escaped) escaped = false; else if (c === '\\\\') escaped = true; else if (c === '\"') quoted = false; continue; }\n      if (c === '\"') { quoted = true; if (++nodes > LIMITS.nodes) fail(); }\n      else if (c === '[' || c === '{') { if (++depth > LIMITS.depth || ++nodes > LIMITS.nodes) fail(); }\n      else if (c === ']' || c === '}') { if (--depth < 0) fail(); }\n      else if (c === ',' && ++nodes > LIMITS.nodes) fail();\n    }\n    if (quoted || depth !== 0) fail();\n    return JSON.parse(text);\n  }\n  function projectInit(payload) {\n    const p = record(payload), selfId = id(p.selfId), world = record(p.world);\n    const list = array(world.players, LIMITS.players), seen = new Set();\n    let self = null;\n    for (const raw of list) {\n      const player = record(raw), key = id(player.id); if (seen.has(key)) fail(); seen.add(key);\n      if (key === selfId) self = selfPlayer(player, true);\n    }\n    if (!self) fail();\n    const configVersion = p.config && ['string', 'number'].includes(typeof p.config.version)\n      ? String(p.config.version).slice(0, 100) : '';\n    return { kind: 'init', selfId, self, serverNow: int(p.serverNow), configVersion };\n  }\n  function projectDelta(payload, selfId) {\n    if (!selfId || !UUID.test(selfId)) fail();\n    const p = record(payload), out = { kind: 'delta', removedSelf: false, selfUpdate: null, selfAdded: null, claims: [] };\n    if (p.removed !== undefined) {\n      const removed = record(p.removed);\n      if (removed.playerIds !== undefined) out.removedSelf = array(removed.playerIds, LIMITS.players).some(x => id(x) === selfId);\n    }\n    const seen = new Set(), claimKeys = new Set();\n    for (const group of ['updated', 'added']) {\n      if (p[group] === undefined) continue;\n      const data = record(p[group]); if (data.players === undefined) continue;\n      for (const raw of array(data.players, LIMITS.players)) {\n        const player = record(raw), key = id(player.id), seenKey = `${group}:${key}`;\n        if (seen.has(seenKey)) fail(); seen.add(seenKey);\n        if (key === selfId) {\n          const field = group === 'updated' ? 'selfUpdate' : 'selfAdded'; out[field] = selfPlayer(player, false);\n        } else {\n          // Only coordinates of other owners' new claims affect self ownership.\n          for (const item of array(player.owned, LIMITS.systems)) {\n            record(item); const q = coord(item.q), r = coord(item.r), k = `${q},${r}`;\n            if (!claimKeys.has(k)) { claimKeys.add(k); out.claims.push({ q, r }); }\n            if (out.claims.length > LIMITS.systems) fail();\n          }\n        }\n      }\n    }\n    return out;\n  }\n  /** Returns a sanitized event, {kind:'ignore'}, or {kind:'invalid'}; never raw payloads. */\n  function parseFrame(data, selfId = '') {\n    if (typeof data !== 'string') return { kind: 'invalid' };\n    if (data.length > LIMITS.frame) return { kind: 'invalid' };\n    if (data === '1' || data === '41' || data.startsWith('44')) return { kind: 'lost' };\n    // Binary Socket.IO event envelopes cannot be reconstructed by this observer.\n    if (data.startsWith('45') || data.startsWith('46')) return { kind: 'invalid' };\n    if (!data.startsWith('42')) return { kind: 'ignore' };\n    const packet = /^42(?:[0-9]{1,12})?(\\[.*)$/s.exec(data);\n    if (!packet) return { kind: 'invalid' };\n    const payloadText = packet[1];\n    // Discard session.token/chat/etc before JSON parsing or retaining their bodies.\n    const event = /^\\[\\s*\"(world\\.init|world\\.delta|session\\.displaced)\"\\s*[,\\]]/.exec(payloadText)?.[1];\n    if (!event) return { kind: 'ignore' };\n    if (event === 'session.displaced') return { kind: 'lost' };\n    try {\n      const value = boundedJson(payloadText);\n      if (!Array.isArray(value) || value.length !== 2 || value[0] !== event) fail();\n      // A recognized delta cannot be projected onto a player before its init.\n      // Validate the bounded JSON envelope/object, but retain no payload or IDs.\n      if (event === 'world.delta' && selfId === '') { record(value[1]); return { kind: 'missing-init' }; }\n      return event === 'world.init' ? projectInit(value[1]) : projectDelta(value[1], selfId);\n    } catch { return { kind: 'invalid' }; }\n  }\n  function createReducer({ galaxy, now = Date.now } = {}) {\n    if (!GALAXY.test(galaxy || '') || typeof now !== 'function') throw new TypeError('Invalid observer scope');\n    let generation = 0, epoch = 0, revision = 0, current = null, connected = false, reason = 'awaiting-init';\n    let receivedAt = 0, serverNow = null, lastInitServerNow = null, configVersion = '';\n    function invalidate(why) { connected = false; current = null; receivedAt = 0; serverNow = null; reason = why; }\n    function beginConnection() { generation++; lastInitServerNow = null; invalidate('awaiting-init'); return generation; }\n    function loseConnection(token, why = 'connection-lost') {\n      if (token !== generation) return false;\n      invalidate(['connection-lost', 'stopped', 'malformed', 'session-lost', 'missing-init'].includes(why) ? why : 'connection-lost');\n      return true;\n    }\n    function ingest(data, token = generation) {\n      if (token !== generation) return false;\n      const event = parseFrame(data, current?.id || '');\n      if (event.kind === 'ignore') return false;\n      if (event.kind === 'invalid') { invalidate('malformed'); return true; }\n      if (event.kind === 'lost') { invalidate('session-lost'); return true; }\n      if (event.kind === 'missing-init') { invalidate('missing-init'); return true; }\n      const observedAt = now();\n      if (!Number.isSafeInteger(observedAt) || observedAt < 0) { invalidate('malformed'); return true; }\n      if (event.kind === 'init') {\n        if (lastInitServerNow !== null && event.serverNow < lastInitServerNow) { invalidate('malformed'); return true; }\n        epoch++; revision = 0; current = event.self; connected = true; reason = '';\n        serverNow = event.serverNow; lastInitServerNow = event.serverNow; configVersion = event.configVersion; receivedAt = observedAt; return true;\n      }\n      if (!current || !connected) { invalidate('missing-init'); return true; }\n      if (event.removedSelf) { invalidate('session-lost'); return true; }\n      // Native applyDelta replaces the self record, retaining owned on [], and\n      // retaining omitted transits/credits. Added self is ignored when it exists.\n      if (event.selfUpdate) {\n        const next = event.selfUpdate, old = current;\n        current = { ...next, owned: next.owned.length ? next.owned : old.owned,\n          transits: own(next, 'transits') ? next.transits : old.transits,\n          credits: own(next, 'credits') ? next.credits : old.credits,\n          eliminatedAt: own(next, 'eliminatedAt') ? next.eliminatedAt : old.eliminatedAt };\n      }\n      // Captures prune only players absent from this delta's added/updated sets.\n      if (!event.selfUpdate && !event.selfAdded && event.claims.length) {\n        const keys = new Set(event.claims.map(x => `${x.q},${x.r}`));\n        current = { ...current, owned: current.owned.filter(x => !keys.has(`${x.q},${x.r}`)) };\n      }\n      revision++; receivedAt = observedAt; return true;\n    }\n    function snapshot() {\n      const out = { version: VERSION, galaxy, selfId: current?.id || '', scope: current ? `${galaxy}/${current.id}` : '',\n        epoch, revision, generation, observedAt: receivedAt, serverNow, configVersion, connected,\n        complete: false, reason, systems: [], transits: [], transitShips: Object.fromEntries(SHIPS.map(x => [x, 0])), credits: null };\n      if (!current) return out;\n      out.systems = clone(current.owned); out.transits = clone(current.transits || []); out.credits = clone(current.credits || null);\n      let complete = current.owned.length > 0 && Array.isArray(current.transits) && !current.eliminatedAt;\n      for (const s of out.systems) {\n        const yardLevel = s.buildings.find(x => x.type === 'shipyard')?.level;\n        if (!s.economy || !s.fleet || (yardLevel !== 0 && !s.shipyard)) complete = false;\n      }\n      for (const t of out.transits) for (const ship of t.ships) {\n        if (out.transitShips[ship.type] === null) continue;\n        const total = out.transitShips[ship.type] + ship.quantity;\n        if (!Number.isSafeInteger(total)) { complete = false; out.transitShips[ship.type] = null; }\n        else if (out.transitShips[ship.type] !== null) out.transitShips[ship.type] = total;\n      }\n      out.complete = complete && connected;\n      out.reason = current.eliminatedAt ? 'eliminated' : complete ? '' : 'incomplete-data';\n      return out;\n    }\n    return Object.freeze({ beginConnection, loseConnection, ingest, snapshot });\n  }\n  // Revalidate the unprivileged page-to-content bridge without invoking input\n  // accessors, toJSON, iterators, or prototype hooks. JSON text is preferred.\n  function plainCopy(value) {\n    let nodes = 0, bytes = 0;\n    function visit(x, depth) {\n      if (++nodes > LIMITS.nodes || depth > LIMITS.depth) fail();\n      if (x === null || typeof x === 'boolean') return x;\n      if (typeof x === 'number') return Number.isFinite(x) ? x : fail();\n      if (typeof x === 'string') { bytes += x.length; if (bytes > LIMITS.frame) fail(); return x; }\n      if (!object(x) && !Array.isArray(x)) fail();\n      const proto = Object.getPrototypeOf(x);\n      if (Array.isArray(x) ? proto !== Array.prototype : proto !== Object.prototype && proto !== null) fail();\n      const out = Array.isArray(x) ? [] : Object.create(null);\n      const keys = Object.keys(x); if (keys.length > LIMITS.nodes) fail();\n      for (const key of keys) {\n        bytes += key.length; if (bytes > LIMITS.frame) fail();\n        const d = Object.getOwnPropertyDescriptor(x, key);\n        if (!d || !own(d, 'value')) fail();\n        Object.defineProperty(out, key, { value: visit(d.value, depth + 1), enumerable: true, writable: true, configurable: true });\n      }\n      if (Array.isArray(x) && (x.length > LIMITS.nodes || keys.length !== x.length)) fail();\n      return out;\n    }\n    return visit(value, 0);\n  }\n  function validateSnapshot(input) {\n    try {\n      if (typeof input === 'string' && input.length > LIMITS.frame) fail();\n      const p = record(typeof input === 'string' ? boundedJson(input) : plainCopy(input));\n      if (p.version !== VERSION || !GALAXY.test(p.galaxy || '')) fail();\n      const connected = bool(p.connected), selfId = p.selfId === '' ? '' : id(p.selfId);\n      if (p.scope !== (selfId ? `${p.galaxy}/${selfId}` : '') || (connected && !selfId)) fail();\n      const out = { version: VERSION, galaxy: p.galaxy, selfId, scope: p.scope,\n        epoch: int(p.epoch), revision: int(p.revision), generation: int(p.generation),\n        observedAt: int(p.observedAt), serverNow: p.serverNow === null ? null : int(p.serverNow),\n        configVersion: typeof p.configVersion === 'string' && p.configVersion.length <= 100 ? p.configVersion : fail(),\n        connected, complete: bool(p.complete), reason: word(p.reason, ['', 'awaiting-init', 'connection-lost',\n          'stopped', 'malformed', 'session-lost', 'missing-init', 'eliminated', 'incomplete-data']),\n        systems: systems(p.systems), transits: transits(p.transits),\n        transitShips: Object.fromEntries(SHIPS.map(type => [type, 0])), credits: credits(p.credits) };\n      if (!selfId && (out.systems.length || out.transits.length || out.credits)) fail();\n      for (const t of out.transits) for (const ship of t.ships) {\n        const n = out.transitShips[ship.type];\n        if (n !== null) out.transitShips[ship.type] = Number.isSafeInteger(n + ship.quantity) ? n + ship.quantity : null;\n      }\n      record(p.transitShips);\n      for (const type of SHIPS) if (p.transitShips[type] !== out.transitShips[type]) fail();\n      if (out.complete) {\n        if (!connected || !selfId || out.epoch < 1 || out.generation < 1 || out.serverNow === null\n          || !out.systems.length || out.reason !== '' || Object.values(out.transitShips).some(x => x === null)) fail();\n        for (const s of out.systems) {\n          const level = s.buildings.find(x => x.type === 'shipyard')?.level;\n          if (!s.economy || !s.fleet || (level !== 0 && !s.shipyard)) fail();\n        }\n      }\n      return out;\n    } catch { return null; }\n  }\n  function isGameSocket(value) {\n    if (typeof value !== 'string' || value.length > 4096) return false;\n    try {\n      const u = new URL(value);\n      return u.protocol === 'wss:' && u.hostname === 'api.oldlight.io' && !u.port && !u.username && !u.password\n        && u.pathname === '/socket.io/' && u.searchParams.getAll('EIO').length === 1 && u.searchParams.getAll('transport').length === 1\n        && u.searchParams.get('EIO') === '4' && u.searchParams.get('transport') === 'websocket';\n    } catch { return false; }\n  }\n  /** Page-world only. It never initiates/changes a connection, or accesses send. */\n  function installPageObserver({ channel, emit } = {}) {\n    if (typeof channel !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(channel) || typeof emit !== 'function') throw new TypeError('Invalid observer channel');\n    const location = realm.location;\n    const galaxy = location?.origin === 'https://oldlight.io'\n      ? /^\\/game\\/galaxy\\/([A-Za-z0-9_-]{1,64})(?:\\/|$)/.exec(location.pathname)?.[1] : null;\n    const Native = realm.WebSocket, descriptor = Object.getOwnPropertyDescriptor(realm, 'WebSocket');\n    if (!galaxy || typeof Native !== 'function' || !descriptor || !own(descriptor, 'value')\n      || (!descriptor.writable && !descriptor.configurable)) throw new Error('Observer unavailable');\n    const reducer = createReducer({ galaxy, now: () => Date.now() });\n    const watched = new WeakSet();\n    let stopped = false, active = null, lastError = false, publishTimer = null;\n    const later = realm.setTimeout.bind(realm), cancel = realm.clearTimeout.bind(realm);\n    const publish = (defer = false) => {\n      if (stopped) return;\n      if (defer) {\n        if (publishTimer === null) publishTimer = later(() => { publishTimer = null; publish(); }, 0);\n        return;\n      }\n      if (publishTimer !== null) { cancel(publishTimer); publishTimer = null; }\n      try { emit({ channel, snapshot: reducer.snapshot() }); } catch { lastError = true; }\n    };\n    function detach() {\n      if (!active) return;\n      for (const [type, fn] of active.listeners) active.socket.removeEventListener(type, fn);\n      active = null;\n    }\n    function watch(socket) {\n      // Constructor and handler discovery can see the same socket. Never reset\n      // its epoch, or let a detached older socket become active a second time.\n      if (watched.has(socket)) return;\n      watched.add(socket);\n      detach(); const token = reducer.beginConnection();\n      const onMessage = event => {\n        if (stopped || active?.socket !== socket || event.isTrusted !== true) return;\n        if (reducer.ingest(event.data, token)) publish(reducer.snapshot().complete);\n      };\n      const onLost = () => {\n        if (stopped || active?.socket !== socket) return;\n        reducer.loseConnection(token); publish(); detach();\n      };\n      const listeners = [['message', onMessage], ['close', onLost], ['error', onLost]];\n      active = { socket, listeners };\n      for (const [type, fn] of listeners) socket.addEventListener(type, fn);\n      publish();\n    }\n    let Wrapped;\n    Wrapped = new Proxy(Native, { construct(target, args, newTarget) {\n      // Construction and all static/prototype behavior remain native. Unknown\n      // sockets pass through untouched. We do not inspect protocols or send().\n      const socket = Reflect.construct(target, args, newTarget);\n      if (!stopped && isGameSocket(args[0])) {\n        try { watch(socket); } catch { reducer.loseConnection(reducer.snapshot().generation, 'malformed'); publish(); }\n      }\n      return socket;\n    } });\n    Object.defineProperty(realm, 'WebSocket', { ...descriptor, value: Wrapped });\n    // Engine.IO caches the constructor before opening its socket, then assigns\n    // onmessage immediately after construction. A prototype accessor remains\n    // visible to that cached constructor. Keep the original callback/getter and\n    // setter behavior; discover only still-CONNECTING native sockets. This does\n    // not enumerate or recover sockets whose handlers were already registered.\n    const prototype = Native.prototype;\n    const messageDescriptor = Object.getOwnPropertyDescriptor(prototype, 'onmessage');\n    const urlGetter = Object.getOwnPropertyDescriptor(prototype, 'url')?.get;\n    const stateGetter = Object.getOwnPropertyDescriptor(prototype, 'readyState')?.get;\n    let handlerSetter = null;\n    if (messageDescriptor?.configurable && typeof messageDescriptor.get === 'function'\n      && typeof messageDescriptor.set === 'function' && typeof urlGetter === 'function' && typeof stateGetter === 'function') {\n      const set = function (value) {\n        // The native setter runs first, including its brand checks and errors.\n        const result = Reflect.apply(messageDescriptor.set, this, [value]);\n        if (!stopped && !watched.has(this)) {\n          try {\n            // Native getters bypass shadow properties supplied on an instance.\n            if (Reflect.apply(stateGetter, this, []) === 0 && isGameSocket(Reflect.apply(urlGetter, this, []))) watch(this);\n          } catch {\n            reducer.loseConnection(reducer.snapshot().generation, 'malformed'); publish();\n          }\n        }\n        return result;\n      };\n      try {\n        Object.defineProperty(prototype, 'onmessage', { ...messageDescriptor, set });\n        handlerSetter = set;\n      } catch { /* Keep constructor-only observation when the accessor is unavailable. */ }\n    }\n    publish();\n    return Object.freeze({\n      status: () => ({ installed: !stopped, emissionError: lastError, ...reducer.snapshot() }),\n      stop() {\n        if (stopped) return;\n        reducer.loseConnection(reducer.snapshot().generation, 'stopped'); publish(); stopped = true; detach();\n        if (realm.WebSocket === Wrapped) Object.defineProperty(realm, 'WebSocket', descriptor);\n        const currentHandler = Object.getOwnPropertyDescriptor(prototype, 'onmessage');\n        if (handlerSetter && currentHandler?.set === handlerSetter && currentHandler.get === messageDescriptor.get\n          && currentHandler.enumerable === messageDescriptor.enumerable && currentHandler.configurable === messageDescriptor.configurable) {\n          Object.defineProperty(prototype, 'onmessage', messageDescriptor);\n        }\n      },\n    });\n  }\n  return Object.freeze({ VERSION, LIMITS, SHIPS, parseFrame, createReducer, validateSnapshot, isGameSocket, installPageObserver });\n});" });
     Object.defineProperty(globalThis, 'OldLightEmpireBridge', { configurable: false, value: bridge });
   } catch (_) { phase = 'unavailable'; error = 'bridge-create-failed'; }
 })();
@@ -1644,12 +1650,16 @@ return Object.freeze({create});
   const MAX_COUNT = 1000000;
   const DAY_MS = 86400000;
   const EVENTS = Object.freeze([
-    'helper.loaded', 'ui.tab.buildings', 'ui.tab.fleet', 'ui.tab.notifications', 'ui.tab.data',
+    'helper.loaded', 'ui.tab.empire', 'ui.tab.buildings', 'ui.tab.fleet', 'ui.tab.notifications', 'ui.tab.data',
     'ui.fleet.minimums', 'ui.fleet.campaigns', 'ui.fleet.missions', 'settings.changed',
     'backup.exported', 'backup.imported', 'backup.failed', 'automation.sent', 'automation.confirmed',
     'automation.unconfirmed', 'automation.failed', 'automation.rejected', 'automation.paused',
     'mission.sent', 'mission.uncertain', 'drive.connected', 'drive.synced', 'drive.retry', 'drive.error',
     'error.runtime', 'error.storage',
+    'empire.observer.installation_failed', 'empire.observer.socket_unobserved',
+    'empire.observer.awaiting_init', 'empire.observer.missing_init',
+    'empire.observer.format_rejected', 'empire.observer.observation_rejected',
+    'empire.observer.census_received', 'empire.observer.connection_lost', 'empire.observer.incomplete',
   ]);
   const EVENT_SET = new Set(EVENTS);
   const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
@@ -2023,6 +2033,10 @@ return Object.freeze({create});
   const BUILDINGS = Object.freeze(['command_center', 'reactor', 'palladium_extractor', 'iridium_extractor',
     'warehouse', 'shipyard', 'trade_hub']);
   const SHIPS = Object.freeze(['probe', 'marauder', 'sentinel', 'vanguard']);
+  const EMPIRE_ROLES = new Set(['balanced', 'industry', 'shipyard', 'defense']);
+  const MAX_EMPIRE_SYSTEMS = 1024;
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const EMPIRE_SYSTEM_KEY = /^empire\.systems\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.(role|enabled)$/;
   const EVENTS = Object.freeze([
     'request.sent', 'building.queued', 'ships.queued', 'building.completed', 'fleet.changed', 'game.toast',
     'game.reports', 'game.messages', 'game.level_target', 'attack.retry', 'request.failed', 'request.rejected',
@@ -2039,6 +2053,7 @@ return Object.freeze({create});
     ...EVENTS.map(type => `notifications.events.${type}`),
     ...BUILDINGS.map(id => `levelTargets.targets.${id}`),
     'attackRetries.enabled', 'attackRetries.autoMinimums', 'attackRetries.produceMissing', 'attackRetries.maxRetries',
+    ...SHIPS.map(id => `empire.fleetTargets.${id}`),
   ]);
   const MISSING = Object.freeze({ missing: true });
 
@@ -2052,6 +2067,21 @@ return Object.freeze({create});
   function define(target, key, value) {
     Object.defineProperty(target, key, { configurable: true, enumerable: true, writable: true, value });
   }
+  function dataAt(object, key) {
+    const descriptor = Object.getOwnPropertyDescriptor(object, key);
+    if (!descriptor || !own(descriptor, 'value') || !descriptor.enumerable) fail('Object accessors and non-JSON keys are not supported.');
+    return descriptor.value;
+  }
+  function empireKey(key) { return key.startsWith('empire.'); }
+  function validKey(key) { return ALLOWED.has(key) || EMPIRE_SYSTEM_KEY.test(key); }
+  function checkEmpireSystems(...objects) {
+    const ids = new Set();
+    for (const object of objects) for (const key of Object.keys(object)) {
+      const match = EMPIRE_SYSTEM_KEY.exec(key);
+      if (match) ids.add(match[1]);
+    }
+    if (ids.size > MAX_EMPIRE_SYSTEMS) fail('Empire exceeds the 1024 systems limit.');
+  }
 
   function cloneJson(value, seen = new Set()) {
     if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
@@ -2063,12 +2093,15 @@ return Object.freeze({create});
     if (seen.has(value)) fail('Circular values are not supported.');
     if (!Array.isArray(value) && !isRecord(value)) fail('Only plain JSON objects are supported.');
     if (Object.getOwnPropertySymbols(value).length) fail('Symbol keys are not supported.');
+    if (Object.getOwnPropertyNames(value).length !== Object.keys(value).length + (Array.isArray(value) ? 1 : 0)) {
+      fail('Non-JSON keys are not supported.');
+    }
     seen.add(value);
     let result;
     if (Array.isArray(value)) {
       result = new Array(value.length);
       for (let i = 0; i < value.length; i += 1) {
-        if (own(value, i)) result[i] = cloneJson(value[i], seen);
+        if (own(value, i)) result[i] = cloneJson(dataAt(value, String(i)), seen);
       }
       for (const key of Object.keys(value)) {
         if (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length) fail('Arrays cannot have extra properties.');
@@ -2104,7 +2137,7 @@ return Object.freeze({create});
         const parts = [];
         for (let i = 0; i < item.length; i += 1) {
           if (!own(item, i)) fail('Canonical JSON does not allow sparse arrays.');
-          parts.push(encode(item[i]));
+          parts.push(encode(dataAt(item, String(i))));
         }
         encoded = `[${parts.join(',')}]`;
       } else {
@@ -2157,6 +2190,7 @@ return Object.freeze({create});
     const allowed = new Set(expected);
     for (const key of Object.keys(value)) {
       if (PROTOTYPE_KEYS.has(key) || !allowed.has(key)) fail(`${label} contains an unknown or unsafe key.`);
+      dataAt(value, key);
     }
   }
   function integer(value, min, max) { return Number.isSafeInteger(value) && value >= min && value <= max; }
@@ -2181,8 +2215,11 @@ return Object.freeze({create});
     return typeof value[first] === 'boolean' && integer(value[second], 0, MAX_TIME);
   }
   function validRegisterValue(key, value) {
-    if (!ALLOWED.has(key)) return false;
+    if (!validKey(key)) return false;
     if (value === null) return true;
+    if (key.startsWith('empire.fleetTargets.')) return integer(value, 0, 1000000);
+    const system = EMPIRE_SYSTEM_KEY.exec(key);
+    if (system) return system[2] === 'role' ? EMPIRE_ROLES.has(value) : typeof value === 'boolean';
     if (key === 'settings.enabled' || key === 'settings.countAway' || key === 'settings.shiftPresetShortcut'
         || key === 'notifications.browserEnabled' || key === 'notifications.telegramEnabled'
         || key === 'notifications.paused' || key === 'notifications.browserPaused'
@@ -2209,14 +2246,17 @@ return Object.freeze({create});
     return false;
   }
   function validateFlat(value, label = 'Register values') {
-    exactKeys(value, [...ALLOWED], label);
+    if (!isRecord(value)) fail(`${label} must be an object.`);
+    exactKeys(value, Object.keys(value), label);
     const clean = {};
     for (const key of Object.keys(value)) {
+      if (!validKey(key)) fail(`${label} contains an unknown or unsafe key.`);
       const item = copy(value[key]);
       checkedCanonical(item);
       if (!validRegisterValue(key, item)) fail(`${label} contains an invalid value for ${key}.`);
       define(clean, key, item);
     }
+    checkEmpireSystems(clean);
     checkSize(clean);
     return clean;
   }
@@ -2229,7 +2269,7 @@ return Object.freeze({create});
     exactKeys(document.fields, Object.keys(document.fields), 'Sync fields');
     const fields = {};
     for (const key of Object.keys(document.fields)) {
-      if (PROTOTYPE_KEYS.has(key) || !ALLOWED.has(key)) fail('Sync document contains an unknown or unsafe field key.');
+      if (PROTOTYPE_KEYS.has(key) || !validKey(key)) fail('Sync document contains an unknown or unsafe field key.');
       const entry = document.fields[key];
       exactKeys(entry, ['stamp', 'value'], 'Sync field');
       if (!validStamp(entry.stamp)) fail('Sync document contains an invalid stamp.');
@@ -2238,6 +2278,7 @@ return Object.freeze({create});
       checkedCanonical(value);
       define(fields, key, { stamp: [...entry.stamp], value });
     }
+    checkEmpireSystems(fields);
     const clean = { format: FORMAT, schemaVersion: SCHEMA_VERSION, scope, fields };
     checkSize(clean);
     return clean;
@@ -2247,10 +2288,12 @@ return Object.freeze({create});
     exactKeys(state, ['document', 'observed'], 'Sync state');
     const document = validateDocument(state.document, scope);
     const observed = validateFlat(state.observed, 'Observed values');
+    checkEmpireSystems(document.fields, observed);
+    checkSize({ document, observed });
     return { document, observed };
   }
 
-  function pick(object, key) { return isRecord(object) && own(object, key) ? object[key] : null; }
+  function pick(object, key) { return isRecord(object) && own(object, key) ? dataAt(object, key) : null; }
   function getAt(root, path) {
     let value = root;
     for (const part of path) {
@@ -2280,6 +2323,95 @@ return Object.freeze({create});
     'attackRetries.produceMissing': ['attackRetries', 'produceMissing'],
     'attackRetries.maxRetries': ['attackRetries', 'maxRetries'],
   });
+
+  // The envelope is account-bound. Names, the global actuator switch and all runtime
+  // data remain local; only the explicit per-field policy below reaches the wire.
+  function empireConfig(backup) {
+    const empire = pick(backup, 'empire');
+    if (empire === null) return null;
+    if (!isRecord(empire)) fail('Empire backup must be an object.');
+    exactKeys(empire, Object.keys(empire), 'Empire backup');
+    const scope = pick(backup, 'profile');
+    if (!scopeValid(scope) || pick(empire, 'scope') !== scope) fail('Empire backup scope does not match its profile.');
+    const config = pick(empire, 'config');
+    if (!isRecord(config)) fail('Empire config must be an object.');
+    exactKeys(config, Object.keys(config), 'Empire config');
+    if (pick(config, 'schemaVersion') !== 1) fail('Unsupported empire config schema.');
+    if (own(config, 'enabled') && typeof pick(config, 'enabled') !== 'boolean') fail('Empire enabled must be a boolean.');
+    const rawTargets = own(config, 'fleetTargets') ? pick(config, 'fleetTargets') : {};
+    if (!isRecord(rawTargets)) fail('Empire fleet targets must be an object.');
+    exactKeys(rawTargets, Object.keys(rawTargets), 'Empire fleet targets');
+    const targets = {};
+    for (const id of SHIPS) {
+      const target = own(rawTargets, id) ? pick(rawTargets, id) : 0;
+      if (!integer(target, 0, 1000000)) fail(`Empire fleet target ${id} is invalid.`);
+      define(targets, id, target);
+    }
+    const rawSystems = own(config, 'systems') ? pick(config, 'systems') : {};
+    if (!isRecord(rawSystems)) fail('Empire systems must be an object.');
+    exactKeys(rawSystems, Object.keys(rawSystems), 'Empire systems');
+    if (Object.keys(rawSystems).length > MAX_EMPIRE_SYSTEMS) fail('Empire exceeds the 1024 systems limit.');
+    const systems = {};
+    for (const key of Object.keys(rawSystems)) {
+      if (!UUID.test(key)) fail('Empire contains an invalid system UUID.');
+      const id = key.toLowerCase();
+      if (own(systems, id)) fail('Empire contains colliding system UUIDs.');
+      const row = pick(rawSystems, key);
+      if (!isRecord(row)) fail('Empire system must be an object.');
+      exactKeys(row, Object.keys(row), 'Empire system');
+      const role = own(row, 'role') ? pick(row, 'role') : 'balanced';
+      const enabled = own(row, 'enabled') ? pick(row, 'enabled') : false;
+      if (!EMPIRE_ROLES.has(role) || typeof enabled !== 'boolean') fail('Empire system policy is invalid.');
+      define(systems, id, { row, role, enabled });
+    }
+    return { config, scope, targets, systems };
+  }
+
+  function projectEmpire(backup, result) {
+    const empire = empireConfig(backup);
+    // A not-yet-mounted runtime is not an intentional deletion. A present config
+    // always projects all four targets, even when its systems map is empty.
+    if (!empire) return;
+    for (const id of SHIPS) define(result, `empire.fleetTargets.${id}`, empire.targets[id]);
+    for (const [id, row] of Object.entries(empire.systems)) {
+      define(result, `empire.systems.${id}.role`, row.role);
+      define(result, `empire.systems.${id}.enabled`, row.enabled);
+    }
+  }
+
+  function overlayEmpire(backup, incoming) {
+    const keys = Object.keys(incoming).filter(empireKey);
+    if (!keys.length) return;
+    if (!scopeValid(pick(backup, 'profile'))) fail('Empire backup requires a valid profile scope.');
+    const local = empireConfig(backup);
+    let config;
+    if (local) {
+      config = local.config;
+      define(config, 'fleetTargets', copy(local.targets));
+      const systems = {};
+      for (const [id, { row, role, enabled }] of Object.entries(local.systems)) {
+        define(systems, id, { ...row, role, enabled });
+      }
+      define(config, 'systems', systems);
+      if (!own(config, 'enabled')) define(config, 'enabled', false);
+    } else {
+      config = { schemaVersion: 1, enabled: false,
+        fleetTargets: Object.fromEntries(SHIPS.map(id => [id, 0])), systems: {} };
+      define(backup, 'empire', { scope: pick(backup, 'profile'), config });
+    }
+    for (const key of keys) {
+      const value = incoming[key];
+      const match = EMPIRE_SYSTEM_KEY.exec(key);
+      if (match) {
+        const [, id, field] = match;
+        if (!own(config.systems, id)) define(config.systems, id, { name: '', role: 'balanced', enabled: false });
+        define(config.systems[id], field, value === null ? (field === 'role' ? 'balanced' : false) : value);
+      } else {
+        define(config.fleetTargets, key.slice('empire.fleetTargets.'.length), value === null ? 0 : value);
+      }
+    }
+    if (Object.keys(config.systems).length > MAX_EMPIRE_SYSTEMS) fail('Empire exceeds the 1024 systems limit.');
+  }
 
   function project(backup) {
     if (!isRecord(backup)) fail('Backup must be an object.');
@@ -2317,6 +2449,7 @@ return Object.freeze({create});
     });
     define(result, 'attackRetries.produceMissing', pick(retries, 'produceMissing'));
     define(result, 'attackRetries.maxRetries', pick(retries, 'maxRetries'));
+    projectEmpire(backup, result);
     return copy(result);
   }
 
@@ -2324,7 +2457,9 @@ return Object.freeze({create});
     if (!isRecord(backup)) fail('Backup must be an object.');
     const incoming = validateFlat(values);
     const result = copy(backup);
+    overlayEmpire(result, incoming);
     for (const [key, value] of Object.entries(incoming)) {
+      if (empireKey(key)) continue;
       let path = SIMPLE_PATHS[key];
       if (key.startsWith('settings.shipMinimums.')) path = ['settings', 'shipMinimums', key.slice('settings.shipMinimums.'.length)];
       else if (key.startsWith('notifications.events.')) path = ['notifications', 'events', key.slice('notifications.events.'.length)];
@@ -2378,13 +2513,13 @@ return Object.freeze({create});
 
   function create(options) {
     if (!isRecord(options)) fail('create requires an options object.');
-    const actor = options.actor;
-    const scope = options.scope;
+    const actor = pick(options, 'actor');
+    const scope = pick(options, 'scope');
     if (!actorValid(actor)) fail('Invalid sync actor.');
     if (!scopeValid(scope)) fail('Invalid sync scope.');
-    const now = options.now === undefined ? () => Date.now() : options.now;
+    const now = !own(options, 'now') || pick(options, 'now') === undefined ? () => Date.now() : pick(options, 'now');
     if (typeof now !== 'function') fail('now must be a function.');
-    const loaded = validateState(options.state === undefined ? null : options.state, scope);
+    const loaded = validateState(own(options, 'state') ? pick(options, 'state') : null, scope);
     let fields = loaded.document ? copy(loaded.document.fields) : {};
     let observed = copy(loaded.observed);
     let lastMs = -1;
@@ -2418,37 +2553,53 @@ return Object.freeze({create});
         lastMs = stamp[0]; lastCounter = stamp[1];
       }
     }
+    function transaction(action) {
+      const before = { fields, observed, lastMs, lastCounter };
+      fields = copy(fields); observed = copy(observed);
+      try {
+        action();
+        checkEmpireSystems(fields, observed);
+        const result = makeDocument();
+        checkSize({ document: result, observed });
+        return result;
+      } catch (error) {
+        ({ fields, observed, lastMs, lastCounter } = before);
+        throw error;
+      }
+    }
     function capture(flatValues) {
       const incoming = validateFlat(flatValues);
-      const allKeys = new Set([...Object.keys(incoming), ...Object.keys(observed)]);
-      for (const key of [...allKeys].sort()) {
-        const present = own(incoming, key);
-        if (!present && !own(observed, key)) continue;
-        const value = present ? incoming[key] : null;
-        const hasObserved = own(observed, key);
-        const sameObserved = hasObserved && equal(observed[key], value);
-        const current = fields[key];
-        const sameRegister = current && equal(current.value, value);
-        if (!current) {
-          write(key, value, !hasObserved || sameObserved ? [0, 0, actor] : nextStamp());
-          define(observed, key, copy(value));
-        } else if (!hasObserved) {
-          // A loaded remote register without an observation is authoritative until the caller
-          // accepts it; the current browser value may just be an old local default.
-          define(observed, key, copy(value));
-        } else if (sameRegister) {
-          define(observed, key, copy(value));
-        } else if (sameObserved) {
-          // A merge can replace the register before the caller applies it. Retain the observation
-          // until the projected backup matches the merged value.
-          continue;
-        } else {
-          write(key, value);
-          define(observed, key, copy(value));
+      const hasEmpire = Object.keys(incoming).some(empireKey);
+      return transaction(() => {
+        const allKeys = new Set([...Object.keys(incoming), ...Object.keys(observed)]);
+        for (const key of [...allKeys].sort()) {
+          if (!hasEmpire && empireKey(key)) continue;
+          const present = own(incoming, key);
+          if (!present && !own(observed, key)) continue;
+          const value = present ? incoming[key] : null;
+          const hasObserved = own(observed, key);
+          const sameObserved = hasObserved && equal(observed[key], value);
+          const current = fields[key];
+          const sameRegister = current && equal(current.value, value);
+          if (!current) {
+            write(key, value, !hasObserved || sameObserved ? [0, 0, actor] : nextStamp());
+            define(observed, key, copy(value));
+          } else if (!hasObserved) {
+            // A loaded remote register without an observation is authoritative until the caller
+            // accepts it; the current browser value may just be an old local default.
+            define(observed, key, copy(value));
+          } else if (sameRegister) {
+            define(observed, key, copy(value));
+          } else if (sameObserved) {
+            // A merge can replace the register before the caller applies it. Retain the observation
+            // until the projected backup matches the merged value.
+            continue;
+          } else {
+            write(key, value);
+            define(observed, key, copy(value));
+          }
         }
-      }
-      checkSize(makeDocument());
-      return makeDocument();
+      });
     }
     function merge(documents) {
       const list = Array.isArray(documents) ? documents : [documents];
@@ -2466,7 +2617,8 @@ return Object.freeze({create});
         }
       }
       const candidate = makeDocument(nextFields);
-      checkSize(candidate);
+      checkEmpireSystems(nextFields, observed);
+      checkSize({ document: candidate, observed });
       fields = nextFields;
       for (const entry of Object.values(fields)) {
         const [ms, counter] = entry.stamp;
@@ -2475,15 +2627,21 @@ return Object.freeze({create});
       return copy(candidate);
     }
     function accept(flatValues) {
-      observed = validateFlat(flatValues, 'Accepted values');
+      const incoming = validateFlat(flatValues, 'Accepted values');
+      if (!Object.keys(incoming).some(empireKey)) {
+        for (const key of Object.keys(observed).filter(empireKey)) define(incoming, key, copy(observed[key]));
+      }
+      checkEmpireSystems(fields, incoming);
+      checkSize({ document: makeDocument(), observed: incoming });
+      observed = incoming;
       return copy(observed);
     }
     function promoteSeeds() {
-      for (const key of Object.keys(fields).sort()) {
-        if (fields[key].stamp[0] === 0 && fields[key].stamp[1] === 0) write(key, fields[key].value);
-      }
-      checkSize(makeDocument());
-      return makeDocument();
+      return transaction(() => {
+        for (const key of Object.keys(fields).sort()) {
+          if (fields[key].stamp[0] === 0 && fields[key].stamp[1] === 0) write(key, fields[key].value);
+        }
+      });
     }
     function document() { return copy(makeDocument()); }
     function state() {
@@ -2515,7 +2673,7 @@ return Object.freeze({create});
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.14.3';
+  const SCRIPT_VERSION = '1.15.0';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -2686,6 +2844,7 @@ return Object.freeze({create});
       remove: () => localStorage.removeItem(key),
     });
     let lastDriveCode = '';
+    let lastEmpireCode = '';
     let onChange = null;
     function record(name) {
       const result = core.record(name);
@@ -2718,7 +2877,16 @@ return Object.freeze({create});
       if (Object.hasOwn(names, code)) record(names[code]);
       else if (failures.includes(code)) record('drive.error');
     }
-    return { ...core, record, observeHelperEvent, observeDriveStatus,
+    function observeEmpireStatus(code) {
+      const codes = ['installation_failed', 'socket_unobserved', 'awaiting_init', 'missing_init',
+        'format_rejected', 'observation_rejected', 'census_received', 'connection_lost', 'incomplete'];
+      if (typeof code !== 'string' || !codes.includes(code) || code === lastEmpireCode) return;
+      // Only observed state transitions are counted. No past startup history is
+      // replayed after opt-in, and no account, timing or DTO enters this method.
+      lastEmpireCode = code;
+      record('empire.observer.' + code);
+    }
+    return { ...core, record, observeHelperEvent, observeDriveStatus, observeEmpireStatus,
       onChange: listener => { onChange = typeof listener === 'function' ? listener : null; } };
   }
 
@@ -2736,7 +2904,7 @@ return Object.freeze({create});
     const label = el('label', undefined, 'count-away');
     const toggle = el('input'); toggle.type = 'checkbox'; toggle.dataset.action = 'metrics-toggle';
     label.append(toggle, el('span', 'Medir uso y errores en este navegador'));
-    const explanation = el('p', 'Opcional y desactivado inicialmente. Muestra contadores de funciones y tipos de error de los últimos 30 días. No guarda mensajes, credenciales, jugadores, coordenadas ni direcciones web. No envía datos a ningún servidor.', 'hint');
+    const explanation = el('p', 'Opcional y desactivado inicialmente. Muestra contadores de funciones y tipos de error de los últimos 30 días, incluida la apertura de Imperio y los cambios de estado de su lector: instalación, conexión, espera del estado inicial, censo recibido o datos rechazados/incompletos. No guarda mensajes, credenciales, jugadores, identificadores de cuenta o sistema, coordenadas ni direcciones web. No envía datos a ningún servidor.', 'hint');
     const status = el('p', '', 'backup-status'); status.dataset.field = 'metrics-status';
     status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
     const actions = el('div', undefined, 'backup-actions');
@@ -2748,7 +2916,7 @@ return Object.freeze({create});
     preview.id = 'oldlight-metrics-report'; preview.setAttribute('aria-label', 'Informe local de métricas en JSON');
     preview.style.cssText = 'width:100%;max-width:100%;box-sizing:border-box;resize:vertical';
     previewButton.setAttribute('aria-controls', preview.id); previewButton.setAttribute('aria-expanded', 'false');
-    const note = el('p', 'Puedes revisar el informe antes de compartirlo manualmente. No se incluye en las copias ni se sincroniza por Drive. Desactivar también borra los contadores locales. Los días antiguos se descartan al registrar nuevos eventos.', 'hint');
+    const note = el('p', 'Puedes revisar el informe antes de compartirlo manualmente. No se incluye en las copias ni se sincroniza por Drive. Desactivar también borra los contadores locales. El informe incluye versión, días UTC y contadores con categorías fijas; no contiene tramas del juego ni textos de error. Los estados imperiales repetidos no se vuelven a contar hasta que cambian; al activar no se recupera el historial anterior. Los días antiguos se descartan al registrar nuevos eventos.', 'hint');
     box.append(heading, label, explanation, actions, status, preview, note);
     shadow.querySelector('[data-page="data"]').append(box);
     function refresh(message = '') {
@@ -3935,6 +4103,11 @@ return Object.freeze({create});
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.15.0', title: 'Sincronización imperial y diagnósticos', changes: [
+        'Drive sincroniza objetivos globales, roles y Atender por cuenta y galaxia. Activar o detener Imperio sigue siendo local; no comparte órdenes ni recursos.',
+        'Actualiza todos los Helpers del perfil y reabre ventanas de Drive antiguas: los clientes anteriores rechazan los nuevos campos sin sobrescribirlos.',
+        'Métricas locales añade categorías del lector y distingue falta de init de formato inválido. Sigue siendo opcional, sin enviar datos ni guardar payloads o secretos.',
+      ] },
       { version: '1.14.3', title: 'Rendimiento con Imperio activo', changes: [
         'Agrupa las lecturas del censo en cada comprobación y elimina consultas de permisos de misiones cuando no hay una misión pendiente.',
         'El panel reutiliza el formato de números, actualiza solo el texto que cambia y no procesa datos mientras está oculto.',
@@ -4640,12 +4813,23 @@ return Object.freeze({create});
     layoutHelper();
   }
 
+  function exportEmpirePolicyForBackup(scope) {
+    if (!empireController) return null;
+    const state = empireController.state();
+    // Account changes can precede the next coordinator tick. Never attach the
+    // previous account's policy to a backup or journal for the new account.
+    if (!scope || state.scope !== scope || state.storageError) return null;
+    return { scope, config: empireController.exportConfig() };
+  }
+
   function createBackup() {
+    const profile = missionContext().scope;
+    const empire = exportEmpirePolicyForBackup(profile);
     return {
       format: 'old-light-auto-upgrade-backup',
       schemaVersion: 1,
       scriptVersion: SCRIPT_VERSION,
-      profile: missionContext().scope,
+      profile,
       exportedAt: new Date().toISOString(),
       settings: normalizeSettings(settings),
       notifications: notifier.exportConfig(),
@@ -4653,7 +4837,7 @@ return Object.freeze({create});
       fleetMissions: fleetWait.exportConfig(),
       attackRetries: attackRetry.exportConfig(),
       drive: driveBackup?.exportConfig?.() || { clientId: '', autoBackup: false },
-      ...(empireController?.state().scope ? { empire: { scope: empireController.state().scope, config: empireController.exportConfig() } } : {}),
+      ...(empire ? { empire } : {}),
     };
   }
 
@@ -4715,7 +4899,7 @@ return Object.freeze({create});
           || !globalThis.OldLightEmpireCore) throw backupError('La copia imperial pertenece a otra cuenta o no es compatible.');
       empire = { scope: value.empire.scope, config: globalThis.OldLightEmpireCore.normalizeConfig(value.empire.config) };
     }
-    return { settings: normalizeSettings(next), notifications, drive, levelTargets: targets, fleetMissions: missions, attackRetries: retries, ...(empire ? { empire } : {}) };
+    return { settings: normalizeSettings(next), notifications, drive, levelTargets: targets, fleetMissions: missions, attackRetries: retries, ...(empire ? { profile: empire.scope, empire } : {}) };
   }
 
   function applyBackup(value) {
@@ -4776,17 +4960,44 @@ return Object.freeze({create});
   }
 
   // BEGIN SHARED PREFERENCES INTEGRATION
+  function applySyncedEmpirePolicy(value) {
+    if (!value) return false;
+    const state = empireController?.state();
+    if (!state || state.storageError || state.scope !== missionContext().scope || value.scope !== state.scope) {
+      const cause = new Error('La sincronización espera a que se cargue la política imperial de esta cuenta.');
+      cause.code = 'busy'; throw cause;
+    }
+    const current = empireController.exportConfig();
+    const incoming = globalThis.OldLightEmpireCore.normalizeConfig(value.config);
+    const systems = Object.fromEntries(Object.entries(incoming.systems).map(([id, policy]) => [id, {
+      // Display names and the top-level execution switch always stay local.
+      name: current.systems[id]?.name || '', role: policy.role, enabled: policy.enabled,
+    }]));
+    const next = { ...current, fleetTargets: incoming.fleetTargets, systems };
+    if (JSON.stringify(next) === JSON.stringify(current)) return false;
+    empireController.setConfig(next); // Revokes the old plan before another order.
+    return true;
+  }
+
   function applySyncedPreferences(value) {
     const editor = host?.shadowRoot?.activeElement;
-    if (missionAdapter.isBusy() || attackRetry.isBusy() ||
-        (editor?.matches('input:not([type=checkbox]):not([type=radio]),textarea,[contenteditable="true"]')
+    if (importingBackup || pending || empireController?.isBusy() || missionAdapter.isBusy() || attackRetry.isBusy() ||
+        (editor?.matches('input:not([type=checkbox]):not([type=radio]),select,textarea,[contenteditable="true"]')
           && Date.now() - lastPreferenceEditAt < 1500) || host?.shadowRoot?.querySelector('.is-sorting')) {
       const cause = new Error('La sincronización espera a que termine la edición o el envío actual.');
       cause.code = 'busy'; throw cause;
     }
     const next = validateBackup(value);
+    const empireState = empireController?.state();
+    if (next.empire && (!empireState || empireState.storageError || empireState.scope !== next.empire.scope
+        || empireState.scope !== missionContext().scope)) {
+      const cause = new Error('La sincronización espera a que se cargue la política imperial de esta cuenta.');
+      cause.code = 'busy'; throw cause;
+    }
     const previous = { settings, raw: localStorage.getItem(KEY), notifications: notifier.exportConfig(),
-      targets: levelTargets.exportConfig(), retries: attackRetry.backupCheckpoint(), missions: fleetWait.backupCheckpoint() };
+      targets: levelTargets.exportConfig(), retries: attackRetry.backupCheckpoint(), missions: fleetWait.backupCheckpoint(),
+      empire: empireController?.exportConfig() };
+    let empireChanged = false;
     importingBackup = true;
     try {
       if (JSON.stringify(settings) !== JSON.stringify(next.settings)) {
@@ -4798,6 +5009,7 @@ return Object.freeze({create});
       if (JSON.stringify(previous.notifications) !== JSON.stringify(next.notifications)) notifier.importConfig(next.notifications);
       if (JSON.stringify(previous.targets) !== JSON.stringify(next.levelTargets)) levelTargets.importConfig(next.levelTargets);
       attackRetry.importPreferences(next.attackRetries);
+      empireChanged = applySyncedEmpirePolicy(next.empire);
       if (settings.enabled && !previous.settings.enabled) { error = ''; unconfirmed = 0; }
       syncSettingsTabs();
     } catch (caught) {
@@ -4807,8 +5019,26 @@ return Object.freeze({create});
       try { levelTargets.importConfig(previous.targets); } catch { restored = false; }
       try { fleetWait.restoreCheckpoint(previous.missions); } catch { restored = false; }
       try { attackRetry.restoreCheckpoint(previous.retries); } catch { restored = false; }
+      try {
+        if (previous.empire && (empireChanged || JSON.stringify(empireController?.exportConfig()) !== JSON.stringify(previous.empire))) {
+          empireController.setConfig(previous.empire);
+        }
+      } catch { restored = false; }
       settings = previous.settings;
-      if (!restored) { settings.enabled = false; error = 'Falló la recuperación de ajustes. Automatización pausada.'; }
+      if (!restored) {
+        settings.enabled = false;
+        empireController?.suspend(2147483647);
+        // Best-effort durable stop as well as the in-memory hold. A completely
+        // broken store cannot guarantee safety across a reload; say so plainly.
+        let pauseSaved = false;
+        try { localStorage.setItem(KEY, JSON.stringify(settings)); pauseSaved = true; } catch { /* Keep the session paused. */ }
+        try {
+          if (empireController) empireController.setConfig({ ...empireController.exportConfig(), enabled: false });
+        } catch { /* The Helper pause and in-memory hold remain in effect. */ }
+        error = pauseSaved
+          ? 'Falló la recuperación de ajustes. Automatización pausada; revisa la política antes de reactivarla.'
+          : 'Falló la recuperación de ajustes. Pausa solo en esta sesión: no pudo guardarse. Revisa el almacenamiento antes de recargar.';
+      }
       restoreNumericInputs();
       const cause = new Error('No se pudieron guardar los ajustes sincronizados. Se reintentará.');
       cause.code = 'storage_error'; throw cause;
@@ -14748,6 +14978,34 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       && !host?.shadowRoot?.activeElement?.matches('input,select,textarea,[contenteditable="true"]'));
   }
 
+  function observeEmpireStartup() {
+    // Read only fixed bridge flags/categories; never pass a world snapshot or
+    // an exception to metrics. These diagnostics cannot authorize any action.
+    try {
+      const state = globalThis.OldLightEmpireBridge?.status?.();
+      const boot = globalThis.OldLightEmpireBootstrapStatus?.();
+      const value = (object, key) => {
+        if (!object || typeof object !== 'object') return undefined;
+        const entry = Object.getOwnPropertyDescriptor(object, key);
+        return entry && Object.hasOwn(entry, 'value') ? entry.value : undefined;
+      };
+      const reason = value(state, 'reason');
+      let code = null;
+      if (value(boot, 'phase') === 'unavailable' || ['observer-injection-unavailable', 'observer-permission-unavailable'].includes(reason)) code = 'installation_failed';
+      else if (reason === 'missing-init') code = 'missing_init';
+      else if (reason === 'malformed') code = 'format_rejected';
+      else if (['invalid-observation', 'out-of-order-observation'].includes(reason)) code = 'observation_rejected';
+      else if (['connection-lost', 'session-lost'].includes(reason)) code = 'connection_lost';
+      else if (reason === 'incomplete-data') code = 'incomplete';
+      else if (value(state, 'installed') === true && value(state, 'observed') === true) {
+        if (value(state, 'connected') === true && value(state, 'complete') === true) code = 'census_received';
+        else if (value(state, 'connectionObserved') === false) code = 'socket_unobserved';
+        else if (value(state, 'connectionObserved') === true && reason === 'awaiting-init') code = 'awaiting_init';
+      }
+      metrics.observeEmpireStatus(code);
+    } catch (_) { /* Local metrics must never interrupt the Helper or native callback. */ }
+  }
+
   function updateEmpireState() {
     if (!empireController) return;
     const context = missionContext();
@@ -14762,7 +15020,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     if (!empireController || !globalThis.OldLightEmpirePanel) return;
     empirePanel = globalThis.OldLightEmpirePanel.create({ document, core: globalThis.OldLightEmpireCore,
       getState: () => empireController.state(),
-      setConfig: value => { const saved = empireController.setConfig(value); schedule(); return saved; },
+      setConfig: value => { const saved = empireController.setConfig(value); settingsChanged(); schedule(); return saved; },
       canEnable: () => empireAdapter.isAvailable(),
       isVisible: () => settings.activeTab === 'empire' && !settings.minimized && !document.hidden && !host?.hidden });
     empirePanel.mount(shadow.querySelector('[data-page="empire"]'));
@@ -14787,7 +15045,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       empireController = runtime.create({ core, adapter: empireAdapter, onChange: schedule,
         read: key => { const value = localStorage.getItem(key); return value === null ? undefined : JSON.parse(value); },
         write: (key, value) => localStorage.setItem(key, JSON.stringify(value)) });
-      bridge?.subscribe?.(schedule);
+      bridge?.subscribe?.(() => { observeEmpireStartup(); schedule(); });
       document.addEventListener('pointerdown', event => {
         if (event.isTrusted && !event.composedPath().includes(host)) empireController.suspend();
       }, true);
@@ -14796,6 +15054,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       }, true);
     }
   } catch (_) { /* Unavailable native observation never enables imperial orders. */ }
+  observeEmpireStartup();
   // END EMPIRE INTEGRATION
 
   // Los cambios en disabled disparan una revisión inmediata. También cubre

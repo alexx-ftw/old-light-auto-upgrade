@@ -215,6 +215,9 @@
     try {
       const value = boundedJson(payloadText);
       if (!Array.isArray(value) || value.length !== 2 || value[0] !== event) fail();
+      // A recognized delta cannot be projected onto a player before its init.
+      // Validate the bounded JSON envelope/object, but retain no payload or IDs.
+      if (event === 'world.delta' && selfId === '') { record(value[1]); return { kind: 'missing-init' }; }
       return event === 'world.init' ? projectInit(value[1]) : projectDelta(value[1], selfId);
     } catch { return { kind: 'invalid' }; }
   }
@@ -235,6 +238,7 @@
       if (event.kind === 'ignore') return false;
       if (event.kind === 'invalid') { invalidate('malformed'); return true; }
       if (event.kind === 'lost') { invalidate('session-lost'); return true; }
+      if (event.kind === 'missing-init') { invalidate('missing-init'); return true; }
       const observedAt = now();
       if (!Number.isSafeInteger(observedAt) || observedAt < 0) { invalidate('malformed'); return true; }
       if (event.kind === 'init') {

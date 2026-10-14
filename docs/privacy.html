@@ -15,7 +15,7 @@
       <p class="eyebrow">OLD LIGHT HELPER</p>
       <h1>Política de privacidad</h1>
       <p>Esta página describe el tratamiento de datos del userscript independiente Old Light Helper y de su página de copias.</p>
-      <p class="note">Actualizada el <time datetime="2026-10-13">13 de octubre de 2026</time>.</p>
+      <p class="note">Actualizada el <time datetime="2026-10-14">14 de octubre de 2026</time>.</p>
     </header>
     <section aria-labelledby="local-heading">
       <h2 id="local-heading">Ajustes locales y archivos de copia</h2>
@@ -24,7 +24,7 @@
     </section>
     <section aria-labelledby="empire-heading">
       <h2 id="empire-heading">Gestión imperial</h2>
-      <p>Desde 1.14.0, Imperio puede coordinar los sistemas propios de la cuenta y galaxia seleccionadas. Guarda objetivos de flota, roles y sistemas habilitados localmente, separados por cuenta y galaxia. Esta política se incluye en las copias completas, pero no en la sincronización automática de preferencias; al restaurarla queda detenida.</p>
+      <p>Desde 1.14.0, Imperio puede coordinar los sistemas propios de la cuenta y galaxia seleccionadas. Guarda objetivos de flota, roles y sistemas habilitados localmente, separados por cuenta y galaxia. Esta política se incluye en las copias completas; al restaurarla queda detenida. Desde 1.15.0, la sincronización imperial comparte también los objetivos de flota, roles y Atender por UUID, dentro de la misma cuenta y galaxia. No comparte el interruptor local de activación, nombres de sistemas, recursos, observaciones, planes ni órdenes. Esta ampliación no añade permisos ni credenciales.</p>
       <p>Un observador mínimo lee los eventos de estado de la conexión nativa que el propio juego ya utiliza. Conserva en memoria campos necesarios de identidad de juego, propiedad, sistemas, recursos, colas y tránsitos; no guarda un historial de tramas, no abre otra conexión y no envía nada a través de ella. Descarta autenticación, cookies, tokens y mensajes de chat. Limita el tamaño de los datos y valida su estructura antes de utilizarlos.</p>
       <p>Desde 1.14.1, el permiso GM_addElement inserta únicamente el lector estático de estado. El Helper y Drive siguen en el contexto aislado del gestor; esta inserción no añade servidores, acceso a credenciales ni permisos de red.</p>
       <p>Los datos seleccionados cruzan un puerto privado hacia el Helper aislado. El observador no puede acceder al almacenamiento GM ni al token de Google Drive, que nunca se entrega al código de la página. Las observaciones económicas no se incluyen en las copias ni en las métricas y no se transmiten a ningún servicio nuevo. Si no se puede verificar la identidad, propiedad o actualidad de los datos, se bloquean los pedidos imperiales.</p>
@@ -49,7 +49,7 @@
     </section>
     <section aria-labelledby="metrics-heading">
       <h2 id="metrics-heading">Métricas locales opcionales</h2>
-      <p>En Datos → Métricas locales puedes activar contadores de funciones usadas y categorías fijas de errores. Están desactivados inicialmente y se guardan únicamente en el almacenamiento de este navegador, agrupados por día UTC. El informe muestra los últimos 30 días; los días anteriores se eliminan del almacenamiento al registrar un nuevo evento. La limpieza no puede ejecutarse mientras el navegador está cerrado. No contienen cuentas, nombres de jugadores, coordenadas, mensajes, credenciales, direcciones web, trazas de error ni identificadores personales.</p>
+      <p>En Datos → Métricas locales puedes activar contadores de funciones usadas y categorías fijas de errores. Desde 1.15.0 incluyen también la apertura de Imperio y transiciones entre categorías fijas de su lector, como espera de conexión, falta de estado inicial o formato rechazado. Repetir el mismo estado no incrementa el contador y activar la medición no recupera el historial previo. Están desactivados inicialmente y se guardan únicamente en el almacenamiento de este navegador, agrupados por día UTC. El informe muestra los últimos 30 días; los días anteriores se eliminan del almacenamiento al registrar un nuevo evento. La limpieza no puede ejecutarse mientras el navegador está cerrado. No contienen cuentas, nombres de jugadores, coordenadas, mensajes, credenciales, direcciones web, trazas de error ni identificadores personales.</p>
       <p>No se envían a un servidor, no se sincronizan con Google Drive y no se incluyen en las copias de configuración. Puedes revisar el informe JSON y descargarlo para compartirlo manualmente. Desactivar la medición borra sus contadores; el botón Borrar y desactivar también los elimina y detiene la medición, sin cambiar la configuración del helper. Si el navegador impide guardar o borrar, el helper informa del fallo y detiene la medición.</p>
     </section>
     <section aria-labelledby="services-heading">

@@ -13,12 +13,16 @@
   const MAX_COUNT = 1000000;
   const DAY_MS = 86400000;
   const EVENTS = Object.freeze([
-    'helper.loaded', 'ui.tab.buildings', 'ui.tab.fleet', 'ui.tab.notifications', 'ui.tab.data',
+    'helper.loaded', 'ui.tab.empire', 'ui.tab.buildings', 'ui.tab.fleet', 'ui.tab.notifications', 'ui.tab.data',
     'ui.fleet.minimums', 'ui.fleet.campaigns', 'ui.fleet.missions', 'settings.changed',
     'backup.exported', 'backup.imported', 'backup.failed', 'automation.sent', 'automation.confirmed',
     'automation.unconfirmed', 'automation.failed', 'automation.rejected', 'automation.paused',
     'mission.sent', 'mission.uncertain', 'drive.connected', 'drive.synced', 'drive.retry', 'drive.error',
     'error.runtime', 'error.storage',
+    'empire.observer.installation_failed', 'empire.observer.socket_unobserved',
+    'empire.observer.awaiting_init', 'empire.observer.missing_init',
+    'empire.observer.format_rejected', 'empire.observer.observation_rejected',
+    'empire.observer.census_received', 'empire.observer.connection_lost', 'empire.observer.incomplete',
   ]);
   const EVENT_SET = new Set(EVENTS);
   const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
