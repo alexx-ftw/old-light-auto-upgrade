@@ -296,7 +296,7 @@
     assertCurrent(expected);
     // A later edit is picked up by the journal even when this cycle's upload was in flight.
     syncPending = startedRevision !== syncChangeRevision; syncFailures = 0; syncLastAt = Date.now();
-    status('synced');
+    status(syncPending ? 'sync_pending' : 'synced');
   }
   // END AUTOMATIC SETTINGS SYNC
 
@@ -348,7 +348,8 @@
     for (const id of ['client-id', 'choose-client-file', 'remember-account', 'auto-backup']) ui[id].disabled = !editable || revoking;
     ui['clear-client'].disabled = !editable || revoking || (!config.clientId && config.clientIdDraft === null);
     let connection = STATUS[connectionCode];
-    if (authPending || revoking) connection = STATUS[connectionCode];
+    if (!resumeAllowed) connection = 'Esta sesión se ha desconectado. Cierra esta ventana y vuelve a abrir Drive desde el helper para iniciar sesión.';
+    else if (authPending || revoking) connection = STATUS[connectionCode];
     else if (isAuthorized() && restoredAuthorizationId && !accountVerified) connection = STATUS[statusCode === 'sync_account' ? 'sync_account' : 'verifying'];
     else if (authorized) {
       connection = expiresAt - Date.now() <= 300000 ? STATUS.renew_soon : STATUS.connected;
@@ -458,7 +459,7 @@
     try { port?.close(); } catch (_) { /* already closed */ }
     port = null;
     if (forgetAuthorization) { resumeAllowed = false; clearInterval(readyTimer); clearAuth(); }
-    status(forgetAuthorization ? 'bridge_lost' : 'bridge_reconnecting');
+    status(forgetAuthorization ? 'disconnected' : 'bridge_reconnecting');
   }
 
   function rpc(type, fields = {}) {
@@ -558,7 +559,11 @@
       return;
     }
     if (message.type === 'settings-changed' && syncEnabled() && message.sharedChanged !== false) {
-      syncChangeRevision += 1; syncPending = true; scheduleSync(1500); render();
+      syncChangeRevision += 1; syncPending = true; scheduleSync(1500);
+      // Report unsent edits immediately, without hiding an active operation or error.
+      if (isAuthorized() && ['connected', 'synced', 'sync_pending', 'listed', 'saved', 'unchanged', 'restored'].includes(statusCode)) {
+        status('sync_pending');
+      } else render();
     }
     if (message.type === 'settings-changed' && config.autoBackup && message.backupChange !== false) {
       dirty = true;

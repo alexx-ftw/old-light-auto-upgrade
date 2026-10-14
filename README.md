@@ -1,6 +1,18 @@
 # Old Light Auto Upgrade
 
-Userscript para [Old Light](https://oldlight.io/play) que atiende primero el Resource Depot necesario y su Reactor, después da prioridad a la flota y reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.15.0**, con gestión imperial coordinada y Drive sin ventana permanente, métricas locales opcionales de uso y errores y un changelog integrado. Mantiene la infraestructura necesaria antes que la flota. Retira automáticamente las misiones vinculadas al cancelar su campaña. Reintenta las interrupciones temporales, muestra su motivo concreto y funciona en las vistas estrechas Galaxy y Movements. Permite editar las flotas de misiones y campañas, con borradores guardados automáticamente. La versión cargada aparece en la cabecera del helper, también al minimizarlo.
+Userscript para [Old Light](https://oldlight.io/play) que atiende primero el Resource Depot necesario y su Reactor, después da prioridad a la flota y reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.15.1**, con gestión imperial coordinada y Drive sin ventana permanente, métricas locales opcionales de uso y errores y un changelog integrado. Mantiene la infraestructura necesaria antes que la flota. Retira automáticamente las misiones vinculadas al cancelar su campaña. Reintenta las interrupciones temporales, muestra su motivo concreto y funciona en las vistas estrechas Galaxy y Movements. Permite editar las flotas de misiones y campañas, con borradores guardados automáticamente. La versión cargada aparece en la cabecera del helper, también al minimizarlo.
+
+## Confirmación del censo y estados de Drive (1.15.1)
+
+Antes de enviar cada pedido, Imperio captura una marca interna del censo validado. Al confirmar el pedido, usa esa referencia anterior para la barrera: rechaza observaciones anteriores al envío sin descartar la revisión nativa que acaba de confirmar la cola y el gasto. Corrige una espera innecesaria de otra revisión que podía dejar el panel en «0 de 2 sistemas» aunque el censo de confirmación ya estuviera disponible. Se mantienen identidad, propiedad, HUD y datos posteriores al envío como condiciones para otro pedido. La captura del usuario motivó el diagnóstico; su causa concreta todavía requiere confirmación. Alcance y pruebas en [validación de la barrera del censo](docs/empire-order-validation.md).
+
+### Estados de sincronización más claros
+
+Un ajuste pendiente ya no conserva el aviso **Drive sincronizado**. Esto incluye ediciones realizadas mientras terminaba la subida anterior: el aviso solo vuelve a sincronizado cuando el ciclo termina sin cambios posteriores pendientes. Los errores que requieren atención no se ocultan por editar otro ajuste.
+
+Al desconectar desde el Helper con la ventana de gestión abierta, Drive explica que hay que abrirla de nuevo desde el Helper. Ya no promete recuperar automáticamente una conexión que se cerró deliberadamente. La recuperación temporal conserva su comportamiento anterior. No cambia la autorización de Google, la fusión de ajustes, los permisos ni las acciones del juego. Actualiza el Helper y reabre las ventanas de Drive para cargar los textos y estados nuevos.
+
+Los fallos se reprodujeron con el motor real sobre DOM, almacenamiento y tráfico simulados, sin cuentas ni partidas reales. Alcance y comprobaciones en [validación de estados Drive](docs/drive-status-validation.md).
 
 ## Sincronización imperial y diagnósticos (1.15.0)
 
@@ -89,7 +101,7 @@ Para modificar el motor, edita `docs/drive.js` y ejecuta `node build-drive.cjs`;
 
 ## Changelog integrado (1.13.0)
 
-Pulsa **Changelog** en el pie del helper, disponible desde cualquiera de sus cinco pestañas, para abrir **Datos → Changelog · novedades**. Muestra un resumen en español de las versiones 1.15.0, 1.14.3, 1.14.2, 1.14.1, 1.14.0, 1.13.1, 1.13.0, 1.12.1, 1.12.0 y 1.11.0, basado en las secciones de este README, e identifica la versión instalada. Las notas se incluyen en el userscript y no necesitan una conexión adicional.
+Pulsa **Changelog** en el pie del helper, disponible desde cualquiera de sus cinco pestañas, para abrir **Datos → Changelog · novedades**. Muestra un resumen en español de las versiones 1.15.1, 1.15.0, 1.14.3, 1.14.2, 1.14.1, 1.14.0, 1.13.1, 1.13.0, 1.12.1, 1.12.0 y 1.11.0, basado en las secciones de este README, e identifica la versión instalada. Las notas se incluyen en el userscript y no necesitan una conexión adicional.
 
 Puedes cerrarlo con **Cerrar changelog**, **Escape**, su cabecera desplegable o pulsando otra vez el acceso del pie. Al cambiar a otra pestaña se cierra; al volver o recargar no se abre automáticamente. El cierre conserva un foco de teclado visible. Se desplaza dentro del helper y adapta sus textos al ancho disponible, sin ventanas emergentes ni avisos de actualización repetidos. El estado abierto/cerrado no se guarda, no viaja por Drive y no cambia la automatización ni las preferencias de métricas.
 

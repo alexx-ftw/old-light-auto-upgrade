@@ -140,13 +140,14 @@ function fakeNode() {
     addEventListener() {}, setAttribute() {}, remove() {}, focus() {}, click() {} };
 }
 function companion(client, fetcher) {
-  const nodes = new Map();
+  const nodes = new Map(), messages = [];
   const context = vm.createContext({ console, crypto: crypto.webcrypto, TextEncoder, TextDecoder, URL,
     Blob, Response, AbortController, Intl, setTimeout, clearTimeout, setInterval, clearInterval,
     fetch: fetcher, window: { google: null },
     document: { activeElement: null, hidden: false, getElementById: id => {
       if (!nodes.has(id)) nodes.set(id, fakeNode()); return nodes.get(id);
     }, createElement: () => fakeNode() },
+    __post: message => messages.push(clone(message)),
     __rpc: (type, data) => {
       const message = JSON.parse(data);
       if (type === 'get-sync') return JSON.stringify(client.run('get', message.account));
@@ -158,16 +159,23 @@ function companion(client, fetcher) {
   bootstrap += `
     bridgeAlive = true; configReady = true; config = { ...config, clientId: 'test-client', autoSync: true };
     capabilities = new Set(['settings-sync-v1']); token = 'unit-test-only'; expiresAt = Date.now() + 600000;
-    account = { id: 'test-account' }; port = { postMessage() {} };
+    account = { id: 'test-account' }; port = { postMessage: __post };
     rpc = async (type, fields) => JSON.parse(await __rpc(type, JSON.stringify(fields)));
     globalThis.testing = {
       sync: () => syncSettings(),
       invalidate: () => { generation++; },
-      state: () => ({ syncPending, syncLastAt, syncFailures, syncFileId, syncPublishedHash }),
+      status: code => status(code),
+      changed: sharedChanged => {
+        onPortMessage({ data: { protocol: PROTOCOL, type: 'settings-changed', sharedChanged } });
+        // Keep these direct-cycle tests deterministic; production still schedules its retry.
+        clearTimeout(syncTimer); syncTimer = null;
+      },
+      state: () => ({ syncPending, syncLastAt, syncFailures, syncFileId, syncPublishedHash,
+        statusCode, syncText: ui['sync-status'].textContent, operationText: ui.status.textContent }),
     };
   })();`;
   vm.runInContext(coreSource + '\n' + bootstrap, context);
-  return context.testing;
+  return Object.assign(context.testing, { messages });
 }
 function drive() {
   const files = new Map(); let calls = 0, writes = 0, fail = false;
@@ -211,6 +219,61 @@ test('two complete companion transports converge automatically without manual ba
   const writes = cloud.counts().writes;
   await ca.sync(); await cb.sync();
   assert.equal(cloud.counts().writes, writes, 'unchanged settings must not produce an upload loop');
+});
+
+test('a shared edit immediately reports pending before any new Drive request', async () => {
+  const cloud = drive(), a = helper(), ca = companion(a, cloud.fetch);
+  await ca.sync();
+  assert.equal(ca.state().statusCode, 'synced');
+  const before = cloud.counts();
+  a.run('edit', { 'settings.shipMinimums.marauder': 17 }); ca.changed(true);
+  assert.deepEqual(cloud.counts(), before);
+  assert.equal(ca.state().syncPending, true);
+  assert.equal(ca.state().statusCode, 'sync_pending');
+  assert.equal(ca.messages.at(-1).code, 'sync_pending');
+  assert.match(ca.state().operationText, /cambios pendientes/i);
+  assert.doesNotMatch(ca.state().syncText, /^Sincronizado/);
+  await ca.sync();
+  assert.equal(ca.state().statusCode, 'synced');
+  assert.equal(ca.state().syncPending, false);
+});
+
+test('an edit during upload keeps the finished cycle pending until the later edit is uploaded', async () => {
+  const cloud = drive(), a = helper(); let ca, edited = false;
+  ca = companion(a, async (url, options) => {
+    const response = await cloud.fetch(url, options);
+    if (!edited && ['POST', 'PATCH'].includes(options.method)) {
+      edited = true;
+      a.run('edit', { 'settings.shipMinimums.marauder': 23 }); ca.changed(true);
+      assert.equal(ca.state().statusCode, 'syncing', 'an active upload keeps its progress status');
+    }
+    return response;
+  });
+  await ca.sync();
+  assert.equal(ca.state().syncPending, true);
+  assert.equal(ca.state().statusCode, 'sync_pending');
+  assert.equal(ca.messages.at(-1).code, 'sync_pending');
+  assert.equal([...cloud.files.values()][0].body.document.fields['settings.shipMinimums.marauder'].value, 0);
+  await ca.sync();
+  assert.equal(ca.state().syncPending, false);
+  assert.equal(ca.state().statusCode, 'synced');
+  assert.equal([...cloud.files.values()][0].body.document.fields['settings.shipMinimums.marauder'].value, 23);
+});
+
+test('pending edits preserve current errors and local-only changes do not claim pending sync', async () => {
+  const cloud = drive(), a = helper(), ca = companion(a, cloud.fetch);
+  await ca.sync();
+  const before = ca.messages.length;
+  ca.changed(false);
+  assert.equal(ca.state().statusCode, 'synced');
+  assert.equal(ca.state().syncPending, false);
+  assert.equal(ca.messages.length, before);
+  for (const code of ['invalid_sync', 'sync_account', 'storage_error', 'rate_limit', 'failed', 'expired']) {
+    ca.status(code); const previous = ca.messages.length;
+    ca.changed(true);
+    assert.equal(ca.state().statusCode, code);
+    assert.equal(ca.messages.length, previous, 'pending must not conceal ' + code);
+  }
 });
 
 test('transport retains an offline edit and sends it on the next successful cycle', async () => {

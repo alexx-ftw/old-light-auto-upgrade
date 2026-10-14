@@ -658,3 +658,40 @@ for (const [name, options] of [
     .every(item => !item.data.capabilities.includes('local-authorization-v1')));
   assert.equal(env.privateMessages.some(item => ['store-authorization', 'restore-authorization'].includes(item.data.type)), false);
 });
+
+test('pending edits replace the helper synced status before the next private-runtime upload', async () => {
+  const { env, tab } = await connected();
+  tab.api.importConfig({ ...tab.api.exportConfig(), autoSync: true }); await settle();
+  env.clock.jump(1000); env.clock.timeouts();
+  await waitFor(() => tab.api.getStatus().code === 'synced', 'Initial sync must finish');
+  const requests = env.requests.length;
+  tab.api.notifyChanged({ sharedChanged: false, backupChange: false }); await settle();
+  assert.equal(tab.api.getStatus().code, 'synced', 'Local-only changes do not invalidate shared sync');
+  tab.api.notifyChanged({ sharedChanged: true, backupChange: false }); await settle();
+  assert.equal(env.requests.length, requests, 'The pending status precedes the debounce request');
+  assert.equal(tab.api.getStatus().code, 'sync_pending');
+  assert.match(tab.api.getStatus().message, /pendientes/i);
+  assertNoToken(env.statuses);
+  env.clock.jump(1500); env.clock.timeouts();
+  await waitFor(() => tab.api.getStatus().code === 'synced', 'Next completed cycle clears pending');
+  tab.api.destroy();
+});
+
+test('explicit helper disconnect gives its open private management window an actionable terminal state', async () => {
+  const { env, tab } = await connected();
+  tab.api.testing.openCompanion();
+  const popup = env.loadPopup(tab); await settle();
+  tab.api.testing.closeSession(); await settle();
+  const message = popup.nodes.get('session-status').textContent;
+  assert.match(message, /(?:abre|abrir).*(?:Drive|ventana).*helper/i);
+  assert.doesNotMatch(message, /se recuperar[áa]|mant[ée]n.*abierta/i);
+  assert.equal(popup.nodes.get('connect').disabled, true);
+  assert.equal(tab.api.getStatus().code, 'disconnected');
+  assert.equal(env.gm.get(AUTH_KEY), null);
+  const requestCount = env.requests.length;
+  env.clock.jump(65000); env.clock.intervals(3000); env.clock.timeouts(); await settle();
+  assert.equal(env.requests.length, requestCount, 'Explicit disconnect cannot restart private access');
+  assert.equal(popup.nodes.get('session-status').textContent, message);
+  assertNoToken(env.statuses);
+  tab.api.destroy();
+});

@@ -122,6 +122,29 @@ test('explicit disconnect clears the route and token and cannot reconnect by tim
   assert.equal(env.stored.has(ROUTE), false); assert.equal(env.drive.api.state().hasToken, false);
   env.drive.time.fireIntervals(3000); await flush(); assert.equal(env.game.api.getStatus().code, 'disconnected');
 });
+test('explicit disconnect gives terminal reopen guidance instead of promising automatic recovery', async () => {
+  const env = await connected(); env.game.api.testing.closeSession(); await flush();
+  assert.equal(env.drive.api.state().statusCode, 'disconnected');
+  assert.equal(env.drive.nodes.get('connect').disabled, true);
+  assert.match(env.drive.nodes.get('session-status').textContent, /vuelve a abrir Drive desde el helper/);
+  assert.doesNotMatch(env.drive.nodes.get('session-status').textContent, /se recuperar[áa]|Mantén esta ventana abierta/);
+  env.loadGame(); env.drive.time.jump(65000); env.drive.time.fireIntervals(3000); env.drive.time.fireTimeouts(); await flush();
+  assert.equal(env.drive.api.state().hasToken, false);
+  assert.equal(env.drive.api.state().bridgeAlive, false);
+  assert.equal(env.drive.nodes.get('connect').disabled, true);
+  assert.match(env.drive.nodes.get('session-status').textContent, /vuelve a abrir Drive desde el helper/);
+});
+test('temporary transport loss retains recovery guidance and the existing authorization', async () => {
+  const env = await connected(); env.drive.api.lose(); await flush();
+  assert.equal(env.drive.api.state().statusCode, 'bridge_reconnecting');
+  assert.equal(env.drive.api.state().hasToken, true);
+  assert.match(env.drive.nodes.get('session-status').textContent, /Recuperando el enlace/);
+  assert.doesNotMatch(env.drive.nodes.get('session-status').textContent, /Cierra esta ventana/);
+  env.drive.time.fireIntervals(3000); await flush();
+  assert.equal(env.drive.api.state().authorized, true);
+  assert.equal(env.drive.nodes.get('connect').disabled, false);
+  assert.equal(env.oauthRequests(), 0);
+});
 test('closing the companion clears the route; a reload cannot claim a connection', async () => {
   const env = await connected(); env.driveRef.closed = true; env.game.time.fireIntervals(1000); await flush();
   assert.equal(env.stored.has(ROUTE), false); env.loadGame(); assert.equal(env.game.api.getStatus().code, 'disconnected');

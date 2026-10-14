@@ -11,6 +11,7 @@ function create(options){
   let scope='',config=core.normalizeConfig(),roster=null,transitCensus=null,plan=null,ready=false,status='',error='',epoch=0;
   let observedId='',arrivedAt=0,pauseUntil=0,move=null,permitNavigation=false,storageError=false,manualHold=false,recoveryDisabled=false;
   const snapshots=new Map(),visited=new Map(),barriers=new Map();
+  const orderBoundaries=new WeakMap();
   const key=()=> 'old-light-empire:v1:'+scope;
   function cancelMove(){permitNavigation=false;if(move){move.cancelled=true;if(!move.started)move=null;}}
   function changeScope(next){
@@ -31,23 +32,43 @@ function create(options){
     return {scope,complete:true,observedAt:value.observedAt,systems};
   }
   function matches(context,id){return context?.scope===scope&&UUID.test(context.systemId||'')&&context.systemId.toLowerCase()===id&&context.selectionCount===1&&context.owned===true&&context.settled===true;}
-  function acceptable(value,id,currentRoster=roster){
-    const s=core.normalizeSnapshot(value),barrier=barriers.get(id);
-    if(!s||s.scope!==scope||s.systemId!==id||!s.owned||!currentRoster?.systems.some(x=>x.id===id)||s.observedAt>now()||now()-s.observedAt>maxAgeMs
-      ||(barrier&&(s.observedAt<=barrier.at||(barrier.censusId&&(!s.censusId||s.censusId===barrier.censusId)))))return null;
+  function baseSnapshot(value,id,currentRoster=roster){
+    const s=core.normalizeSnapshot(value);
+    if(!s||s.scope!==scope||s.systemId!==id||!s.owned||!currentRoster?.systems.some(x=>x.id===id)||s.observedAt>now()||now()-s.observedAt>maxAgeMs)return null;
     return s;
   }
-  function readBatch(currentRoster,bundle,bundled=false){
+  function behindOrderBoundary(s,id){
+    const barrier=barriers.get(id);
+    return !!(barrier&&(s.observedAt<=barrier.at||(barrier.censusId&&(!s.censusId||s.censusId===barrier.censusId))||barrier.censusIds?.includes(s.censusId)));
+  }
+  function acceptable(value,id,currentRoster=roster){
+    const s=baseSnapshot(value,id,currentRoster);return s&&!behindOrderBoundary(s,id)?s:null;
+  }
+  function readBatch(currentRoster,bundle,bundled=false,diagnostic=null){
     if(!bundled&&typeof adapter.readSnapshots!=='function')return new Map(snapshots);
     let values;try{values=bundled?bundle?.snapshots:adapter.readSnapshots();}catch{return null;}
     if(!Array.isArray(values))return null;
-    const ids=new Set(currentRoster.systems.map(x=>x.id)),batch=new Map();
+    const ids=new Set(currentRoster.systems.map(x=>x.id)),batch=new Map();let waitingForOrder=false;
     for(const value of values){
       const id=value?.systemId?.toLowerCase();
       if(!ids.has(id)||batch.has(id))return null;
-      const snapshot=acceptable(value,id,currentRoster);if(!snapshot)return null;batch.set(id,snapshot);
+      const snapshot=baseSnapshot(value,id,currentRoster);if(!snapshot)return null;
+      if(behindOrderBoundary(snapshot,id))waitingForOrder=true;batch.set(id,snapshot);
     }
-    return batch.size===ids.size?batch:null;
+    if(batch.size!==ids.size)return null;
+    if(waitingForOrder){
+      // Diagnose only an otherwise exact, coherent native census. Missing,
+      // duplicate, invalid or incomplete data retain the generic rejection.
+      if(diagnostic){
+        try{
+          const transit=bundled?bundle?.transitCensus:adapter.readTransitCensus?.();
+          const data=core.aggregate([...batch.values()],{scope,now:now(),maxAgeMs,expectedIds:[...ids],transitCensus:transit});
+          diagnostic.waitingForOrder=data.complete&&data.fleetComplete;
+        }catch{/* A diagnostic read cannot turn rejected data into authority. */}
+      }
+      return null;
+    }
+    return batch;
   }
   function setConfig(value){
     if(!scope||storageError)throw new Error(error||'Falta identificar tu cuenta y galaxia.');
@@ -102,8 +123,10 @@ function create(options){
     const owned=new Set(roster.systems.map(x=>x.id));
     for(const id of snapshots.keys())if(!owned.has(id)){snapshots.delete(id);visited.delete(id);barriers.delete(id);}
     if(bundled||typeof adapter.readSnapshots==='function'){
-      const census=readBatch(roster,bundle,bundled);
-      if(!census){snapshots.clear();return reject('El censo imperial no está disponible o es ambiguo.');}
+      const diagnostic={},census=readBatch(roster,bundle,bundled,diagnostic);
+      if(!census){snapshots.clear();return reject(diagnostic.waitingForOrder
+        ?'Esperando un censo nativo posterior al pedido confirmado; no se enviarán nuevos pedidos.'
+        :'El censo imperial no está disponible o es ambiguo.');}
       snapshots.clear();for(const [id,value] of census)snapshots.set(id,value);
     }
     let active;try{active=bundled?bundle?.active:adapter.readActive();}catch{active=null;}
@@ -134,9 +157,10 @@ function create(options){
     if(!plan.complete)return reject(plan.reason||'Actualizando los sistemas antes de repartir objetivos.');
     ready=true;status='Imperio activo: '+(current.name||id)+'.';error='';return state();
   }
-  function canAct(context){
+  function checkAction(context,capture=false){
     if(!ready||!config.enabled||move||manualHold||pauseUntil>now()||!roster||!plan?.complete)return false;
     try{
+      const actionEpoch=epoch;
       if(JSON.stringify(core.normalizeConfig(sync(read(key()))))!==JSON.stringify(config))return false;
       const bundled=typeof adapter.readBundle==='function',bundle=bundled?adapter.readBundle():null;
       const latest=validRoster(bundled?bundle?.roster:adapter.readRoster());
@@ -149,15 +173,45 @@ function create(options){
       const liveTransit=bundled?bundle?.transitCensus:adapter.readTransitCensus?.();
       if((bundled||typeof adapter.readTransitCensus==='function')&&!core.normalizeTransitCensus(liveTransit))return false;
       const fresh=core.plan(config,[...all.values()],{scope,now:now(),maxAgeMs,expectedIds:latest.systems.map(x=>x.id),activeSystemId:id,transitCensus:liveTransit});
-      return fresh.complete&&JSON.stringify(fresh.targetsBySystem)===JSON.stringify(plan.targetsBySystem);
+      if(!fresh.complete||JSON.stringify(fresh.targetsBySystem)!==JSON.stringify(plan.targetsBySystem))return false;
+      if(!capture)return true;
+      // Mint only from the SAME freshly validated bundle used by the action
+      // preflight, never the possibly older display snapshots. A private token
+      // carries the pre-click boundary through confirmation without trusting
+      // caller-supplied timestamps or invalidating the confirmation itself.
+      const at=now();
+      if(actionEpoch!==epoch||!snapshot.censusId||!Number.isSafeInteger(at)||at<0||snapshot.observedAt>at||at-snapshot.observedAt>maxAgeMs)return false;
+      const token=Object.freeze(Object.create(null));
+      orderBoundaries.set(token,{scope,systemId:id,at,censusId:snapshot.censusId,epoch});
+      ready=false;cancelMove();return token;
     }catch{return false;}
   }
+  function canAct(context){return checkAction(context)===true;}
+  function captureOrderBoundary(context){return checkAction(context,true)||null;}
   function suspend(ms=15000){pauseUntil=now()+Math.max(0,ms);ready=false;epoch++;cancelMove();onChange();}
-  function invalidate(systemId){
-    if(UUID.test(systemId||'')){const id=systemId.toLowerCase(),previous=snapshots.get(id),old=barriers.get(id);barriers.set(id,{at:Math.max(now(),previous?.observedAt||0,old?.at||0),censusId:previous?.censusId||old?.censusId||null});snapshots.delete(id);}
+  function invalidate(systemId,token){
+    const boundary=token&&typeof token==='object'?orderBoundaries.get(token):null;
+    if(boundary)orderBoundaries.delete(token); // Single use, including invalid targets/scopes.
+    if(UUID.test(systemId||'')){
+      const id=systemId.toLowerCase(),previous=snapshots.get(id),old=barriers.get(id);
+      const valid=boundary&&boundary.scope===scope&&boundary.systemId===id&&boundary.epoch===epoch;
+      if(valid){
+        // A later barrier already installed for this origin must never move
+        // backwards, even if an earlier order confirms after it.
+        if(old&&old.at===boundary.at&&old.censusId!==boundary.censusId){
+          barriers.set(id,{...old,censusIds:[...new Set([...(old.censusIds||[]),old.censusId,boundary.censusId])].filter(Boolean)});
+        }else barriers.set(id,old&&old.at>=boundary.at?old:{at:boundary.at,censusId:boundary.censusId});
+      }else{
+        // Missing, forged, reused or foreign tokens preserve the conservative
+        // existing invalidation behavior, never restoring old authority.
+        const at=Math.max(now(),previous?.observedAt||0,old?.at||0);
+        barriers.set(id,old&&old.at>=at?old:{...old,at,censusId:previous?.censusId||old?.censusId||null});
+      }
+      snapshots.delete(id);
+    }
     ready=false;cancelMove();
   }
-  return {update,state,systemPolicy,setConfig,canAct,suspend,invalidate,importConfig:value=>setConfig({...core.normalizeConfig(value),enabled:false}),exportConfig:()=>copy(config),isEnabled:()=>config.enabled===true,isBusy:()=>!!move};
+  return {update,state,systemPolicy,setConfig,canAct,captureOrderBoundary,suspend,invalidate,importConfig:value=>setConfig({...core.normalizeConfig(value),enabled:false}),exportConfig:()=>copy(config),isEnabled:()=>config.enabled===true,isBusy:()=>!!move};
 }
 return Object.freeze({create});
 });
