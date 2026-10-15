@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.16.7
+// @version      1.17.0
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -20,6 +20,1420 @@
 // ==/UserScript==
 
 // BEGIN EMBEDDED EMPIRE MODULES
+/* Local reinforcement intent. The injected queue adapter alone may interact with
+ * the game. This module never opens sockets, navigates, produces, or sends ships. */
+(function (root, factory) {
+  'use strict';
+  const api = factory();
+  if (typeof module === 'object' && module && module.exports) module.exports = api;
+  if (root) Object.defineProperty(root, 'OldLightReinforcementCore', { configurable: true, value: api });
+})(typeof globalThis === 'object' ? globalThis : this, function () {
+  'use strict';
+  const SHIPS = Object.freeze(['probe', 'marauder', 'sentinel', 'vanguard']);
+  const MAX_AGE_MS = 120000, MAX_QUANTITY = 50000, MAX_ROUTES = 128, MAX_RECEIPTS = 256;
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const SCOPE = /^[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{1,96}$/;
+  const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+  const copy = value => JSON.parse(JSON.stringify(value));
+  const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+  const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+  // Never evaluate an accessor supplied by a stored object or route editor.
+  const get = (value, key) => {
+    if (!object(value) && !Array.isArray(value)) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && own(descriptor, 'value') ? descriptor.value : undefined;
+  };
+  const fail = message => { throw new Error(message || 'Datos de refuerzo no válidos.'); };
+  const integer = (value, min = 0, max = Number.MAX_SAFE_INTEGER) =>
+    Number.isSafeInteger(value) && value >= min && value <= max ? value : fail();
+  const text = (value, max = 200) => typeof value === 'string' && value.length <= max
+    && !/[\u0000-\u001f\u007f]/.test(value) ? value : fail();
+  const systemId = value => typeof value === 'string' && UUID.test(value) ? value.toLowerCase() : fail();
+  const routeId = value => typeof value === 'string' && ID.test(value) ? value : fail();
+  const scopeId = value => typeof value === 'string' && SCOPE.test(value) ? value : fail('Selecciona una cuenta y galaxia válidas.');
+  const point = value => ({ q: integer(get(value, 'q'), -10000000, 10000000), r: integer(get(value, 'r'), -10000000, 10000000) });
+  const samePoint = (a, b) => a?.q === b?.q && a?.r === b?.r;
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const zeros = () => Object.fromEntries(SHIPS.map(type => [type, 0]));
+  function shipRules(value) {
+    if (value !== undefined && !object(value)) fail();
+    if (value && Object.keys(value).some(key => !SHIPS.includes(key))) fail();
+    return Object.fromEntries(SHIPS.map(type => {
+      const raw = get(value, type);
+      if (raw === undefined) return [type, { mode: 'fixed', amount: 0, reserve: 0 }];
+      const mode = get(raw, 'mode');
+      if (!object(raw) || !['fixed', 'excess'].includes(mode)) fail();
+      return [type, { mode, amount: integer(get(raw, 'amount') ?? 0, 0, MAX_QUANTITY),
+        reserve: integer(get(raw, 'reserve') ?? 0) }];
+    }));
+  }
+  function amounts(value) {
+    if (!object(value) || Object.keys(value).some(key => !SHIPS.includes(key))) fail();
+    const result = Object.fromEntries(SHIPS.map(type => [type, integer(get(value, type), 0, MAX_QUANTITY)]));
+    if (!SHIPS.some(type => result[type] > 0)) fail();
+    return result;
+  }
+  function ticketFrom(value, route) {
+    if (value === null) return null;
+    if (!object(value)) fail();
+    const sequence = integer(get(value, 'sequence'), 1);
+    const id = `route:${route.id}:${sequence}`;
+    if (get(value, 'id') !== id || sequence !== route.sequence || !['prepared', 'queued'].includes(get(value, 'state'))) fail();
+    const result = { id, sequence, state: get(value, 'state'), createdAt: integer(get(value, 'createdAt')),
+      originId: systemId(get(value, 'originId')), destinationId: systemId(get(value, 'destinationId')),
+      originName: text(get(value, 'originName'), 400), targetLabel: text(get(value, 'targetLabel'), 400),
+      coordinate: point(get(value, 'coordinate')), quantities: amounts(get(value, 'quantities')) };
+    if (result.originId !== route.originId || result.destinationId !== route.destinationId
+      || !result.originName.trim() || !result.targetLabel.trim()) fail();
+    return result;
+  }
+  function routeFrom(value) {
+    if (!object(value)) fail();
+    const route = { id: routeId(get(value, 'id')), name: text(get(value, 'name') ?? ''),
+      originId: systemId(get(value, 'originId')), destinationId: systemId(get(value, 'destinationId')),
+      intervalMinutes: integer(get(value, 'intervalMinutes'), 1, 1440), ships: shipRules(get(value, 'ships')),
+      paused: get(value, 'paused'), needsReview: get(value, 'needsReview'), status: get(value, 'status'),
+      message: text(get(value, 'message'), 500), sequence: integer(get(value, 'sequence')),
+      nextRunAt: integer(get(value, 'nextRunAt')), lastSentAt: get(value, 'lastSentAt') === null ? null : integer(get(value, 'lastSentAt')),
+      createdAt: integer(get(value, 'createdAt')), updatedAt: integer(get(value, 'updatedAt')) };
+    if (route.originId === route.destinationId || typeof route.paused !== 'boolean'
+      || typeof route.needsReview !== 'boolean' || !['waiting', 'queued', 'paused', 'review'].includes(route.status)
+      || (route.needsReview && (!route.paused || route.status !== 'review'))) fail();
+    route.ticket = ticketFrom(get(value, 'ticket'), route);
+    if (route.status === 'queued' && (!route.ticket || route.paused)) fail();
+    return route;
+  }
+  function receiptFrom(value) {
+    if (!object(value)) fail();
+    const result = { originId: systemId(get(value, 'originId')), lastSentAt: integer(get(value, 'lastSentAt')),
+      nextRunAt: integer(get(value, 'nextRunAt')) };
+    if (result.nextRunAt < result.lastSentAt) fail();
+    return result;
+  }
+  function mergeReceipt(receipts, value) {
+    const next = receiptFrom(value), previous = receipts.find(item => item.originId === next.originId);
+    if (previous) return receipts.map(item => item === previous ? { originId: next.originId,
+      lastSentAt: Math.max(item.lastSentAt, next.lastSentAt), nextRunAt: Math.max(item.nextRunAt, next.nextRunAt) } : item);
+    if (receipts.length >= MAX_RECEIPTS) fail('El registro de envíos está lleno. Espera a que haya un censo posterior y venzan los plazos pendientes.');
+    return [...receipts, next];
+  }
+  function empty(scope) { return { schemaVersion: 1, scope, sequence: 0, routes: [], receipts: [] }; }
+  function storeFrom(raw, scope) {
+    if (raw === null || raw === undefined || raw === '') return empty(scope);
+    if (typeof raw === 'string') {
+      if (raw.length > 512 * 1024) fail();
+      raw = JSON.parse(raw);
+    }
+    const routes = get(raw, 'routes');
+    if (get(raw, 'schemaVersion') !== 1 || get(raw, 'scope') !== scope || !Array.isArray(routes) || routes.length > MAX_ROUTES) fail();
+    const result = { schemaVersion: 1, scope, sequence: integer(get(raw, 'sequence')), routes: routes.map(routeFrom), receipts: [] };
+    if (new Set(result.routes.map(route => route.id)).size !== result.routes.length
+      || result.routes.some(route => route.sequence > result.sequence)) fail();
+    const receipts = get(raw, 'receipts');
+    if (receipts === undefined) {
+      // Schema 1 predates origin receipts. Preserve every known send while
+      // normalizing the old store; the next ordinary commit persists migration.
+      for (const route of result.routes) if (route.lastSentAt !== null) result.receipts = mergeReceipt(result.receipts, {
+        originId: route.originId, lastSentAt: route.lastSentAt,
+        nextRunAt: Math.max(route.nextRunAt, integer(route.lastSentAt + route.intervalMinutes * 60000)) });
+    } else {
+      if (!Array.isArray(receipts) || receipts.length > MAX_RECEIPTS) fail();
+      result.receipts = receipts.map(receiptFrom);
+      if (new Set(result.receipts.map(item => item.originId)).size !== result.receipts.length) fail();
+    }
+    return result;
+  }
+  function create({ read, write, getContext, getWorld, getJobs, queue, cancel, now = Date.now, onChange = () => {} } = {}) {
+    if (![read, write, getContext, getWorld, getJobs, queue, cancel, now, onChange].every(fn => typeof fn === 'function')) {
+      throw new TypeError('Faltan adaptadores síncronos para las rutas de refuerzo.');
+    }
+    let running = false, localSequence = 0, error = '', activeScope = '', worldSession = '';
+    // This is only a live-session authorization witness. Durable intent remains
+    // in the scoped store. A recovered sending claim never inherits this witness.
+    const liveTickets = new Map();
+    const sync = value => {
+      if (value && typeof value.then === 'function') fail('El almacenamiento y la cola deben ser síncronos.');
+      return value;
+    };
+    const time = () => integer(now(), 0, 8640000000000000);
+    function context() {
+      let raw, scope;
+      try { raw = sync(getContext()); scope = scopeId(get(raw, 'scope')); }
+      catch (cause) { liveTickets.clear(); activeScope = ''; worldSession = ''; throw cause; }
+      const coordinated = get(raw, 'coordinated') === true;
+      if (scope !== activeScope || !coordinated) { liveTickets.clear(); worldSession = ''; }
+      activeScope = scope;
+      return { scope, originId: typeof get(raw, 'originId') === 'string' ? get(raw, 'originId').toLowerCase() : '',
+        canAct: get(raw, 'canAct') === true, coordinated };
+    }
+    function load(scope = context().scope) { return storeFrom(sync(read(scope)), scope); }
+    function notify() { try { onChange(); } catch (_) { /* Intent is already durable. */ } }
+    function commit(next) {
+      const clean = storeFrom(next, next.scope);
+      if (context().scope !== clean.scope) fail('La cuenta o galaxia ha cambiado.');
+      try {
+        sync(write(clean.scope, copy(clean)));
+        if (!same(load(clean.scope), clean)) fail('No se confirmó la escritura local.');
+      } catch (cause) {
+        error = 'No se pudo guardar el estado local. No se crearán envíos sin guardar antes su ticket.';
+        // Failure is observable through state()/tick() and the thrown action.
+        // Do not schedule another onChange tick for the same failing write.
+        throw cause;
+      }
+      error = '';
+      notify();
+      return clean;
+    }
+    function jobs() {
+      const result = sync(getJobs());
+      if (!Array.isArray(result)) fail('No se puede comprobar la cola de misiones.');
+      return result;
+    }
+    function stamp(route) { route.updatedAt = Math.max(time(), route.updatedAt); return route; }
+    function replace(state, route) { return commit({ ...state, routes: state.routes.map(item => item.id === route.id ? stamp(route) : item) }); }
+    function review(route, message) {
+      return stamp({ ...route, paused: true, needsReview: true, status: 'review', message });
+    }
+    const witnessKey = (scope, ticket) => `${scope}/${ticket.id}`;
+    const signature = ticket => JSON.stringify({ ...ticket, state: 'queued' });
+    function spec(scope, ticket) {
+      return { scope, originId: ticket.originId, originName: ticket.originName,
+        target: { mode: 'custom', missionAction: 'send', coordinate: copy(ticket.coordinate),
+          routeKey: '', presetKey: 'refuerzo', label: ticket.targetLabel },
+        quantities: copy(ticket.quantities), produce: false, autoSend: true };
+    }
+    function matches(scope, ticket, job) {
+      if (!job || job.id !== ticket.id || job.scope !== scope || job.originId !== ticket.originId
+        || job.originName !== ticket.originName || job.produce !== false || job.autoSend !== true
+        || job.campaignId !== undefined || job.target?.originCoordinate !== undefined) return false;
+      const target = job.target;
+      return target?.mode === 'custom' && target.missionAction === 'send' && target.routeKey === ''
+        && target.presetKey === 'refuerzo' && target.label === ticket.targetLabel && samePoint(target.coordinate, ticket.coordinate)
+        && object(job.quantities) && Object.keys(job.quantities).every(key => SHIPS.includes(key))
+        && SHIPS.every(type => job.quantities[type] === ticket.quantities[type]);
+    }
+    function worldFor(scope) {
+      const world = sync(getWorld()), at = time();
+      if (!object(world) || world.scope !== scope || world.connected !== true || world.complete !== true
+        || !Number.isSafeInteger(world.observedAt) || world.observedAt < 0 || world.observedAt > at
+        || at - world.observedAt > MAX_AGE_MS || !Array.isArray(world.systems) || !Array.isArray(world.transits)) return null;
+      if ((world.galaxy !== undefined || world.selfId !== undefined) && `${world.galaxy}/${world.selfId}` !== scope) return null;
+      if ((world.epoch !== undefined && (!Number.isSafeInteger(world.epoch) || world.epoch < 0))
+        || (world.generation !== undefined && (!Number.isSafeInteger(world.generation) || world.generation < 0))) return null;
+      const session = JSON.stringify([scope, world.epoch ?? null, world.generation ?? null]);
+      if (worldSession && session !== worldSession) liveTickets.clear();
+      worldSession = session;
+      const systems = new Map(), coordinates = new Set();
+      for (const raw of world.systems) {
+        const id = systemId(raw?.id), coordinate = point(raw), key = `${coordinate.q},${coordinate.r}`;
+        if (systems.has(id) || coordinates.has(key) || !Array.isArray(raw.fleet) || raw.owned === false) return null;
+        const fleet = zeros(), seen = new Set();
+        for (const item of raw.fleet) {
+          if (!SHIPS.includes(item?.type) || seen.has(item.type)) return null;
+          fleet[item.type] = integer(item.quantity); seen.add(item.type);
+        }
+        systems.set(id, { id, ...coordinate, name: typeof raw.name === 'string' ? raw.name.slice(0, 200) : id, fleet });
+        coordinates.add(key);
+      }
+      const transits = [];
+      for (const transit of world.transits) {
+        const to = point({ q: transit?.toQ, r: transit?.toR });
+        const from = transit?.fromQ === null && transit?.fromR === null ? null : point({ q: transit?.fromQ, r: transit?.fromR });
+        transits.push({ from, to });
+      }
+      return { systems, transits, observedAt: world.observedAt };
+    }
+    function receiptFor(state, originId) { return state.receipts.find(item => item.originId === originId); }
+    function pruneReceipts(state, world) {
+      if (!world) return state;
+      const at = time(), receipts = state.receipts.filter(item => !(at > item.nextRunAt
+        && world.systems.has(item.originId) && world.observedAt > item.lastSentAt
+        && !state.routes.some(route => route.originId === item.originId && route.ticket)));
+      return receipts.length === state.receipts.length ? state : { ...state, receipts };
+    }
+    function recordReceipt(state, originId, lastSentAt, nextRunAt) {
+      let world = null;
+      try { world = worldFor(state.scope); } catch (_) { /* Missing proof cannot expire a receipt. */ }
+      const kept = pruneReceipts(state, world);
+      return { ...kept, receipts: mergeReceipt(kept.receipts, { originId, lastSentAt, nextRunAt }) };
+    }
+    function preserveHistory(state, route) {
+      return route.lastSentAt === null ? state : recordReceipt(state, route.originId, route.lastSentAt,
+        Math.max(route.nextRunAt, integer(route.lastSentAt + route.intervalMinutes * 60000)));
+    }
+    function hasReceiptCapacity(state, originId) {
+      // An outstanding ticket reserves its future receipt slot before a send.
+      // No confirmed outcome has to evict unexpired evidence to be persisted.
+      const origins = new Set(state.receipts.map(item => item.originId));
+      for (const route of state.routes) if (route.ticket) origins.add(route.originId);
+      origins.add(originId);
+      return origins.size <= MAX_RECEIPTS;
+    }
+    function permits(state, route, world) {
+      const receipt = receiptFor(state, route.originId);
+      return Boolean(world && time() >= route.nextRunAt && (!receipt
+        || (time() >= receipt.nextRunAt && world.observedAt > receipt.lastSentAt)) && hasReceiptCapacity(state, route.originId)
+        && !state.routes.some(other => other.id !== route.id && other.originId === route.originId && (other.needsReview || other.ticket)));
+    }
+    function validSentAt(route, job) {
+      return Number.isSafeInteger(job?.sentAt) && job.sentAt >= route.ticket.createdAt && job.sentAt <= time();
+    }
+    function accepted(state, route, sentAt) {
+      const prior = receiptFor(state, route.originId);
+      const lastSentAt = Math.max(route.lastSentAt ?? 0, sentAt);
+      const nextRunAt = Math.max(route.nextRunAt, prior?.nextRunAt ?? 0, integer(sentAt + route.intervalMinutes * 60000));
+      const next = stamp({ ...route, ticket: null, lastSentAt, nextRunAt, needsReview: false,
+        status: route.paused ? 'paused' : 'waiting', message: 'Refuerzo enviado. Esperando al siguiente intervalo.' });
+      const recorded = recordReceipt(state, route.originId, lastSentAt, nextRunAt);
+      liveTickets.delete(witnessKey(state.scope, route.ticket));
+      return { state: recorded, route: next };
+    }
+    function plan(route, world, requested = null) {
+      if (!world || (route.lastSentAt !== null && world.observedAt <= route.lastSentAt)) return null;
+      const origin = world.systems.get(route.originId), destination = world.systems.get(route.destinationId);
+      if (!origin || !destination || samePoint(origin, destination)) return null;
+      // The same route must settle before it can launch again. An independent
+      // source may reinforce the same destination; its ships are not parked here.
+      // A hidden origin cannot establish independence, so fail closed for either
+      // endpoint until that transfer disappears from the native census.
+      if (world.transits.some(transit => transit.from
+        ? samePoint(transit.from, origin) && samePoint(transit.to, destination)
+        : samePoint(transit.to, origin) || samePoint(transit.to, destination))) return null;
+      const quantities = zeros();
+      for (const type of SHIPS) {
+        const rule = route.ships[type], available = Math.max(0, origin.fleet[type] - rule.reserve);
+        const desired = requested ? requested[type] : rule.mode === 'fixed' ? rule.amount : Math.min(MAX_QUANTITY, available);
+        if (!Number.isSafeInteger(desired) || desired < 0 || desired > MAX_QUANTITY || desired > available
+          || (rule.mode === 'fixed' && desired !== rule.amount)) return null;
+        quantities[type] = desired;
+      }
+      if (!SHIPS.some(type => quantities[type] > 0)) return null;
+      return { origin, destination, quantities };
+    }
+    function reconcile(state, queueJobs, world) {
+      const originalState = state;
+      state = pruneReceipts(state, world);
+      let changed = state !== originalState;
+      const routes = state.routes.map(original => {
+        if (!original.ticket || original.needsReview) return original;
+        const route = copy(original), ticket = route.ticket, job = queueJobs.find(item => item.id === ticket.id);
+        const key = witnessKey(state.scope, ticket);
+        let next = route;
+        if (!job || !matches(state.scope, ticket, job)) {
+          next = review(route, 'La misión guardada ha desaparecido o ha cambiado. Comprueba si se envió; no se repetirá automáticamente.');
+        } else if (job.needsReview || job.fleetEdit || ['paused', 'uncertain'].includes(job.status)) {
+          next = review(route, 'La misión necesita revisión en la cola. Comprueba el envío antes de crear otra ruta.');
+        } else if (job.status === 'sent') {
+          if (!validSentAt(route, job)) {
+            next = review(route, 'La confirmación del envío no tiene una fecha válida.');
+          } else {
+            const result = accepted(state, route, job.sentAt);
+            state = result.state; next = result.route;
+          }
+        } else if (job.status === 'sending' && liveTickets.get(key) !== signature(ticket)) {
+          next = review(route, 'Se recuperó un envío iniciado. Comprueba su resultado; no se repetirá automáticamente.');
+        } else if (!['waiting', 'sending'].includes(job.status)) {
+          next = review(route, 'La misión tiene un estado desconocido. Revisa la cola.');
+        } else if (!route.paused) {
+          liveTickets.set(key, signature(ticket));
+          next = { ...route, ticket: { ...ticket, state: 'queued' }, status: 'queued', message: 'Refuerzo preparado en la cola.' };
+        }
+        if (!same(original, next)) { changed = true; return stamp(next); }
+        return original;
+      });
+      return changed ? commit({ ...state, routes }) : state;
+    }
+    function state() {
+      try { const value = load(); return { ...copy(value), error }; }
+      catch (cause) { error = cause.message || 'No se puede leer el estado local de refuerzos.'; return { ...empty(''), error }; }
+    }
+    function list() { return state().routes; }
+    function find(state, id) {
+      const route = state.routes.find(item => item.id === id);
+      return route || fail('La ruta ya no existe en esta cuenta y galaxia.');
+    }
+    function clearPending(state, route) {
+      if (!route.ticket) return route;
+      const job = jobs().find(item => item.id === route.ticket.id);
+      if (!job || !matches(state.scope, route.ticket, job) || job.needsReview || job.fleetEdit
+        || !['waiting', 'paused', 'sent'].includes(job.status)) {
+        const next = review(route, 'La ruta está pausada. Comprueba el resultado de la misión antes de reanudarla.');
+        replace(state, next); return next;
+      }
+      if (job.status === 'sent') {
+        if (!validSentAt(route, job)) {
+          const next = review(route, 'La confirmación del envío no tiene una fecha válida. Revisa los movimientos del juego.');
+          replace(state, next); return next;
+        }
+        // Persist acceptance and its origin-wide cooldown BEFORE the ticket can
+        // disappear. Pausing/editing is not a new send and cannot reset either.
+        const result = accepted(state, route, job.sentAt);
+        replace(result.state, result.route);
+        return result.route;
+      }
+      try {
+        sync(cancel(job.id));
+        if (jobs().some(item => item.id === job.id)) fail('La misión sigue en la cola.');
+      } catch (_) {
+        const next = { ...route, message: 'La ruta está pausada, pero no se ha podido retirar su misión de la cola.' };
+        replace(state, next); return next;
+      }
+      liveTickets.delete(witnessKey(state.scope, route.ticket));
+      const next = { ...route, ticket: null, status: 'paused', nextRunAt: Math.max(route.nextRunAt, time()), message: '' };
+      replace(load(state.scope), next); return next;
+    }
+    function pause(id, paused = true) {
+      if (paused !== true && paused !== false) fail();
+      if (!paused) return resume(id);
+      const saved = load(), route = find(saved, id);
+      const next = { ...route, paused: true, status: route.needsReview ? 'review' : 'paused' };
+      const committed = replace(saved, next); // Revoke guards BEFORE queue cancellation.
+      if (!next.needsReview) clearPending(committed, next);
+      return copy(find(load(saved.scope), id));
+    }
+    function resume(id) {
+      let saved = load(), route = find(saved, id);
+      if (route.needsReview) fail('Comprueba primero el resultado del envío; esta ruta requiere revisión.');
+      if (!route.paused) return copy(route);
+      route = clearPending(saved, route); saved = load(saved.scope);
+      if (route.needsReview || route.ticket) fail('No se puede reanudar mientras la misión pendiente no esté resuelta.');
+      const receipt = receiptFor(saved, route.originId);
+      return copy(find(replace(saved, { ...route, paused: false, status: 'waiting', message: '',
+        nextRunAt: Math.max(route.nextRunAt, receipt?.nextRunAt ?? 0, time()) }), id));
+    }
+    function save(value) {
+      const at = time();
+      let saved = load();
+      const suppliedId = get(value, 'id');
+      let id = suppliedId === undefined || suppliedId === '' ? '' : routeId(suppliedId);
+      if (!id) do { id = `r-${at.toString(36)}-${(++localSequence).toString(36)}-${(saved.sequence + 1).toString(36)}`; }
+        while (saved.routes.some(item => item.id === id));
+      const previous = saved.routes.find(item => item.id === id);
+      const originId = systemId(get(value, 'originId')), destinationId = systemId(get(value, 'destinationId'));
+      const intervalMinutes = integer(get(value, 'intervalMinutes'), 1, 1440), ships = shipRules(get(value, 'ships'));
+      const name = text(get(value, 'name') ?? '');
+      if (originId === destinationId) fail('El origen y el destino deben ser distintos.');
+      const pausedInput = get(value, 'paused');
+      if (pausedInput !== undefined && typeof pausedInput !== 'boolean') fail();
+      const paused = pausedInput !== false;
+      if (previous?.needsReview) fail('Revisa el envío pendiente antes de sustituir esta ruta.');
+      if (previous?.ticket) {
+        const stopped = pause(id); saved = load(saved.scope);
+        if (stopped.needsReview || stopped.ticket) fail('No se puede editar una ruta con un envío pendiente sin resolver.');
+      }
+      if (!previous && saved.routes.length >= MAX_ROUTES) fail('Se ha alcanzado el límite de rutas.');
+      const current = saved.routes.find(item => item.id === id);
+      if (current) saved = preserveHistory(saved, current);
+      const sameOrigin = current?.originId === originId, receipt = receiptFor(saved, originId);
+      const lastSentAt = sameOrigin ? current.lastSentAt : null;
+      const nextRunAt = Math.max(at, sameOrigin ? current.nextRunAt : 0, receipt?.nextRunAt ?? 0,
+        lastSentAt === null ? 0 : integer(lastSentAt + intervalMinutes * 60000),
+        receipt ? integer(receipt.lastSentAt + intervalMinutes * 60000) : 0);
+      if (receipt) saved = recordReceipt(saved, originId, receipt.lastSentAt, nextRunAt);
+      const route = { id, name, originId, destinationId, intervalMinutes, ships, paused, needsReview: false,
+        status: paused ? 'paused' : 'waiting', message: '', sequence: current?.sequence ?? 0,
+        nextRunAt, lastSentAt, createdAt: current?.createdAt ?? at,
+        updatedAt: Math.max(at, current?.updatedAt ?? 0), ticket: null };
+      commit({ ...saved, routes: previous ? saved.routes.map(item => item.id === id ? route : item) : [...saved.routes, route] });
+      return copy(route);
+    }
+    function remove(id) {
+      // Revocation comes first, but deletion cannot be used as an implicit
+      // acknowledgment of a sending/uncertain/disappeared mission. Keep the route
+      // visible with its review action instead of creating an invisible blocker.
+      pause(id);
+      let saved = load(), route = find(saved, id);
+      if (route.ticket && route.needsReview) {
+        const job = jobs().find(item => item.id === route.ticket.id);
+        if (matches(saved.scope, route.ticket, job) && job.status === 'sent' && !job.needsReview && !job.fleetEdit && validSentAt(route, job)) {
+          route = clearPending(saved, route); saved = load(saved.scope);
+        }
+      }
+      if (route.ticket || route.needsReview) fail('La ruta sigue pausada y visible. Revisa los movimientos y pulsa «He revisado el envío» antes de eliminarla.');
+      saved = preserveHistory(saved, route);
+      commit({ ...saved, routes: saved.routes.filter(item => item.id !== id) });
+      return true;
+    }
+    function acknowledgeRoute(id) {
+      let saved = load(), route = find(saved, id);
+      if (!route.needsReview) fail('La ruta no tiene un envío pendiente de revisión.');
+      const queueJobs = jobs();
+      if (queueJobs.some(job => job.scope === saved.scope && job.originId === route.originId && job.status === 'sending')) {
+        fail('El envío sigue en curso. Espera a que termine antes de marcarlo como revisado.');
+      }
+      const ticket = route.ticket, job = ticket ? queueJobs.find(item => item.id === ticket.id) : null;
+      if (job && !matches(saved.scope, ticket, job)) fail('La misión ha cambiado y no se retirará. Resuelve primero esa misión en la cola.');
+      const at = time(), prior = receiptFor(saved, route.originId);
+      const nextRunAt = Math.max(route.nextRunAt, prior?.nextRunAt ?? 0, integer(at + route.intervalMinutes * 60000));
+      // The explicit human review never asserts "not sent". Assume it was sent
+      // now, durably preserve that conservative barrier, and leave intent paused.
+      route = stamp({ ...route, paused: true, needsReview: true, status: 'review',
+        lastSentAt: Math.max(route.lastSentAt ?? 0, at), nextRunAt,
+        message: 'Envío revisado. Retirando el intento local antes de cerrar la revisión.' });
+      saved = recordReceipt(saved, route.originId, route.lastSentAt, nextRunAt);
+      saved = replace(saved, route);
+      if (context().scope !== saved.scope) fail('La cuenta o galaxia ha cambiado durante la revisión.');
+      const durable = find(load(saved.scope), id);
+      if (!durable.paused || !durable.needsReview || !same(durable.ticket, ticket)) fail('La ruta cambió durante la revisión; comprueba su estado actual.');
+      if (job) {
+        const live = jobs().find(item => item.id === ticket.id);
+        if (!live || !matches(saved.scope, ticket, live) || live.status === 'sending') {
+          fail('La misión cambió durante la revisión. La ruta continúa pausada y pendiente de revisión.');
+        }
+        try {
+          sync(cancel(job.id));
+          if (jobs().some(item => item.id === job.id)) fail();
+        } catch (_) {
+          fail('No se pudo retirar la misión. La ruta continúa pausada y pendiente de revisión.');
+        }
+      }
+      saved = load(saved.scope);
+      const current = find(saved, id);
+      if (!same(current.ticket, ticket) || !current.paused) fail('La ruta cambió durante la revisión; comprueba su estado actual.');
+      if (ticket) liveTickets.delete(witnessKey(saved.scope, ticket));
+      const next = { ...current, ticket: null, needsReview: false, status: 'paused',
+        message: 'Revisión completada. La ruta sigue pausada; al reanudar esperará el intervalo y un censo posterior.' };
+      return copy(find(replace(saved, next), id));
+    }
+    function canRunJob(job) {
+      if (typeof job?.id !== 'string' || !job.id.startsWith('route:')) return true;
+      try {
+        const ctx = context();
+        if (!ctx.canAct || !ctx.coordinated || job.scope !== ctx.scope || job.originId !== ctx.originId) return false;
+        const saved = load(ctx.scope), route = saved.routes.find(item => item.ticket?.id === job.id);
+        if (!route || route.paused || route.needsReview || route.status !== 'queued' || route.ticket.state !== 'queued'
+          || job.needsReview || job.fleetEdit || !['waiting', 'sending'].includes(job.status) || !matches(ctx.scope, route.ticket, job)) return false;
+        if (!Number.isSafeInteger(job.createdAt) || job.createdAt < route.ticket.createdAt || job.createdAt > time()
+          || job.sentAt !== null || (job.status === 'sending'
+            && (!Number.isSafeInteger(job.claimedAt) || job.claimedAt < job.createdAt || job.claimedAt > time()))) return false;
+        const live = jobs().find(item => item.id === job.id);
+        if (!live || !matches(ctx.scope, route.ticket, live) || live.status !== job.status || live.claimedAt !== job.claimedAt
+          || live.createdAt !== job.createdAt || live.sentAt !== job.sentAt || live.needsReview || live.fleetEdit) return false;
+        const world = worldFor(ctx.scope), ready = plan(route, world, route.ticket.quantities);
+        if (!ready || !permits(saved, route, world) || !samePoint(ready.destination, route.ticket.coordinate)) return false;
+        const key = witnessKey(ctx.scope, route.ticket);
+        if (job.status === 'sending' && liveTickets.get(key) !== signature(route.ticket)) return false;
+        liveTickets.set(key, signature(route.ticket));
+        return true;
+      } catch (_) { return false; }
+    }
+    function dueOrigins() {
+      try {
+        const ctx = context();
+        if (!ctx.coordinated) return [];
+        const saved = load(ctx.scope), world = worldFor(ctx.scope), queueJobs = jobs(), at = time(), result = [];
+        for (const route of saved.routes) {
+          if (route.paused || route.needsReview || !permits(saved, route, world)) continue;
+          if (route.ticket) {
+            const job = queueJobs.find(item => item.id === route.ticket.id);
+            const ready = plan(route, world, route.ticket.quantities);
+            if (!matches(ctx.scope, route.ticket, job) || job.status !== 'waiting' || job.needsReview || job.fleetEdit
+              || !ready || !samePoint(ready.destination, route.ticket.coordinate)) continue;
+          } else if (route.nextRunAt > at || !plan(route, world)
+            || queueJobs.some(job => job.scope === ctx.scope && job.originId === route.originId && (job.status !== 'sent' || job.needsReview))) continue;
+          if (!result.includes(route.originId)) result.push(route.originId);
+        }
+        return result;
+      } catch (_) { return []; }
+    }
+    function tick() {
+      if (running) return { queued: [], error };
+      running = true;
+      try {
+        const ctx = context();
+        if (!ctx.coordinated || !ctx.canAct) return { queued: [], error };
+        const world = worldFor(ctx.scope);
+        let saved = reconcile(load(ctx.scope), jobs(), world);
+        const at = time(), queueJobs = jobs();
+        if (!world) return { queued: [], error };
+        const routes = saved.routes.filter(route => !route.paused && !route.needsReview && !route.ticket
+          && route.originId === ctx.originId && route.nextRunAt <= at).sort((a, b) => a.nextRunAt - b.nextRunAt || a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+        for (const route of routes) {
+          if (queueJobs.some(job => job.scope === ctx.scope && job.originId === route.originId && (job.status !== 'sent' || job.needsReview))) break;
+          const ready = plan(route, world);
+          if (!ready || !permits(saved, route, world)) continue;
+          const sequence = integer(saved.sequence + 1, 1);
+          const ticket = { id: `route:${route.id}:${sequence}`, sequence, state: 'prepared', createdAt: at,
+            originId: route.originId, destinationId: route.destinationId, originName: ready.origin.name.trim() || route.originId,
+            targetLabel: ready.destination.name.trim() || route.destinationId,
+            coordinate: { q: ready.destination.q, r: ready.destination.r }, quantities: ready.quantities };
+          const claimed = stamp({ ...route, sequence, ticket, status: 'queued', message: 'Guardando el refuerzo antes de crear la misión.' });
+          saved = commit({ ...saved, sequence, routes: saved.routes.map(item => item.id === route.id ? claimed : item) });
+          // A synchronous onChange hook may pause/delete the route or change the
+          // account. Re-read all authority after persistence and before queueing.
+          const latest = context(), durableBeforeQueue = load(ctx.scope), current = durableBeforeQueue.routes.find(item => item.id === route.id);
+          const freshWorld = worldFor(ctx.scope), fresh = plan(claimed, freshWorld, ticket.quantities);
+          if (latest.scope !== ctx.scope || latest.originId !== route.originId || !latest.canAct || !latest.coordinated
+            || !current || current.paused || current.needsReview || !same(current.ticket, ticket) || !fresh
+            || !permits(durableBeforeQueue, current, freshWorld)
+            || !samePoint(fresh.destination, ticket.coordinate)
+            || jobs().some(job => job.scope === ctx.scope && job.originId === route.originId && (job.status !== 'sent' || job.needsReview))) return { queued: [], error };
+          try {
+            sync(queue(spec(ctx.scope, ticket), { id: ticket.id }));
+            const actual = jobs().find(job => job.id === ticket.id);
+            if (!matches(ctx.scope, ticket, actual) || actual.status !== 'waiting' || actual.needsReview || actual.fleetEdit) fail('No se ha confirmado la misión en espera.');
+            const durable = load(ctx.scope), still = durable.routes.find(item => item.id === route.id);
+            if (!still || still.paused || !same(still.ticket, ticket)) return { queued: [ticket.id], error };
+            liveTickets.set(witnessKey(ctx.scope, ticket), signature(ticket));
+            replace(durable, { ...still, ticket: { ...ticket, state: 'queued' }, message: 'Refuerzo preparado en la cola.' });
+            return { queued: [ticket.id], error };
+          } catch (cause) {
+            const durable = load(ctx.scope), still = durable.routes.find(item => item.id === route.id);
+            if (still?.ticket?.id === ticket.id) replace(durable, review(still, 'No se pudo confirmar la creación de la misión. Revisa la cola; no se repetirá automáticamente.'));
+            throw cause;
+          }
+        }
+        return { queued: [], error };
+      } catch (cause) { error = cause.message || 'No se pudo preparar el refuerzo.'; return { queued: [], error }; }
+      finally { running = false; }
+    }
+    return Object.freeze({ state, list, save, pause, resume, remove, acknowledgeRoute, tick, canRunJob, dueOrigins });
+  }
+  return Object.freeze({ create, SHIPS, MAX_AGE_MS, MAX_QUANTITY, MAX_ROUTES, MAX_RECEIPTS });
+});
+
+/* Local navigation owner for reinforcement routes; uses only the verified native selector. */
+(function(root,factory){if(typeof module==='object'&&module.exports)module.exports=factory();else root.OldLightReinforcementRuntime=factory();})(globalThis,function(){
+'use strict';
+function create({core,adapter,getContext,isEmpireEnabled=()=>false,onChange=()=>{},now=Date.now}) {
+  let operation=null,epoch=0,until=0,error='';
+  function cancel(){epoch++;if(operation)operation.cancelled=true;}
+  function enabled(){const c=getContext();return !!(c?.coordinated&&c.canNavigate&&c.scope&&!isEmpireEnabled());}
+  function tick(){
+    if(operation)return true;
+    if(!enabled()||now()<until)return false;
+    const c=getContext(),ids=core.dueOrigins();
+    if(ids.includes(c.originId))return false;
+    const target=ids[0];if(!target||adapter.canNavigate()===false)return false;
+    const route=core.list().find(r=>r.originId===target&&!r.paused),signature=JSON.stringify(route);
+    if(!route)return false;
+    const op={epoch,scope:c.scope,target,cancelled:false};operation=op;error='';
+    const isCurrent=()=>operation===op&&!op.cancelled&&epoch===op.epoch&&enabled()
+      &&getContext().scope===op.scope&&JSON.stringify(core.list().find(r=>r.id===route.id))===signature
+      &&core.dueOrigins().includes(target);
+    Promise.resolve().then(()=>isCurrent()?adapter.selectSystem(target,{scope:op.scope,isCurrent}):false)
+      .then(result=>{if(result!==true&&isCurrent()){core.pause(route.id);error='No se confirmó el origen. Revisa la ruta antes de reanudarla.';}})
+      .catch(()=>{if(isCurrent()){try{core.pause(route.id);}catch{}error='No se pudo confirmar el origen de la ruta.';}})
+      .finally(()=>{if(operation===op)operation=null;until=now()+1500;onChange();});
+    return true;
+  }
+  return {tick,cancel,isBusy:()=>!!operation,status:()=>error|| (operation?'Seleccionando origen de refuerzos…':'')};
+}
+return {create};
+});
+
+/* Read-only native camera observation for reinforcement arrows. No game orders.
+ * Verified public asset: transits-DloGaxtE.js, SHA-256
+ * 4d79f1bb4e9ca042385be2b49cea6c952d7c21d660de35e30b20b11ec5c11880.
+ * Y is the shared J camera; et converts axial q,r to world coordinates.
+ * The native perspective projection is at byte 7190. No source, names,
+ * account identifiers, coordinates of systems, or privileged APIs cross the pipe.
+ */
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) module.exports = factory();
+  else Object.defineProperty(root, 'OldLightReinforcementMap', { configurable: true, value: factory() });
+})(globalThis, function mapFactory() {
+  'use strict';
+  const ASSET = 'https://oldlight.io/assets/transits-DloGaxtE.js';
+  const LIMITS = Object.freeze({ frame: 2048, staleMs: 1500, heartbeatMs: 500, pollMs: 250, systems: 10000, hitRadius: 18 });
+  const finite = value => typeof value === 'number' && Number.isFinite(value);
+  const bounded = (value, max) => finite(value) && Math.abs(value) <= max;
+  const galaxyAt = realm => realm.location?.origin === 'https://oldlight.io'
+    ? /^\/game\/galaxy\/([A-Za-z0-9_-]{1,64})(?:\/|$)/.exec(realm.location.pathname)?.[1] || '' : '';
+  const equalRect = (a, b) => !!a && !!b && a.left === b.left && a.top === b.top && a.width === b.width && a.height === b.height;
+  const stamp = value => JSON.stringify([value.galaxy, value.revision, value.observedAt]);
+  function rectValue(value) {
+    if (!value || !bounded(value.left, 100000) || !bounded(value.top, 100000)
+      || !finite(value.width) || value.width <= 0 || value.width > 100000
+      || !finite(value.height) || value.height <= 0 || value.height > 100000) return null;
+    return { left: value.left, top: value.top, width: value.width, height: value.height };
+  }
+  function viewport(document) {
+    if (!document || document.hidden === true) return null;
+    const matches = document.querySelectorAll('canvas#stage');
+    if (matches.length !== 1) return null;
+    const canvas = matches[0], app = document.getElementById('app');
+    if (!canvas.isConnected || canvas.hidden || !app?.isConnected || !app.contains(canvas)
+      || (typeof canvas.getClientRects === 'function' && !canvas.getClientRects().length)) return null;
+    const rect = rectValue(canvas.getBoundingClientRect());
+    return rect ? { canvas, rect } : null;
+  }
+  function cameraValue(value) {
+    if (!value || !bounded(value.x, 1e9) || !bounded(value.y, 1e9)
+      || !finite(value.zoom) || value.zoom <= 0 || value.zoom > 100
+      || !finite(value.sinTilt) || value.sinTilt <= 0 || value.sinTilt > 1
+      || !finite(value.cosTilt) || value.cosTilt < 0 || value.cosTilt > 1
+      || Math.abs(value.sinTilt * value.sinTilt + value.cosTilt * value.cosTilt - 1) > 1e-10
+      || !finite(value.L) || value.L <= 1 || value.L > 1e7
+      || !finite(value.baseFocal) || value.baseFocal <= 0 || value.baseFocal > 1e7) return null;
+    return { x: value.x, y: value.y, zoom: value.zoom, sinTilt: value.sinTilt, cosTilt: value.cosTilt, L: value.L, baseFocal: value.baseFocal };
+  }
+  function validateSnapshot(input) {
+    let value;
+    try {
+      if (typeof input === 'string') { if (input.length > LIMITS.frame) return null; value = JSON.parse(input); }
+      else value = input;
+      if (!value || value.version !== 1 || !/^[A-Za-z0-9_-]{1,64}$/.test(value.galaxy || '')
+        || !Number.isSafeInteger(value.revision) || value.revision < 1
+        || !Number.isSafeInteger(value.observedAt) || value.observedAt < 0) return null;
+      const camera = cameraValue(value.camera), rect = rectValue(value.viewport);
+      return camera && rect ? { version: 1, galaxy: value.galaxy, revision: value.revision, observedAt: value.observedAt, camera, viewport: rect } : null;
+    } catch (_) { return null; }
+  }
+  function projectPoint(system, value) {
+    if (!system || !Number.isSafeInteger(system.q) || !Number.isSafeInteger(system.r)
+      || Math.abs(system.q) > 1000000 || Math.abs(system.r) > 1000000 || !value?.camera || !value?.viewport) return null;
+    const c = value.camera, v = value.viewport;
+    const dx = 69 * system.q - c.x, dy = 46 * Math.sqrt(3) * (system.r + system.q / 2) - c.y;
+    const depth = dy * c.cosTilt + c.L;
+    if (!finite(depth) || depth <= 1) return null;
+    const focal = c.baseFocal * c.zoom;
+    const x = focal * dx / depth + v.width / 2, y = -focal * dy * c.sinTilt / depth + v.height / 2;
+    return finite(x) && finite(y) ? { x: v.left + x, y: v.top + y, scale: focal / depth, depth, visible: true } : null;
+  }
+  function unprojectHex(point, value) {
+    const c = value?.camera, v = value?.viewport;
+    if (!c || !v || !point || !finite(point.x) || !finite(point.y)) return null;
+    const screenX = point.x - v.left - v.width / 2, screenY = point.y - v.top - v.height / 2;
+    const focal = c.baseFocal * c.zoom, denominator = focal * c.sinTilt + screenY * c.cosTilt;
+    // Native unproject uses a distant fallback at the perspective horizon.
+    // A hit test must reject it instead of guessing a system at that position.
+    if (!finite(denominator) || Math.abs(denominator) < 1e-6) return null;
+    const dy = -screenY * c.L / denominator, depth = dy * c.cosTilt + c.L;
+    if (!finite(depth) || depth <= 1) return null;
+    const worldX = c.x + screenX * depth / focal, worldY = c.y + dy;
+    const q = 2 / 3 * (worldX / 46), r = -1 / 3 * (worldX / 46) + Math.sqrt(3) / 3 * (worldY / 46), cubeY = -q - r;
+    if (!bounded(q, 1000000) || !bounded(r, 1000000)) return null;
+    let roundedQ = Math.round(q), roundedR = Math.round(r);
+    const roundedY = Math.round(cubeY), qError = Math.abs(roundedQ - q), yError = Math.abs(roundedY - cubeY), rError = Math.abs(roundedR - r);
+    // Exact tie-breaking from native k/A, not nearest-own-system selection.
+    if (qError > yError && qError > rError) roundedQ = -roundedY - roundedR;
+    else if (yError <= rError) roundedR = -roundedQ - roundedY;
+    return { q: roundedQ || 0, r: roundedR || 0 };
+  }
+  // The importer is injectable only for offline fixtures. Production imports the
+  // exact module URL already loaded by this completed, evaluated game page.
+  function installPageObserver({ realm = globalThis, document = realm.document, importModule = url => import(url), now = Date.now,
+    onPending = () => {}, emit = () => {} } = {}) {
+    let stopped = false, installed = false, importing = false, failed = false, reason = 'awaiting-native-camera';
+    let moduleValue = null, camera = null, original = null, wrapper = null, ownDescriptor = null;
+    let activeGalaxy = '', activePath = '', activeCanvas = null, cachedViewport = null, candidate = null, pending = null;
+    let revision = 0, frame = null, timer = null, lastEmittedAt = 0, observing = false, notifying = false, ordinal = 0, lastObservedOrdinal = 0;
+    let resolveReady; const ready = new Promise(resolve => { resolveReady = resolve; });
+    const apply = Reflect.apply;
+    const safePending = value => { try { onPending(value); } catch (_) {} };
+    function invalidate(why) {
+      reason = why; candidate = null; pending = null;
+      safePending(null);
+    }
+    function cancelFrame() { if (frame !== null) { try { realm.cancelAnimationFrame(frame); } catch (_) {} frame = null; } }
+    function unhook() {
+      try {
+        const descriptor = camera && Object.getOwnPropertyDescriptor(camera, 'project');
+        if (descriptor?.value === wrapper) {
+          if (ownDescriptor) Object.defineProperty(camera, 'project', ownDescriptor);
+          else delete camera.project;
+        }
+      } catch (_) {}
+      installed = false;
+    }
+    function fail(why) { failed = true; if (timer !== null) realm.clearTimeout(timer); timer = null; unhook(); cancelFrame(); invalidate(why); resolveReady(false); }
+    function ownsHook() { return installed && Object.getOwnPropertyDescriptor(camera, 'project')?.value === wrapper; }
+    function constantsMatch(c) { return c && camera.sinTilt === c.sinTilt && camera.cosTilt === c.cosTilt && camera.L === c.L && camera.baseFocal === c.baseFocal; }
+    function scheduleFrame() {
+      if (frame !== null || stopped || failed) return;
+      frame = realm.requestAnimationFrame(flush);
+    }
+    function queue(value) {
+      value.revision = ++revision; value.observedAt = now();
+      candidate = value; pending = value;
+      safePending(value); scheduleFrame();
+    }
+    function flush() {
+      frame = null; cachedViewport = null;
+      if (stopped || failed || !installed) return;
+      try {
+        if (!ownsHook()) { fail('camera-hook-replaced'); return; }
+        const view = viewport(document);
+        if (!view || view.canvas !== activeCanvas || galaxyAt(realm) !== activeGalaxy) { invalidate('viewport-unavailable'); return; }
+        cachedViewport = view;
+        if (candidate && !equalRect(view.rect, candidate.viewport)) { invalidate('camera-observation-pending'); return; }
+        if (!pending) return;
+        const value = pending; pending = null;
+        if (!equalRect(view.rect, value.viewport) || !constantsMatch(value.camera)) { invalidate('camera-observation-pending'); return; }
+        // Publish at most once per animation frame. Observing a newer camera has
+        // already invalidated the content-world snapshot synchronously.
+        notifying = true;
+        try { emit(value); lastEmittedAt = now(); reason = ''; } finally { notifying = false; }
+      } catch (_) { invalidate('camera-observation-failed'); }
+    }
+    function observe(receiver, args, callOrdinal) {
+      if (stopped || failed || !installed || receiver !== camera || observing || notifying || callOrdinal < lastObservedOrdinal) return;
+      observing = true;
+      try {
+        lastObservedOrdinal = callOrdinal;
+        if (realm.location.pathname !== activePath || realm.location.origin !== 'https://oldlight.io') { invalidate('game-navigation'); return; }
+        // Zero allocation and no DOM/JSON work for the thousands of matching
+        // projections in a frame. The frame callback refreshes CSS geometry.
+        const x = args[2], y = args[3], zoom = args[4], width = args[5], height = args[6];
+        const c = candidate?.camera, r = cachedViewport?.rect;
+        if (c && r && x === c.x && y === c.y && zoom === c.zoom && width === r.width && height === r.height && constantsMatch(c)) {
+          scheduleFrame(); return;
+        }
+        if (!cachedViewport) cachedViewport = viewport(document);
+        const view = cachedViewport;
+        if (!view || view.canvas !== activeCanvas) { invalidate('viewport-unavailable'); return; }
+        // Native dimensions are CSS pixels. Never accept canvas.width/height,
+        // which are backing-store pixels and differ at DPR > 1.
+        if (width !== view.rect.width || height !== view.rect.height) return;
+        if (!bounded(args[0], 1e12) || !bounded(args[1], 1e12)) return;
+        const values = cameraValue({ x, y, zoom, sinTilt: camera.sinTilt, cosTilt: camera.cosTilt, L: camera.L, baseFocal: camera.baseFocal });
+        if (!values) { invalidate('invalid-native-camera'); return; }
+        if (candidate && c && x === c.x && y === c.y && zoom === c.zoom && constantsMatch(c) && equalRect(candidate.viewport, view.rect)) { scheduleFrame(); return; }
+        queue({ version: 1, galaxy: activeGalaxy, revision: 0, observedAt: 0, camera: values, viewport: view.rect });
+      } finally { observing = false; }
+    }
+    function moduleShape(value) {
+      const shared = value?.Y, Class = value?.J;
+      if (!shared || typeof shared !== 'object' || typeof Class !== 'function' || Object.getPrototypeOf(shared) !== Class.prototype
+        || typeof value.et !== 'function' || value.et.length !== 2) return false;
+      const protoProject = Object.getOwnPropertyDescriptor(Class.prototype, 'project');
+      const focal = Object.getOwnPropertyDescriptor(Class.prototype, 'focal');
+      const unproject = Object.getOwnPropertyDescriptor(Class.prototype, 'unproject');
+      // A changed shape or another hook is not a reason to patch prototypes.
+      if (!protoProject || typeof protoProject.value !== 'function' || protoProject.value.length !== 8 || !protoProject.writable || !protoProject.configurable
+        || !focal || typeof focal.value !== 'function' || focal.value.length !== 1
+        || !unproject || typeof unproject.value !== 'function' || unproject.value.length !== 7) return false;
+      for (const key of ['sinTilt', 'cosTilt', 'L', 'baseFocal']) {
+        const descriptor = Object.getOwnPropertyDescriptor(shared, key);
+        if (!descriptor || !('value' in descriptor) || !finite(descriptor.value)) return false;
+      }
+      if (!cameraValue({ x: 0, y: 0, zoom: 1, sinTilt: shared.sinTilt, cosTilt: shared.cosTilt, L: shared.L, baseFocal: shared.baseFocal })) return false;
+      const own = Object.getOwnPropertyDescriptor(shared, 'project');
+      if (own && (!('value' in own) || own.value !== protoProject.value || !own.writable || !own.configurable)) return false;
+      if (!own && !Object.isExtensible(shared)) return false;
+      return true;
+    }
+    function attach(value, galaxy, view) {
+      if (stopped || failed || galaxyAt(realm) !== galaxy) return;
+      if (!moduleShape(value)) { fail('native-camera-shape-changed'); return; }
+      camera = value.Y; ownDescriptor = Object.getOwnPropertyDescriptor(camera, 'project'); original = camera.project;
+      activeGalaxy = galaxy; activePath = realm.location.pathname; activeCanvas = view.canvas; cachedViewport = view;
+      // Do not touch the shared prototype. Arguments, this, returned identity,
+      // optional out mutation and native exceptions are forwarded unchanged.
+      wrapper = function project(e, t, n, r, i, a, o, s) {
+        const callOrdinal = ++ordinal;
+        const result = apply(original, this, arguments);
+        try { observe(this, arguments, callOrdinal); } catch (_) { try { invalidate('camera-observation-failed'); } catch (_) {} }
+        return result;
+      };
+      const descriptor = ownDescriptor || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(camera), 'project');
+      Object.defineProperty(camera, 'project', { ...descriptor, value: wrapper });
+      installed = true; reason = 'awaiting-native-projection'; resolveReady(true);
+    }
+    function nativeReady() {
+      if (document.readyState !== 'complete' || !galaxyAt(realm)) return null;
+      const view = viewport(document); if (!view) return null;
+      // Both controls are constructed under #app by the evaluated galaxy
+      // module. A static canvas or a modulepreload alone is not sufficient.
+      const app = document.getElementById('app');
+      for (const selector of ['.star-hover', '.star-actions']) {
+        const controls = document.querySelectorAll(selector);
+        if (controls.length !== 1 || !controls[0].isConnected || !app.contains(controls[0])) return null;
+      }
+      // Vite modulepreload entries retain initiatorType=link after evaluation.
+      // Runtime-created controls above distinguish this from preload alone.
+      const resources = realm.performance?.getEntriesByType?.('resource');
+      if (!Array.isArray(resources) || !resources.some(entry => entry.name === ASSET && (entry.initiatorType === 'script' || entry.initiatorType === 'link') && finite(entry.responseEnd) && entry.responseEnd > 0)) return null;
+      return view;
+    }
+    function tick() {
+      timer = null;
+      if (stopped || failed) return;
+      try {
+        if (installed) {
+          if (!ownsHook()) { fail('camera-hook-replaced'); return; }
+          const view = viewport(document), galaxy = galaxyAt(realm);
+          if (!view || view.canvas !== activeCanvas || galaxy !== activeGalaxy) {
+            unhook(); cancelFrame(); invalidate('viewport-unavailable'); cachedViewport = null;
+          } else {
+            cachedViewport = view;
+            if (candidate && (!equalRect(candidate.viewport, view.rect) || !constantsMatch(candidate.camera))) invalidate('camera-observation-pending');
+            if (candidate && !pending && now() - lastEmittedAt >= LIMITS.heartbeatMs) queue({ ...candidate, camera: { ...candidate.camera }, viewport: { ...candidate.viewport } });
+          }
+        }
+        if (!installed && !importing) {
+          const view = nativeReady();
+          if (view) {
+            const galaxy = galaxyAt(realm);
+            if (moduleValue) attach(moduleValue, galaxy, view);
+            else {
+              importing = true;
+              Promise.resolve().then(() => importModule(ASSET)).then(value => {
+                importing = false;
+                if (stopped || failed) return;
+                moduleValue = value;
+                const current = nativeReady();
+                if (current && current.canvas === view.canvas && galaxyAt(realm) === galaxy) attach(value, galaxy, current);
+              }).catch(() => { importing = false; if (!stopped) fail('native-camera-import-failed'); });
+            }
+          }
+        }
+      } catch (_) { fail('native-camera-unavailable'); }
+      if (!stopped && !failed) timer = realm.setTimeout(tick, LIMITS.pollMs);
+    }
+    if (typeof realm.requestAnimationFrame !== 'function' || typeof realm.cancelAnimationFrame !== 'function'
+      || typeof realm.setTimeout !== 'function' || typeof realm.clearTimeout !== 'function') fail('camera-timing-unavailable');
+    else tick();
+    return Object.freeze({ ready, status: () => ({ installed, observed: !!candidate, reason, stopped }),
+      stop() { if (stopped) return; stopped = true; if (timer !== null) realm.clearTimeout(timer); timer = null; cancelFrame(); unhook(); invalidate('stopped'); resolveReady(false); },
+    });
+  }
+  function create({ realm = globalThis, document = realm.document, addElement, observerSource, now = Date.now, getScope } = {}) {
+    const eventName = 'oldlight-reinforcement-map-bootstrap', pendingAttribute = 'data-oldlight-map-pending';
+    let stopped = false, failed = false, installed = false, reason = 'awaiting-native-camera', current = null, currentCanvas = null;
+    let container = null, port = null, ackTimer = null, watcher = null, lastRevision = 0, boundScope = '';
+    let channel;
+    try { channel = 'oldlight_map_' + realm.crypto.randomUUID().replace(/-/g, ''); } catch (_) { failed = true; reason = 'camera-channel-unavailable'; }
+    function cleanupBootstrap() {
+      watcher?.disconnect(); watcher = null;
+      if (ackTimer !== null) { realm.clearTimeout(ackTimer); ackTimer = null; }
+      container?.removeEventListener(eventName, handshake); container?.remove();
+    }
+    function clear(why) { current = null; currentCanvas = null; reason = why; }
+    function fail(why) { failed = true; installed = false; cleanupBootstrap(); try { port?.postMessage('stop'); } catch (_) {} port?.close(); port = null; clear(why); }
+    function receive(event) {
+      if (stopped || failed) return;
+      const value = typeof event.data === 'string' ? validateSnapshot(event.data) : null;
+      if (!value || value.galaxy !== galaxyAt(realm) || value.observedAt > now() || now() - value.observedAt > LIMITS.staleMs) { clear('invalid-camera-observation'); return; }
+      if (value.revision <= lastRevision) { clear('out-of-order-camera-observation'); return; }
+      lastRevision = value.revision;
+      try {
+        const view = viewport(document);
+        if (!view || !equalRect(value.viewport, view.rect)) { clear('viewport-unavailable'); return; }
+        current = value; currentCanvas = view.canvas; reason = '';
+      } catch (_) { clear('viewport-unavailable'); }
+    }
+    function handshake(event) {
+      if (stopped || failed || port || event.target !== container || container.isConnected || event.data !== channel || event.ports?.length !== 1) return;
+      port = event.ports[0]; port.addEventListener('message', receive); port.start(); installed = true; cleanupBootstrap();
+    }
+    function inject() {
+      if (stopped || failed || installed || container) return;
+      const parent = document.documentElement || document.head; if (!parent) return;
+      container = document.createElement('div'); container.hidden = true; container.addEventListener(eventName, handshake);
+      const source = typeof observerSource === 'string'
+        ? observerSource + '\nconst api=globalThis.OldLightReinforcementMap;'
+        : 'const api=(' + mapFactory.toString() + ')();';
+      const textContent = `(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected)return;target.remove();${source}\nconst channel=${JSON.stringify(channel)},attribute=${JSON.stringify(pendingAttribute)};const pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;const cleanup=()=>{try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();};pipe.port1.addEventListener('message',event=>{if(event.data==='stop')cleanup();});try{handle=api.installPageObserver({onPending:value=>{if(value)target.setAttribute(attribute,JSON.stringify([value.galaxy,value.revision,value.observedAt]));else target.removeAttribute(attribute);},emit:value=>{const data=JSON.stringify(value);if(ready)send(data);else pending=data;}});target.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);}catch(_){cleanup();}})();`;
+      try {
+        parent.appendChild(container);
+        ackTimer = realm.setTimeout(() => { ackTimer = null; if (!installed && !stopped) fail('camera-injection-unavailable'); }, 2000);
+        addElement(container, 'script', { textContent });
+      } catch (_) { fail('camera-injection-unavailable'); }
+    }
+    function settled({ canvas, rect, scope } = {}) {
+      if (stopped || failed || !current) return null;
+      if (typeof scope === 'string' && scope) {
+        if (scope.split('/')[0] !== current.galaxy) { clear('game-scope-changed'); return null; }
+        if (boundScope && scope !== boundScope) { boundScope = scope; clear('game-scope-changed'); return null; }
+        boundScope = scope;
+      }
+      if (current.galaxy !== galaxyAt(realm) || current.observedAt > now() || now() - current.observedAt > LIMITS.staleMs) { clear('stale-camera-observation'); return null; }
+      try {
+        if (container?.getAttribute(pendingAttribute) !== stamp(current)) return null;
+        const view = viewport(document);
+        if (!view || view.canvas !== currentCanvas || (canvas && canvas !== view.canvas) || !equalRect(view.rect, current.viewport)
+          || (rect && !equalRect(rect, view.rect))) return null;
+        return current;
+      } catch (_) { return null; }
+    }
+    if (!failed) {
+      if (typeof addElement !== 'function') fail('camera-permission-unavailable');
+      else {
+        inject();
+        if (!container && !failed && typeof realm.MutationObserver === 'function') {
+          watcher = new realm.MutationObserver(() => { inject(); if (container || failed) { watcher?.disconnect(); watcher = null; } });
+          watcher.observe(document, { childList: true, subtree: true });
+        }
+      }
+    }
+    return Object.freeze({
+      projectSystem(system, options = {}) { const value = settled(options); return value ? projectPoint(system, value) : null; },
+      hitTestSystem(point, rows) {
+        if (!point || !finite(point.x) || !finite(point.y) || !Array.isArray(rows) || rows.length > LIMITS.systems) return null;
+        let scope; try { scope = typeof getScope === 'function' ? getScope() : boundScope; } catch (_) { return null; }
+        const value = settled({ scope }); if (!value) return null;
+        const rect = value.viewport;
+        if (point.x < rect.left || point.x > rect.left + rect.width || point.y < rect.top || point.y > rect.top + rect.height) return null;
+        const hex = unprojectHex(point, value); if (!hex) return null;
+        let match = null;
+        for (const system of rows) {
+          if (!system || system.q !== hex.q || system.r !== hex.r) continue;
+          const p = projectPoint(system, value);
+          if (!p || p.x < rect.left || p.x > rect.left + rect.width || p.y < rect.top || p.y > rect.top + rect.height
+            || Math.hypot(p.x - point.x, p.y - point.y) > LIMITS.hitRadius) continue;
+          if (match) return null;
+          match = system;
+        }
+        return match;
+      },
+      status() { const valid = !!settled(); return { installed, observed: !!current, available: valid, reason: valid ? '' : reason || 'camera-observation-pending' }; },
+      stop() {
+        if (stopped) return; stopped = true; cleanupBootstrap();
+        try { port?.postMessage('stop'); } catch (_) {}
+        port?.removeEventListener('message', receive); port?.close(); port = null; installed = false; clear('stopped');
+      },
+    });
+  }
+  return Object.freeze({ create, installPageObserver, validateSnapshot, projectPoint, unprojectHex, ASSET, LIMITS });
+});
+
+/* Reinforcement preferences and a read-only map overlay. Never issues game orders.
+ * Native evidence: galaxy-CqK10P8m.js (SHA-256 ba9c761ac00e7f513a58014a33574fbcfef1f4942ffc3b337ef606ea4ab0ccdc):
+ * #stage boot 530821; Sl .star-hover 334350–335670; B camera closure 543866.
+ * A hover supplies an exact projected point, but only a name. Resolve a unique
+ * own-system name against the current census, check cursor proximity, and ask
+ * the user to review the explicit system names/coordinates before saving.
+ * The native radial menu is clamped and MUST NOT be used as a map anchor.
+ */
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) module.exports = factory();
+  else root.OldLightReinforcementPanel = factory();
+})(typeof globalThis === 'object' ? globalThis : this, function () {
+  'use strict';
+  const SHIPS = ['probe', 'marauder', 'sentinel', 'vanguard'];
+  const LABELS = { probe: 'Probe', marauder: 'Marauder', sentinel: 'Sentinel', vanguard: 'Vanguard' };
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const SVG = 'http://www.w3.org/2000/svg';
+  const CSS = `
+.oldlight-routes{font:13px/1.4 system-ui,sans-serif;color:#e5eef6;background:#101d29;border:1px solid #415a70;border-radius:9px;padding:10px;max-width:100%;box-sizing:border-box;color-scheme:dark}
+.oldlight-routes *{box-sizing:border-box}.oldlight-routes summary{font-weight:650;cursor:pointer;min-height:28px;padding:3px 0}.oldlight-routes p{margin:7px 0}.oldlight-routes button,.oldlight-routes select,.oldlight-routes input{font:inherit;color:inherit;background:#172b3c;border:1px solid #526b7e;border-radius:6px;min-height:32px;max-width:100%;padding:5px;min-width:0}.oldlight-routes button{cursor:pointer}.oldlight-routes button:disabled{opacity:.5;cursor:default}.oldlight-routes :focus-visible{outline:2px solid #79d7dd;outline-offset:2px}.oldlight-routes [hidden]{display:none!important}.oldlight-route-hint{font-size:11px;color:#b5c6d6}.oldlight-route-error{color:#ffb3a7}.oldlight-route-status{color:#a7d9d6}.oldlight-route-tools{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}.oldlight-route-editor{border-top:1px solid #415a70;margin-top:9px;padding-top:8px}.oldlight-route-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.oldlight-route-fields label{display:grid;gap:3px;min-width:0}.oldlight-route-ship{display:grid;grid-template-columns:minmax(64px,1fr) minmax(90px,1.3fr) minmax(50px,1fr);gap:6px;align-items:center;margin:6px 0}.oldlight-route-ship input{width:100%}.oldlight-route-row{padding:8px 0;border-top:1px solid #30485a}.oldlight-route-row p{overflow-wrap:anywhere}.oldlight-route-map{display:block;width:100%;height:150px;background:#09131e;border-radius:6px;margin:8px 0}.oldlight-route-map text{fill:#c9dce7;font:10px system-ui,sans-serif}.oldlight-route-map circle{fill:#b7e9ee;stroke:#0c1721;stroke-width:2}.oldlight-route-map line,.oldlight-route-overlay line{stroke:#6be1d3;stroke-width:2;vector-effect:non-scaling-stroke}.oldlight-route-map line[data-paused=true],.oldlight-route-overlay line[data-paused=true]{stroke:#adb6c4;stroke-dasharray:5 4}.oldlight-route-overlay{position:fixed;pointer-events:none;z-index:140;overflow:hidden}.oldlight-route-overlay *{pointer-events:none}.oldlight-route-overlay line[data-preview=true]{stroke-dasharray:4 4}.oldlight-route-row[data-paused=true]{opacity:.8}
+@media(max-width:420px){.oldlight-route-fields{grid-template-columns:minmax(0,1fr)}.oldlight-routes button,.oldlight-routes select,.oldlight-routes input{min-height:40px}.oldlight-route-ship{grid-template-columns:minmax(60px,1fr) minmax(90px,1.5fr) minmax(50px,1fr)}}`;
+  let sequence = 0;
+  const finite = n => typeof n === 'number' && Number.isFinite(n);
+  const integer = (value, minimum, maximum) => /^(?:0|[1-9]\d*)$/.test(String(value)) && Number.isSafeInteger(Number(value)) && Number(value) >= minimum && Number(value) <= maximum;
+  const clean = value => typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 180) : '';
+  const label = system => `${clean(system.name) || 'Sistema'} (${system.q}, ${system.r})`;
+  const pointValid = p => p && finite(p.x) && finite(p.y) && p.visible !== false;
+  function ownSystems(world, scope, at = Date.now()) {
+    if (!scope || !world || world.scope !== scope || world.connected !== true || world.complete !== true
+        || scope !== `${world.galaxy}/${world.selfId}` || !world.selfId
+        || !Number.isSafeInteger(world.observedAt) || world.observedAt < 0 || world.observedAt > at
+        || at - world.observedAt > 120000 || !Array.isArray(world.systems)) return [];
+    const ids = new Set(), coords = new Set(), result = [];
+    for (const system of world.systems) {
+      if (!system || !UUID.test(system.id || '') || !Number.isSafeInteger(system.q) || !Number.isSafeInteger(system.r)) return [];
+      const id = system.id.toLowerCase(), key = `${system.q},${system.r}`;
+      if (ids.has(id) || coords.has(key)) return [];
+      ids.add(id); coords.add(key); result.push({ ...system, id });
+    }
+    return result;
+  }
+  function create(options = {}) {
+    const document = options.document || globalThis.document;
+    const window = options.window || document?.defaultView || globalThis;
+    if (!document?.createElement) throw new TypeError('A document is required.');
+    const getWorld = options.getWorld || (() => null), getScope = options.getScope || (() => getWorld()?.scope || '');
+    const getRoutes = options.getRoutes || (() => []), now = options.now || Date.now;
+    const timer = options.setTimeout || window.setTimeout?.bind(window) || setTimeout;
+    const clearTimer = options.clearTimeout || window.clearTimeout?.bind(window) || clearTimeout;
+    const id = ++sequence, markerId = `oldlight-route-arrow-${id}`, miniMarkerId = markerId + '-mini';
+    let root, style, details, list, status, error, availability, editor, mini, overlay, origin, destination, interval, saveButton, mapHint;
+    let destroyed = false, scope = null, scopeEpoch = 0, editorScope = '', draftId = null, busy = false, operation = 0;
+    let gesture = null, releaseTimer = null, ignoreClick = null, anchors = new Map(), hoverSample = null;
+    let listSignature = '', selectSignature = '', overlaySignature = '', miniSignature = '', frame = null, lastFrame = 0, viewIdentity = '';
+    let sourceError = '', mapCache = null;
+    const readError = () => { try { return clean(options.getError?.() || ''); } catch (_) { return 'No se puede leer el estado de las rutas.'; } };
+    const fields = new Map(), listeners = [];
+    const el = (tag, text, cls) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node; };
+    const svg = tag => document.createElementNS(SVG, tag);
+    const attr = (node, key, value) => { const s = String(value); if (node.getAttribute(key) !== s) node.setAttribute(key, s); };
+    const write = (node, value) => { if (node && node.textContent !== value) node.textContent = value; };
+    // SVGElement.hidden is not a reliable reflected property in browsers.
+    const hideSVG = (node, hidden) => { node.hidden = hidden; node.style.display = hidden ? 'none' : ''; };
+    const call = (name, ...args) => { if (typeof options[name] !== 'function') throw new Error('El guardado de rutas no está disponible.'); return options[name](...args); };
+    const listen = (target, name, callback, capture = false) => {
+      if (!target?.addEventListener) return;
+      target.addEventListener(name, callback, capture); listeners.push(() => target.removeEventListener(name, callback, capture));
+    };
+    const systems = () => {
+      const world = getWorld();
+      const identity = `${getScope()}|${world?.epoch ?? ''}|${window.location?.pathname || ''}|${window.location?.search || ''}|${document.querySelector?.('[data-field="nameplate-name"]')?.textContent || ''}`;
+      if (identity !== viewIdentity) { viewIdentity = identity; invalidateMap(); }
+      return ownSystems(world, getScope(), now());
+    };
+    const routes = () => { const value = getRoutes(); return Array.isArray(value) ? value.filter(route => route && (!route.scope || route.scope === scope)) : []; };
+    const button = (text, action) => { const node = el('button', text); node.type = 'button'; node.addEventListener('click', action); return node; };
+    const current = () => !destroyed && root && scope && scope === getScope();
+    const report = (message, failed = false) => { write(error, failed ? message : ''); write(status, failed ? '' : message); };
+    function observeScope(next) {
+      next = typeof next === 'string' ? next : '';
+      if (next === scope) return false;
+      scope = next; scopeEpoch++; operation++; busy = false; editorScope = ''; draftId = null;
+      if (editor) editor.hidden = true;
+      cancelGesture(); invalidateMap(); mapCache = null; listSignature = ''; selectSignature = ''; miniSignature = '';
+      if (root) report('');
+      return true;
+    }
+    function invalidateMap() {
+      anchors.clear(); hoverSample = null; overlaySignature = '';
+      if (overlay) { overlay.replaceChildren(); hideSVG(overlay, true); }
+    }
+    function cancelGesture() {
+      gesture = null;
+      if (releaseTimer !== null) clearTimer(releaseTimer);
+      releaseTimer = null; overlaySignature = '';
+    }
+    function makeMarker(container, name) {
+      const defs = svg('defs'), marker = svg('marker'), path = svg('path');
+      for (const node of [defs, marker, path]) { node.style.pointerEvents = 'none'; attr(node, 'pointer-events', 'none'); }
+      for (const [key, value] of Object.entries({ id: name, markerWidth: 8, markerHeight: 8, refX: 7, refY: 4, orient: 'auto', markerUnits: 'strokeWidth' })) attr(marker, key, value);
+      attr(path, 'd', 'M 0 0 L 8 4 L 0 8 z'); attr(path, 'fill', '#6be1d3'); marker.append(path); defs.append(marker); container.append(defs);
+    }
+    function addLine(container, from, to, route, marker, preview = false) {
+      if (!pointValid(from) || !pointValid(to)) return;
+      const length = Math.hypot(to.x - from.x, to.y - from.y); if (length < 2) return;
+      const padding = Math.min(9, length / 4), dx = (to.x - from.x) / length, dy = (to.y - from.y) / length;
+      const line = svg('line');
+      for (const [key, value] of Object.entries({ x1: from.x + dx * padding, y1: from.y + dy * padding,
+        x2: to.x - dx * padding, y2: to.y - dy * padding, 'marker-end': `url(#${marker})`, 'data-route-id': route.id || 'draft', 'data-paused': route.paused === true, 'data-preview': preview,
+        stroke: route.paused ? '#adb6c4' : '#6be1d3', 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke',
+        'pointer-events': 'none', ...(preview || route.paused ? { 'stroke-dasharray': preview ? '4 4' : '5 4' } : {}) })) attr(line, key, value);
+      line.style.pointerEvents = 'none';
+      const title = svg('title'); title.style.pointerEvents = 'none'; title.textContent = preview ? 'Nueva ruta' : `Ruta ${route.paused ? 'pausada' : 'activa'}`; line.append(title); container.append(line);
+    }
+    function drawMini(rows, items) {
+      const signature = JSON.stringify([rows.map(s => [s.id, s.name, s.q, s.r]), items.map(r => [r.id, r.originId, r.destinationId, r.paused])]);
+      if (signature === miniSignature) return;
+      miniSignature = signature; mini.replaceChildren(); makeMarker(mini, miniMarkerId);
+      if (!rows.length) { hideSVG(mini, true); return; }
+      hideSVG(mini, false); attr(mini, 'viewBox', '0 0 320 150');
+      // A schematic uses axial coordinates only; it never claims native camera alignment.
+      const raw = rows.map(s => ({ s, x: s.q + s.r / 2, y: s.r * Math.sqrt(3) / 2 }));
+      const xs = raw.map(p => p.x), ys = raw.map(p => p.y), minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+      const scale = Math.min(268 / Math.max(1, maxX - minX), 108 / Math.max(1, maxY - minY));
+      const points = new Map(raw.map(p => [p.s.id, { x: 160 + (p.x - (minX + maxX) / 2) * scale, y: 75 + (p.y - (minY + maxY) / 2) * scale }]));
+      for (const route of items) addLine(mini, points.get(route.originId), points.get(route.destinationId), route, miniMarkerId);
+      for (const s of rows) {
+        const point = points.get(s.id), circle = svg('circle'), title = svg('title');
+        attr(circle, 'cx', point.x); attr(circle, 'cy', point.y); attr(circle, 'r', 4); title.textContent = label(s); circle.append(title); mini.append(circle);
+      }
+    }
+    function stage() { return options.getMapElement?.() || document.querySelector?.('canvas#stage'); }
+    function nativeHover(rows) {
+      const node = document.querySelector?.('.star-hover');
+      if (!node || node.hidden || node.style?.display === 'none' || node.getClientRects?.().length === 0) return null;
+      const name = node.querySelector?.('.star-hover-name')?.textContent;
+      if (!name || !rows.length) return null;
+      const matches = rows.filter(s => s.name === name);
+      if (matches.length !== 1) return null;
+      const canvas = stage(), rect = canvas?.getBoundingClientRect?.(), parent = node.parentNode?.getBoundingClientRect?.();
+      const left = /^-?(?:\d+(?:\.\d+)?|\.\d+)px$/.test(node.style?.left || '') ? parseFloat(node.style.left) : NaN;
+      const top = /^-?(?:\d+(?:\.\d+)?|\.\d+)px$/.test(node.style?.top || '') ? parseFloat(node.style.top) : NaN;
+      if (!rect || !parent || !finite(left) || !finite(top) || rect.width <= 0 || rect.height <= 0) return null;
+      const point = { x: parent.left + left, y: parent.top + top };
+      if (point.x < rect.left || point.x > rect.right || point.y < rect.top || point.y > rect.bottom) return null;
+      return { system: matches[0], point };
+    }
+    function sampleHover(rows) {
+      const sample = nativeHover(rows);
+      if (!sample) { hoverSample = null; return null; }
+      const existing = anchors.get(sample.system.id);
+      if (existing && Math.hypot(existing.x - sample.point.x, existing.y - sample.point.y) > .5) invalidateMap();
+      anchors.set(sample.system.id, sample.point); hoverSample = sample;
+      return sample;
+    }
+    function blocked() {
+      return document.hidden === true || !!document.querySelector?.('dialog[open]') || document.body?.classList?.contains('ui-hidden') || options.canInteract?.() === false;
+    }
+    function pick(event, rows) {
+      if (typeof options.hitTestSystem === 'function') {
+        const found = options.hitTestSystem({ x: event.clientX, y: event.clientY }, rows);
+        const system = rows.find(s => s.id === (typeof found === 'string' ? found : found?.id));
+        return system || null;
+      }
+      const sample = sampleHover(rows);
+      return sample && Math.hypot(sample.point.x - event.clientX, sample.point.y - event.clientY) <= 22 ? sample.system : null;
+    }
+    function projected(system, rect) {
+      if (!system) return null;
+      const given = options.projectSystem?.(system, { scope, canvas: stage(), rect });
+      const point = typeof options.projectSystem === 'function' ? given : anchors.get(system.id);
+      return pointValid(point) ? { x: point.x - rect.left, y: point.y - rect.top, visible: point.visible } : null;
+    }
+    function drawOverlay() {
+      if (!overlay || destroyed) return;
+      observeScope(getScope());
+      const canvas = stage(), rect = canvas?.getBoundingClientRect?.();
+      if (!current() || blocked() || !rect || rect.width <= 0 || rect.height <= 0 || canvas.hidden) { hideSVG(overlay, true); return; }
+      const at = now();
+      if (!mapCache || mapCache.scope !== scope || at < mapCache.at || at - mapCache.at >= 500) {
+        const items = routes();
+        mapCache = { scope, at, items, rows: (gesture || items.length) ? systems() : [] };
+      }
+      const { rows, items } = mapCache;
+      if (!gesture && !items.length) { hideSVG(overlay, true); return; }
+      sampleHover(rows);
+      const byId = new Map(rows.map(s => [s.id, s]));
+      const segments = items.map(route => ({ route, from: projected(byId.get(route.originId), rect), to: projected(byId.get(route.destinationId), rect) })).filter(s => pointValid(s.from) && pointValid(s.to));
+      if (gesture && gesture.scope === scope) segments.push({ route: { id: 'draft' }, from: projected(byId.get(gesture.originId), rect), to: { x: gesture.x - rect.left, y: gesture.y - rect.top }, preview: true });
+      const signature = JSON.stringify([rect.left, rect.top, rect.width, rect.height, segments]);
+      hideSVG(overlay, !segments.length);
+      if (signature === overlaySignature) return;
+      overlaySignature = signature; overlay.replaceChildren();
+      Object.assign(overlay.style, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
+      attr(overlay, 'viewBox', `0 0 ${rect.width} ${rect.height}`); makeMarker(overlay, markerId);
+      for (const segment of segments) addLine(overlay, segment.from, segment.to, segment.route, markerId, segment.preview);
+    }
+    function showEditor(originId, destinationId, route = null) {
+      observeScope(getScope()); if (!current() || busy) return;
+      const rows = systems(); if (rows.length < 2) { report('Se necesitan dos sistemas propios verificados.', true); return; }
+      editorScope = scope; draftId = route?.id || null; editor.hidden = false; details.open = true;
+      populateSelects(rows);
+      origin.value = originId || rows[0].id; destination.value = destinationId || rows.find(s => s.id !== origin.value)?.id || '';
+      interval.value = String(route?.intervalMinutes || 5);
+      for (const type of SHIPS) {
+        const cfg = route?.ships?.[type], f = fields.get(type);
+        f.mode.value = cfg?.mode === 'excess' ? 'excess' : 'fixed';
+        f.amount.value = String(cfg?.mode === 'excess' ? cfg.reserve || 0 : cfg?.amount || 0);
+        updateShip(type);
+      }
+      saveButton.textContent = draftId ? 'Guardar cambios' : 'Crear ruta';
+      report('Revisa los extremos y la composición antes de guardar.');
+      const openingEpoch = scopeEpoch;
+      try { options.onOpen?.({ originId: origin.value, destinationId: destination.value, routeId: draftId }); }
+      catch (_) { report('No se pudo mostrar la configuración de la ruta. Abre Flota y Misiones en el Helper.', true); return; }
+      observeScope(getScope());
+      if (current() && openingEpoch === scopeEpoch && !editor.hidden && editorScope === scope) origin.focus?.();
+    }
+    function updateShip(type) {
+      const f = fields.get(type), excess = f.mode.value === 'excess';
+      f.amount.setAttribute('aria-label', `${excess ? 'Reserva' : 'Cantidad'} de ${LABELS[type]}`);
+      f.amount.max = excess ? '1000000000' : '50000';
+      f.amount.title = excess ? 'Dejar esta cantidad en el origen; enviar el excedente disponible.' : 'Cantidad por envío; cero desactiva este tipo.';
+    }
+    function populateSelects(rows) {
+      const signature = JSON.stringify(rows.map(s => [s.id, s.q, s.r, s.name]));
+      if (signature === selectSignature) return;
+      selectSignature = signature;
+      for (const select of [origin, destination]) {
+        const previous = select.value; select.replaceChildren();
+        for (const system of rows) { const option = el('option', label(system)); option.value = system.id; select.append(option); }
+        if (rows.some(s => s.id === previous)) select.value = previous;
+      }
+    }
+    function save() {
+      const previousScope = editorScope; observeScope(getScope());
+      if (!current() || busy || editor.hidden || !previousScope || previousScope !== scope || editorScope !== scope) return;
+      const rows = systems(), ids = new Set(rows.map(s => s.id));
+      if (!ids.has(origin.value) || !ids.has(destination.value) || origin.value === destination.value) { report('Elige dos sistemas propios distintos y verificados.', true); return; }
+      if (!integer(interval.value, 1, 1440)) { report('El intervalo debe ser de 1 a 1440 minutos enteros.', true); return; }
+      const ships = {}; let enabled = false;
+      for (const type of SHIPS) {
+        const f = fields.get(type), mode = f.mode.value;
+        if (!['fixed', 'excess'].includes(mode) || !integer(f.amount.value, 0, mode === 'fixed' ? 50000 : 1000000000)) { report('Usa enteros: cantidad entre 0 y 50000; reserva entre 0 y 1000000000.', true); return; }
+        ships[type] = { mode, amount: mode === 'fixed' ? Number(f.amount.value) : 0, reserve: mode === 'excess' ? Number(f.amount.value) : 0 };
+        enabled ||= mode === 'excess' || Number(f.amount.value) > 0;
+      }
+      if (!enabled) { report('Indica al menos una cantidad o un tipo con excedente.', true); return; }
+      const existing = draftId ? routes().find(route => route.id === draftId) : null;
+      if (draftId && !existing) { report('La ruta ya no existe. Ábrela de nuevo para editarla.', true); return; }
+      const next = { ...(draftId ? { id: draftId } : {}), ...(typeof existing?.name === 'string' ? { name: existing.name } : {}), originId: origin.value, destinationId: destination.value,
+        intervalMinutes: Number(interval.value), ships, paused: existing?.paused === true };
+      act(() => call('onSave', next), () => { editor.hidden = true; editorScope = ''; draftId = null; report('Ruta guardada.'); });
+    }
+    function act(callback, success) {
+      observeScope(getScope()); if (!current() || busy) return;
+      const failure = readError(); if (failure) { report(failure, true); return; }
+      const epoch = scopeEpoch, token = ++operation; busy = true; updateDisabled();
+      const done = (result, cause) => {
+        observeScope(getScope()); if (destroyed || epoch !== scopeEpoch || token !== operation) return;
+        busy = false;
+        if (cause || result === false || result?.ok === false) report(clean(cause?.message || result?.message || result?.reason) || 'No se pudo guardar el cambio.', true);
+        else success();
+        listSignature = ''; render();
+      };
+      try { const result = callback(); if (result?.then) Promise.resolve(result).then(value => done(value), cause => done(null, cause)); else done(result); }
+      catch (cause) { done(null, cause); }
+    }
+    function updateDisabled() {
+      if (!root) return;
+      for (const node of root.querySelectorAll?.('button, input, select') || []) node.disabled = busy;
+    }
+    function render() {
+      if (!root || destroyed) return;
+      observeScope(getScope());
+      const previousError = sourceError; sourceError = readError();
+      if (sourceError) write(error, sourceError); else if (previousError && error.textContent === previousError) write(error, '');
+      const capability = options.getAvailability?.();
+      write(mapHint, typeof options.projectSystem === 'function'
+        ? capability?.cameraAvailable === false ? 'Mapa nativo: esperando una cámara verificada. Puedes configurar las rutas con los selectores.' : 'Las flechas del mapa siguen la cámara y el zoom con posiciones verificadas. Debajo aparece un esquema por coordenadas.'
+        : 'Esquema por coordenadas. Las flechas sobre el mapa principal aparecen con posiciones verificadas; se ocultan al mover o ampliar la vista.');
+      write(availability, capability?.coordinated === false ? 'Envíos bloqueados: este navegador no ofrece Web Locks para coordinar las pestañas.' : 'Los envíos necesitan datos recientes y coordinación Web Locks entre pestañas.');
+      const rows = systems(), items = routes(), byId = new Map(rows.map(s => [s.id, s]));
+      mapCache = { scope, at: now(), rows, items };
+      populateSelects(rows); drawMini(rows, items);
+      const signature = JSON.stringify([scope, sourceError, rows.map(s => [s.id, s.name, s.q, s.r]), items]);
+      if (signature !== listSignature) {
+        listSignature = signature; list.replaceChildren();
+        if (sourceError) list.append(el('p', 'Las rutas están bloqueadas hasta recuperar su estado local.', 'oldlight-route-error'));
+        else if (!scope || !rows.length) list.append(el('p', 'Esperando el censo propio de la cuenta y galaxia actuales.', 'oldlight-route-hint'));
+        else if (!items.length) list.append(el('p', 'Aún no hay rutas de refuerzo.', 'oldlight-route-hint'));
+        for (const route of items) {
+          const rowEpoch = scopeEpoch;
+          const row = el('div', undefined, 'oldlight-route-row'); row.dataset.paused = String(route.paused === true);
+          const source = byId.get(route.originId), target = byId.get(route.destinationId);
+          row.append(el('p', `${source ? label(source) : 'Origen no verificado'} → ${target ? label(target) : 'Destino no verificado'}`));
+          const composition = SHIPS.flatMap(type => {
+            const s = route.ships?.[type]; if (!s) return [];
+            if (s.mode === 'excess') return [`${LABELS[type]}: excedente, reserva ${s.reserve || 0}`];
+            return s.amount > 0 ? [`${s.amount} ${LABELS[type]}`] : [];
+          }).join(' · ');
+          row.append(el('p', `${route.needsReview ? 'Revisión necesaria' : route.paused ? 'Pausada' : route.status === 'queued' ? 'En cola' : 'Activa'} · cada ${route.intervalMinutes} min${composition ? ' · ' + composition : ''}`, 'oldlight-route-hint'));
+          if (route.needsReview) row.append(el('p', 'Comprueba los movimientos del juego. Marcar como revisado descarta este intento local, conserva la ruta pausada y exige un nuevo intervalo y censo; no se repetirá el envío automáticamente.', 'oldlight-route-hint'));
+          if (route.message) row.append(el('p', clean(route.message), route.needsReview ? 'oldlight-route-error' : 'oldlight-route-hint'));
+          const controls = el('div', undefined, 'oldlight-route-tools');
+          controls.append(button('Editar', () => { if (current() && rowEpoch === scopeEpoch) showEditor(route.originId, route.destinationId, routes().find(r => r.id === route.id)); }),
+            button(route.paused ? 'Reanudar' : 'Pausar', () => { if (!current() || rowEpoch !== scopeEpoch) return; const latest = routes().find(r => r.id === route.id); if (latest) act(() => call('onPause', route.id, !latest.paused), () => report(latest.paused ? 'Ruta reanudada.' : 'Ruta pausada.')); }),
+            button('Eliminar', () => { if (current() && rowEpoch === scopeEpoch && routes().some(r => r.id === route.id)) act(() => call('onDelete', route.id), () => report('Ruta eliminada.')); }));
+          if (route.needsReview) controls.append(button('He revisado el envío', () => {
+            if (!current() || rowEpoch !== scopeEpoch || !routes().find(r => r.id === route.id)?.needsReview) return;
+            act(() => call('onAcknowledge', route.id), () => report('Envío revisado. La ruta sigue pausada; deberá esperar su intervalo y datos nuevos.'));
+          }));
+          row.append(controls); list.append(row);
+        }
+      }
+      updateDisabled(); drawOverlay();
+    }
+    function swallow(event) { event.preventDefault?.(); event.stopImmediatePropagation?.(); }
+    function trusted(event) { return options.requireTrustedEvents === false || event.isTrusted === true; }
+    function down(event) {
+      if (destroyed) return;
+      const canvas = stage();
+      // Synthetic native navigation can move the camera too; never interpret
+      // it as user intent, but revoke stale projected anchors immediately.
+      if (!trusted(event)) { if (!root?.contains?.(event.target)) { cancelGesture(); invalidateMap(); } return; }
+      if (gesture && event.type === 'mousedown') { swallow(event); return; }
+      if (event.target !== canvas) { if (!root?.contains?.(event.target)) { cancelGesture(); invalidateMap(); } return; }
+      if (!event.ctrlKey || event.shiftKey || event.metaKey || event.altKey || event.button !== 0 || (event.pointerType && event.pointerType !== 'mouse')) { cancelGesture(); invalidateMap(); return; }
+      observeScope(getScope()); if (!current() || blocked() || busy) return;
+      const freshRows = systems(), picked = pick(event, freshRows);
+      if (!picked) { report('Señala un sistema propio hasta que aparezca su ficha; después arrastra con Ctrl.', true); return; }
+      try { options.onInteraction?.(event); } catch (_) { report('No se pudo preparar el gesto de refuerzo.', true); return; }
+      mapCache = { scope, at: now(), rows: freshRows, items: routes() };
+      gesture = { originId: picked.id, scope, pointerId: event.pointerId, x: event.clientX, y: event.clientY, sourceX: event.clientX, sourceY: event.clientY, moved: false };
+      swallow(event); drawOverlay();
+    }
+    function move(event) {
+      if (!gesture || !trusted(event)) return;
+      if (gesture.pointerId !== undefined && event.pointerId !== undefined && event.pointerId !== gesture.pointerId) return;
+      if (!event.ctrlKey || blocked() || scope !== getScope()) { cancelGesture(); drawOverlay(); return; }
+      if (releaseTimer !== null) {
+        if (Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 3) { cancelGesture(); drawOverlay(); }
+        return;
+      }
+      gesture.x = event.clientX; gesture.y = event.clientY;
+      gesture.moved ||= Math.hypot(gesture.x - gesture.sourceX, gesture.y - gesture.sourceY) > 4;
+      drawOverlay();
+      // Leave pointermove untouched: without native pointerdown, Pixi only
+      // updates hover. This gives a fresh destination card without selecting it.
+    }
+    function up(event) {
+      if (!gesture || !trusted(event) || event.button !== 0) return;
+      if (gesture.pointerId !== undefined && event.pointerId !== undefined && event.pointerId !== gesture.pointerId) return;
+      swallow(event);
+      if (releaseTimer !== null) return;
+      const active = gesture;
+      ignoreClick = { until: now() + 700, x: event.clientX, y: event.clientY };
+      if (!event.ctrlKey || event.target !== stage() || !active.moved || blocked() || active.scope !== getScope()) { cancelGesture(); drawOverlay(); return; }
+      const endpoint = { clientX: event.clientX, clientY: event.clientY };
+      const finish = () => {
+        releaseTimer = null;
+        if (gesture !== active || active.scope !== getScope() || blocked()) { cancelGesture(); drawOverlay(); return; }
+        const picked = pick(endpoint, systems()); cancelGesture();
+        if (picked && picked.id !== active.originId) showEditor(active.originId, picked.id);
+        else report('No se pudo verificar el destino. Mantén el puntero sobre su ficha o elígelo en Nueva ruta.', true);
+        drawOverlay();
+      };
+      const picked = pick(endpoint, systems());
+      if (picked && picked.id !== active.originId) finish();
+      else releaseTimer = timer(finish, 320); // Native own-system hover delay is 250 ms.
+    }
+    function installMap() {
+      for (const name of ['pointerdown', 'mousedown']) listen(window, name, down, true);
+      for (const name of ['pointermove', 'mousemove']) listen(window, name, move, true);
+      for (const name of ['pointerup', 'mouseup']) listen(window, name, up, true);
+      listen(window, 'click', event => {
+        if (ignoreClick && event.target === stage() && now() < ignoreClick.until && Math.hypot(event.clientX - ignoreClick.x, event.clientY - ignoreClick.y) < 12) { ignoreClick = null; swallow(event); return; }
+        if (!root.contains?.(event.target)) { cancelGesture(); invalidateMap(); }
+      }, true);
+      listen(window, 'keydown', event => {
+        if (event.key === 'Escape') { cancelGesture(); drawOverlay(); }
+        else if (!['Control', 'Shift', 'Alt', 'Meta'].includes(event.key) && !root.contains?.(event.target)) { cancelGesture(); invalidateMap(); }
+      }, true);
+      listen(window, 'keyup', event => { if (event.key === 'Control' && releaseTimer === null) { cancelGesture(); drawOverlay(); } }, true);
+      for (const name of ['wheel', 'resize', 'scroll', 'blur', 'pointercancel', 'pagehide', 'popstate', 'hashchange']) listen(window, name, () => { cancelGesture(); invalidateMap(); }, true);
+      listen(document, 'visibilitychange', () => { cancelGesture(); invalidateMap(); });
+      const tick = timestamp => {
+        if (destroyed) return;
+        if (timestamp - lastFrame >= 80) { lastFrame = timestamp; drawOverlay(); }
+        frame = window.requestAnimationFrame?.(tick) || null;
+      };
+      frame = window.requestAnimationFrame?.(tick) || null;
+    }
+    function mount(container) {
+      if (destroyed) throw new Error('Panel has been destroyed.');
+      if (root) { if (root.parentNode !== container) container.append(root); render(); return root; }
+      root = el('section', undefined, 'oldlight-routes'); root.setAttribute('aria-label', 'Rutas de refuerzo');
+      style = el('style', CSS); details = el('details'); details.append(el('summary', 'Rutas de refuerzo'));
+      details.append(el('p', 'Ctrl + arrastrar entre dos sistemas propios abre una ruta. También puedes elegirlos aquí.', 'oldlight-route-hint'));
+      const tools = el('div', undefined, 'oldlight-route-tools'); tools.append(button('Nueva ruta', () => showEditor())); details.append(tools);
+      status = el('p', '', 'oldlight-route-status'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+      error = el('p', '', 'oldlight-route-error'); error.setAttribute('role', 'alert'); details.append(status, error);
+      availability = el('p', '', 'oldlight-route-hint'); details.append(availability);
+      mini = svg('svg'); mini.classList?.add('oldlight-route-map'); attr(mini, 'role', 'img'); attr(mini, 'aria-label', 'Esquema de rutas entre sistemas propios'); details.append(mini);
+      mapHint = el('p', '', 'oldlight-route-hint'); details.append(mapHint);
+      list = el('div'); details.append(list);
+      editor = el('div', undefined, 'oldlight-route-editor'); editor.hidden = true;
+      editor.append(el('strong', 'Configurar ruta'));
+      const inputs = el('div', undefined, 'oldlight-route-fields');
+      const makeField = (title, node) => { const wrapper = el('label', title); node.setAttribute('aria-label', title); wrapper.append(node); inputs.append(wrapper); return node; };
+      origin = makeField('Sistema de origen', el('select')); destination = makeField('Sistema de destino', el('select'));
+      interval = makeField('Intervalo en minutos', el('input')); interval.type = 'number'; interval.min = '1'; interval.max = '1440'; interval.step = '1';
+      editor.append(inputs);
+      for (const type of SHIPS) {
+        const row = el('div', undefined, 'oldlight-route-ship'), mode = el('select'), amount = el('input');
+        mode.setAttribute('aria-label', `Modo de ${LABELS[type]}`);
+        for (const [value, text] of [['fixed', 'Cantidad fija'], ['excess', 'Excedente']]) { const option = el('option', text); option.value = value; mode.append(option); }
+        mode.value = 'fixed'; amount.type = 'number'; amount.min = '0'; amount.max = '1000000000'; amount.step = '1'; amount.value = '0';
+        fields.set(type, { mode, amount }); mode.addEventListener('change', () => updateShip(type)); updateShip(type);
+        row.append(el('span', LABELS[type]), mode, amount); editor.append(row);
+      }
+      editor.append(el('p', 'Cantidad fija: espera a disponer de la cantidad completa por envío. Excedente: envía lo disponible dejando la reserva indicada.', 'oldlight-route-hint'));
+      const controls = el('div', undefined, 'oldlight-route-tools'); saveButton = button('Crear ruta', save);
+      controls.append(saveButton, button('Cancelar', () => { if (busy) return; editor.hidden = true; editorScope = ''; draftId = null; report(''); })); editor.append(controls); details.append(editor);
+      root.append(style, details); container.append(root);
+      overlay = svg('svg'); overlay.classList?.add('oldlight-route-overlay'); attr(overlay, 'aria-hidden', 'true');
+      // The panel can live in the Helper's ShadowRoot while this overlay is in
+      // document.body. Inline geometry/paint and pointer exclusion must therefore
+      // work without any stylesheet crossing that shadow boundary.
+      Object.assign(overlay.style, { position: 'fixed', pointerEvents: 'none', zIndex: '140', overflow: 'hidden' });
+      attr(overlay, 'pointer-events', 'none'); hideSVG(overlay, true); (document.body || container).append(overlay);
+      installMap(); render(); return root;
+    }
+    function destroy() {
+      if (destroyed) return;
+      destroyed = true; operation++; cancelGesture();
+      if (frame !== null) window.cancelAnimationFrame?.(frame);
+      for (const remove of listeners.splice(0)) remove();
+      root?.remove(); overlay?.remove(); anchors.clear();
+    }
+    return Object.freeze({ mount, render, observeScope, open: showEditor, cancelGesture, invalidateMap, destroy });
+  }
+  return Object.freeze({ create, ownSystems, SHIPS: Object.freeze(SHIPS.slice()) });
+});
+
 (function (root, factory) {
   'use strict';
   const api = factory();
@@ -3427,7 +4841,7 @@ return Object.freeze({create});
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.16.7';
+  const SCRIPT_VERSION = '1.17.0';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -3500,6 +4914,10 @@ return Object.freeze({create});
   let empireController = null;
   let empireAdapter = null;
   let empirePanel = null;
+  let reinforcementRoutes = null;
+  let reinforcementNavigation = null;
+  let reinforcementPanel = null;
+  let reinforcementMap = null;
   const notificationSession = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
   let eventSequence = 0;
   const observeGameEvents = createGameEventObserver(emitEvent);
@@ -3529,7 +4947,7 @@ return Object.freeze({create});
 
   missionTargetResolver = createMissionTargetResolver({ getContext: missionContext, canAct: canOperateMission });
   missionAdapter = createNativeMissionAdapter({ getContext: missionContext, getFleet: fleetCounts,
-    canAct: job => canOperateMission() && isCurrentMissionClaim(job) && isRetryMissionAllowed(job), onBusyChange: schedule, onChange: schedule,
+    canAct: job => canOperateMission() && isCurrentMissionClaim(job) && isRetryMissionAllowed(job) && isReinforcementAllowed(job), onBusyChange: schedule, onChange: schedule,
     resolveTarget: (job, options) => missionTargetResolver.resolveTarget(job, options),
     checkTarget: (job, previous) => allyProtection.check(job, previous) });
   fleetWait = createFleetWaitQueue({
@@ -4956,6 +6374,11 @@ return Object.freeze({create});
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.0', title: 'Rutas periódicas de refuerzos', changes: [
+        'Rutas entre sistemas propios con intervalo y flota configurables, cantidades fijas o excedentes con reserva.',
+        'Pausa, reanudación y borrado; los envíos usan Send y se detienen si su confirmación es incierta.',
+        'Configuración local por cuenta y galaxia; requiere una pestaña visible, Helper activo y control exclusivo entre pestañas.',
+      ] },
       { version: '1.16.7', title: 'Métricas locales fiables y preparación de telemetría', changes: [
         'Las métricas locales recuperan una escritura cruzada entre pestañas una sola vez, sin duplicar el incremento ni reactivar un permiso revocado.',
         'Nuevo panel compacto de telemetría compartida, todavía sin destino configurado ni envíos a PostHog.',
@@ -5741,6 +7164,7 @@ return Object.freeze({create});
       installHelperWorkspace(shadow);
       installHelperChangelog(shadow);
       installEmpirePanel(shadow);
+      installReinforcementPanel(shadow);
       syncSettingsTabs();
     }
     document.body.append(host);
@@ -6554,7 +7978,7 @@ return Object.freeze({create});
   }
 
   function releaseLeadership() {
-    if (pending || observingNotifications || missionAdapter?.isBusy() || attackRetry?.isBusy() || empireController?.isBusy()) return;
+    if (pending || observingNotifications || missionAdapter?.isBusy() || attackRetry?.isBusy() || empireController?.isBusy() || reinforcementNavigation?.isBusy()) return;
     if (releaseLock) releaseLock();
     else leader = false;
   }
@@ -6563,7 +7987,7 @@ return Object.freeze({create});
     // Revoke a known stop synchronously, even when an update is already queued.
     // Otherwise the native selector can abort before that update and report an
     // uncertain selection, or a quick Resume can revive its remaining clicks.
-    if (!settings.enabled || document.hidden) empireController?.cancelNavigation?.();
+    if (!settings.enabled || document.hidden) { empireController?.cancelNavigation?.(); if (typeof reinforcementNavigation !== 'undefined') reinforcementNavigation?.cancel(); }
     if (scheduled) return;
     scheduled = true;
     // Native messages and DOM mutations arrive in separate tasks. While the
@@ -6596,6 +8020,8 @@ return Object.freeze({create});
 
   function step() {
     if (typeof allyProtection !== 'undefined') allyProtection.render();
+    reinforcementPanel?.observeScope?.(missionContext().scope);
+    reinforcementPanel?.render();
     const panel = document.querySelector(PANEL);
     const fleetPanel = document.querySelector(FLEET_PANEL);
     if ((!panel && !fleetPanel) || !document.body) {
@@ -6721,8 +8147,9 @@ return Object.freeze({create});
     if (!current.length && !ships.length) { releaseLeadership(); show('Selecciona uno de tus sistemas'); return; }
     const maintainFleet = fleetEnabled();
     const waitingMission = currentMissionJob();
-    const hasWaitingMission = waitingMission?.status === 'waiting';
-    if (settings.excluded.length === BUILDINGS.length && !maintainFleet && !hasWaitingMission && !watchAttacks) {
+    let hasWaitingMission = waitingMission?.status === 'waiting';
+    const hasRoutes = reinforcementRoutes?.list().some(route => !route.paused);
+    if (settings.excluded.length === BUILDINGS.length && !maintainFleet && !hasWaitingMission && !watchAttacks && !hasRoutes) {
       if (observeNotifications) acquireLeadership(); else releaseLeadership();
       show('Marca un edificio o configura un mínimo de naves'); return;
     }
@@ -6742,6 +8169,9 @@ return Object.freeze({create});
       show(empireController.state().status); return;
     }
     if (missionAdapter.isBusy()) { show('Preparando la misión pendiente…'); return; }
+    if (reinforcementNavigation?.tick()) { show(reinforcementNavigation.status()); return; }
+    reinforcementRoutes?.tick();
+    hasWaitingMission = currentMissionJob()?.status === 'waiting';
     void attackRetry.tick().catch(() => wakeAt(Date.now() + RETRY_GAP_MS));
     if (attackRetry.isBusy()) { show('Comprobando el origen del reintento de ataque…'); return; }
     if (hasWaitingMission && !document.querySelector('dialog[open]')) {
@@ -11348,6 +12778,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   function canOperateMission() {
     const context = missionContext();
     return Boolean(leader && settings.enabled && !importingBackup && !pending && !document.hidden
+      && !(typeof reinforcementNavigation !== 'undefined' && reinforcementNavigation?.isBusy())
       && !reports.isRecovering()
       && !(typeof empireController !== 'undefined' && empireController?.isEnabled()
         && !empireMissionPermission())
@@ -11357,10 +12788,10 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   }
 
   function missionQueueContext() {
-    const context = missionContext(), active = canOperateMission();
+    const context = missionContext(), active = canOperateMission(), job = currentMissionJob();
     return { ...context, active,
       canAct: active && !missionAdapter?.isBusy() && !attackRetry?.isBusy()
-        && isRetryMissionAllowed(currentMissionJob()) && !document.querySelector('dialog[open]') };
+        && isRetryMissionAllowed(job) && isReinforcementAllowed(job) && !document.querySelector('dialog[open]') };
   }
 
   function isRetryMissionAllowed(job) {
@@ -16385,6 +17816,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const context = missionContext();
     let blocked = '';
     if (!leader) blocked = 'Esperando control exclusivo de esta pestaña.';
+    else if (typeof reinforcementNavigation !== 'undefined' && reinforcementNavigation?.isBusy()) blocked = 'Seleccionando origen de refuerzos.';
     else if (!canNavigateEmpire()) blocked = 'Esperando a que termine la operación o edición actual.';
     empireController.update({ scope: context.scope, enabled: settings.enabled && !document.hidden, blocked });
     if (typeof empirePanel !== 'undefined') { empirePanel?.observeScope?.(context.scope); empirePanel?.render(); }
@@ -16420,7 +17852,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         canNavigate: canNavigateEmpire, onChange: schedule,
         isHelperEvent: event => Boolean(host && event.composedPath().includes(host)),
         isHelperEditorFocused: () => Boolean(host?.shadowRoot?.activeElement?.matches('input,select,textarea,[contenteditable="true"]')),
-        onManualInteraction: ms => empireController?.suspendInteraction(ms) });
+        onManualInteraction: ms => { empireController?.suspendInteraction(ms); if (typeof reinforcementNavigation !== 'undefined') reinforcementNavigation?.cancel(); } });
       empireController = runtime.create({ core, adapter: empireAdapter, onChange: schedule,
         planNavigation: input => {
           // An unreadable mission store keeps ordinary visits; no mission or
@@ -16428,6 +17860,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
           const jobs = fleetWait.list();
           const retries = attackRetry.exportConfig();
           const missionSystemIds = jobs.filter(job => job.scope === input.work?.scope && ['waiting', 'sending'].includes(job.status)).map(job => job.originId);
+          for (const id of (typeof reinforcementRoutes !== 'undefined' && reinforcementRoutes?.dueOrigins()) || []) missionSystemIds.push(id);
           if (retries.enabled) for (const campaign of retries.campaigns) {
             if (campaign.scope === input.work?.scope && ['waiting_origin', 'waiting_slot', 'queued'].includes(campaign.status)) missionSystemIds.push(campaign.originId);
           }
@@ -16442,6 +17875,66 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       bridge?.subscribe?.(() => { observeEmpireStartup(); schedule(); });
     }
   } catch (_) { /* Unavailable native observation never enables imperial orders. */ }
+  // BEGIN REINFORCEMENT INTEGRATION
+  function isReinforcementAllowed(job) {
+    if (!job?.id?.startsWith('route:')) return true;
+    try { return reinforcementRoutes?.canRunJob(job) === true; } catch { return false; }
+  }
+  function reinforcementContext() {
+    return { ...missionContext(), canAct: canOperateMission()
+      && !host?.shadowRoot?.activeElement?.matches('input,select,textarea,[contenteditable="true"]'),
+      coordinated: Boolean(leader && releaseLock && navigator.locks?.request),
+      canNavigate: canNavigateEmpire() };
+  }
+  function installReinforcementPanel(shadow) {
+    if (!reinforcementRoutes || !globalThis.OldLightReinforcementPanel) return;
+    const container = document.createElement('section');
+    container.dataset.reinforcementRoutes = '';
+    shadow.querySelector('[data-fleet-view="missions"]')?.prepend(container);
+    const changed = callback => (...args) => {
+      reinforcementNavigation?.cancel();
+      const result = callback(...args);
+      schedule(); return result;
+    };
+    reinforcementPanel = globalThis.OldLightReinforcementPanel.create({ document, window,
+      getScope: () => missionContext().scope,
+      getWorld: () => globalThis.OldLightEmpireBridge?.snapshot({ includeOwnership: false }) || null,
+      getRoutes: () => reinforcementRoutes.list(),
+      getError: () => reinforcementRoutes.state().error,
+      getAvailability: () => ({ coordinated: Boolean(navigator.locks?.request), cameraAvailable: reinforcementMap?.status().available === true }),
+      projectSystem: (system, options) => reinforcementMap?.projectSystem(system, options) || null,
+      hitTestSystem: (point, rows) => reinforcementMap?.hitTestSystem(point, rows) || null,
+      onInteraction: event => empireAdapter?.observeInteraction(event),
+      onOpen: () => {
+        settings.activeTab = 'fleet'; settings.minimized = false;
+        ui.workspace?.controls.get('missions')?.button.click();
+        syncSettingsTabs(); layoutHelper(); saveSettings(); ui.scroll.scrollTop = 0;
+      },
+      onSave: changed(value => reinforcementRoutes.save(value)),
+      onPause: changed((id, paused) => reinforcementRoutes.pause(id, paused)),
+      onDelete: changed(id => reinforcementRoutes.remove(id)),
+      onAcknowledge: changed(id => reinforcementRoutes.acknowledgeRoute(id)) });
+    reinforcementPanel.mount(container);
+  }
+  try {
+    if (globalThis.OldLightReinforcementCore && empireAdapter) {
+      reinforcementRoutes = globalThis.OldLightReinforcementCore.create({
+        read: scope => { const raw = localStorage.getItem('old-light-reinforcement-routes:v1:' + scope); return raw === null ? undefined : JSON.parse(raw); },
+        write: (scope, value) => localStorage.setItem('old-light-reinforcement-routes:v1:' + scope, JSON.stringify(value)),
+        getContext: reinforcementContext,
+        getWorld: () => globalThis.OldLightEmpireBridge?.snapshot({ includeOwnership: false }) || null,
+        getJobs: () => fleetWait.list(), queue: (spec, options) => fleetWait.queue(spec, options),
+        cancel: id => { missionAdapter.cancel(id, 'Ruta de refuerzos detenida.'); return fleetWait.cancel(id); },
+        onChange: schedule });
+      reinforcementMap = globalThis.OldLightReinforcementMap?.create({ realm: globalThis, document,
+        addElement: typeof GM_addElement === 'function' ? GM_addElement : null,
+        getScope: () => missionContext().scope });
+      reinforcementNavigation = globalThis.OldLightReinforcementRuntime.create({
+        core: reinforcementRoutes, adapter: empireAdapter, getContext: reinforcementContext,
+        isEmpireEnabled: () => Boolean(empireController?.isEnabled()), onChange: schedule });
+    }
+  } catch (_) { /* Unavailable route storage or observation never authorizes a mission. */ }
+  // END REINFORCEMENT INTEGRATION
   observeEmpireStartup();
   // END EMPIRE INTEGRATION
 

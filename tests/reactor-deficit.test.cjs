@@ -98,7 +98,7 @@ function harness({ empire = true, role = 'balanced', energy = -1 } = {}) {
   const controller = runtime.create({ core, adapter, now: () => clock, dwellMs: 1000000,
     read: () => config, write: (_key, next) => { config = next; } });
   const wrapped = { ...controller, captureOrderBoundary(ctx) { beforeBoundary?.(); return controller.captureOrderBoundary(ctx); } };
-  const ctx = { document, settings, BUILDINGS, PANEL: '#structures', FLEET_PANEL: '#shipyard',
+  const ctx = { reinforcementPanel: null, reinforcementRoutes: null, reinforcementNavigation: null, document, settings, BUILDINGS, PANEL: '#structures', FLEET_PANEL: '#shipyard',
     BUTTONS: '#structures [data-field="buildings-list"] > .building-row button.b-upgrade[data-tutorial^="upgrade-"]',
     text: el => el?.textContent || '', controlVisible: el => !!el && el.visible !== false && !el.hidden && !blocked,
     systemId: () => active, missionContext: context, empireController: wrapped, empireAdapter: adapter,

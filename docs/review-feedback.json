@@ -2177,6 +2177,159 @@
         "Comprobar que timeout/revocación resuelven aun cuando abort lanza y no permiten contabilizar respuestas antiguas.",
         "Repetir full gate y verificar árbol congelado corregido; los gates verdes de la primera candidata no bastan."
       ]
+    },
+    {
+      "id": "reinforcement-overlay-shadow-boundary",
+      "feedback": "El SVG externo no hereda CSS del ShadowRoot y el gesto debe abrir Flota/Misiones antes de enfocar su borrador.",
+      "beforeFail": {
+        "revision": "d12b1284dca8915569267266b4fe2f07345a0e98",
+        "command": "node --test --test-name-pattern='body overlay has|opening a draft invokes|Helper navigation callback|fixed quantity explanation' tests/reinforcement-panel.test.cjs",
+        "observedFailure": "Mismos cuatro tests sobre prototipo reconstruido por inversión exacta: 0/4; position undefined frente a fixed y onOpen cero frente a uno. Corrección 4/4. No es un commit histórico ni un fallo de 1.16.7.",
+        "evidence": "docs/reinforcement-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "body overlay has its own inline geometry, pointer exclusion and SVG paint outside Helper shadow styles"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "opening a draft invokes Helper navigation before focusing an editor field"
+        }
+      ],
+      "independentReviewCriteria": [
+        "Verificar atributos SVG fuera del ShadowRoot real y orden de apertura/foco.",
+        "Brave/Violentmonkey y comprobación visual reales siguen pendientes."
+      ],
+      "boundaries": [
+        {
+          "scenario": "El SVG externo no hereda CSS del ShadowRoot y el gesto debe abrir Flota/Misiones antes de enfocar su borrador.",
+          "expected": "La interfaz se detiene ante datos inválidos y conserva los controles nativos.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "body overlay has its own inline geometry, pointer exclusion and SVG paint outside Helper shadow styles"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Brave/Violentmonkey, Drive y visual real",
+          "reason": "No se abrió partida ni se pudieron ejecutar pruebas visuales en el navegador de este entorno."
+        }
+      ]
+    },
+    {
+      "id": "reinforcement-stale-camera-fallback",
+      "feedback": "Una cámara invalidada no puede dibujar ni resolver un gesto recurriendo a anclas hover viejas.",
+      "beforeFail": {
+        "revision": "cba20bbea208231ad3fdba83882b944833f37a5d",
+        "command": "node --test --test-name-pattern='unavailable external camera' tests/reinforcement-panel.test.cjs",
+        "observedFailure": "Antes de corregir, los mismos dos tests fallan: SVG sigue visible y se abre un borrador desde hover aunque el proveedor devuelve null. Tras corrección 2/2.",
+        "evidence": "docs/reinforcement-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "unavailable external camera never falls back to old hover anchors for arrows"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "unavailable external camera never accepts a stale hover hit instead"
+        }
+      ],
+      "independentReviewCriteria": [
+        "Verificar invalidación durante zoom, pan, resize, navegación programática y pérdida del observador.",
+        "No presentar anclas hover como reproyección continua."
+      ],
+      "boundaries": [
+        {
+          "scenario": "Una cámara invalidada no puede dibujar ni resolver un gesto recurriendo a anclas hover viejas.",
+          "expected": "La interfaz se detiene ante datos inválidos y conserva los controles nativos.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "unavailable external camera never falls back to old hover anchors for arrows"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Brave/Violentmonkey, Drive y visual real",
+          "reason": "No se abrió partida ni se pudieron ejecutar pruebas visuales en el navegador de este entorno."
+        }
+      ]
+    },
+    {
+      "id": "reinforcement-sent-lifecycle-receipts",
+      "feedback": "Pausar o editar un refuerzo confirmado antes de reconcile eliminaba su ticket sin conservar sentAt, y permitía repetir en el mismo censo; borrar/recrear tampoco puede eliminar la barrera por origen.",
+      "beforeFail": {
+        "revision": "4c51b4ead7a8efa0a00e6d609c5a4709e51fcad0",
+        "command": "node --test tests/reinforcement-core.test.cjs",
+        "observedFailure": "Fuente before idéntica a 4c51b4e (SHA256 bd10a2a577a52bd53e97294648d7432563b6975b18b9628f54e125f0aaec8263). Suite con cuatro probes nuevos: 34 aprobados y 4 fallidos. save→tick→sent→pause→resume→tick crea route:north:2 en el mismo instante y censo, con lastSentAt=null. También falla save tras sent y borrar/recrear tras reload; sentAt inválido pierde evidencia.",
+        "evidence": "docs/reinforcement-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-core.test.cjs",
+          "name": "receipt regression: sent then pause/resume preserves acceptance and cooldown before reconciliation"
+        },
+        {
+          "file": "tests/reinforcement-core.test.cjs",
+          "name": "receipt regression: saving a sent route cannot reset its timestamp or shorten the old interval"
+        },
+        {
+          "file": "tests/reinforcement-core.test.cjs",
+          "name": "receipt regression: removing and recreating under a new id after reload preserves the origin cooldown"
+        },
+        {
+          "file": "tests/reinforcement-core.test.cjs",
+          "name": "receipt regression: invalid sent timestamps pause for review instead of cancelling evidence"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "a rejected in-flight deletion keeps the route visible and explains the blocker"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "reviewed-send acknowledgement is explicit and never resumes the route"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Confirmación conocida seguida de pausa, edición o borrado antes del siguiente tick.",
+          "expected": "Conservar aceptación, intervalo y exigencia de censo posterior; no encolar un segundo envío.",
+          "regression": {
+            "file": "tests/reinforcement-core.test.cjs",
+            "name": "receipt regression: sent then pause/resume preserves acceptance and cooldown before reconciliation"
+          }
+        },
+        {
+          "scenario": "Eliminar y recrear con otro ID después de recargar.",
+          "expected": "La barrera pertenece al origen y no desaparece con la ruta.",
+          "regression": {
+            "file": "tests/reinforcement-core.test.cjs",
+            "name": "receipt regression: removing and recreating under a new id after reload preserves the origin cooldown"
+          }
+        },
+        {
+          "scenario": "El intento sigue sending o necesita revisión.",
+          "expected": "Borrar se rechaza con explicación; revisión explícita conserva pausa, sin reenviar.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "a rejected in-flight deletion keeps the route visible and explains the blocker"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Órdenes reales y navegador",
+          "reason": "Se modela sent mediante la cola/harness offline; ninguna partida real ni Brave/Violentmonkey verificados."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Repetir el probe causal con los bytes anteriores y finales, incluidas recarga y fechas inválidas.",
+        "Revisar migración, límites y poda de recibos por origen; el límite no debe eliminar evidencia necesaria.",
+        "Comprobar revisión explícita, conservación de pausa, borrado rechazado visible y ausencia de recibos huérfanos irrecuperables."
+      ]
     }
   ]
 }
