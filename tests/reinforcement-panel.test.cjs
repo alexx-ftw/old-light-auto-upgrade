@@ -625,3 +625,13 @@ test('opening failure replaces the map notice with an actionable error', () => {
   const notice = h.document.querySelector('.oldlight-route-gesture-notice'); assert.equal(notice.hidden, false);
   assert.match(notice.textContent, /No se pudo mostrar/); assert.equal(h.calls.length, 0);
 });
+
+test('route review keeps conflicting route controls disabled while acknowledgement remains available', () => {
+  const h=harness();create(h);h.routes[0].needsReview=true;h.routes[0].paused=true;h.app.render();
+  for (const label of ['Editar','Reanudar','Eliminar']) assert.equal(byButton(h.container,label).disabled,true,label);
+  assert.equal(byButton(h.container,'He revisado el envío').disabled,false);
+  h.app.render();
+  for (const label of ['Editar','Reanudar','Eliminar']) assert.equal(byButton(h.container,label).disabled,true,label+' after render');
+  h.routes[0].needsReview=false;h.app.render();
+  assert.equal(byButton(h.container,'Reanudar').disabled,false);
+});

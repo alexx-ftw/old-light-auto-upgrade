@@ -2481,6 +2481,217 @@
         "No atribuir al usuario una causa concreta no observada; comprobar flujo directo sin hover con cámara y límite manual sin cámara.",
         "Confirmar interrupción de navegación automática aun si el origen no se identifica; conservar eventos fuera del mapa, modificadores, modal, touch, cancelación, snapshot/epoch y ausencia de órdenes."
       ]
+    },
+    {
+      "id": "reinforcement-owner-queue-review",
+      "feedback": "Ruta en revisión mostrada como misión Lista y Revisar 0; controles genéricos pueden invalidar o reanudar su ticket.",
+      "beforeFail": {
+        "revision": "c766af558f6f65ad39e881375101a1e7c1ec57cd",
+        "command": "QA_REINFORCEMENT_QUEUE_SOURCE=/tmp/oldlight-queue-baseline.user.js node --test tests/reinforcement-integration.test.cjs",
+        "observedFailure": "La cola base permite resume y update del ticket; con puertas exteriores permisivas ignora el nuevo estado del propietario y solicita dispatch o producción. No demuestra un envío real: la guarda nativa ya bloqueaba la ruta.",
+        "evidence": "docs/1.17.3-queue-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-integration.test.cjs",
+          "name": "queue pause followed by route reconciliation cannot be undone by queue resume"
+        },
+        {
+          "file": "tests/reinforcement-integration.test.cjs",
+          "name": "a route-owned queue job rejects independent production changes without invalidating its ticket"
+        },
+        {
+          "file": "tests/reinforcement-integration.test.cjs",
+          "name": "historically resumed waiting job remains blocked by its route review with permissive outer gates"
+        },
+        {
+          "file": "tests/reinforcement-integration.test.cjs",
+          "name": "legacy produce=true mismatch cannot demand production or send before route reconciliation"
+        },
+        {
+          "file": "tests/reinforcement-integration.test.cjs",
+          "name": "a route review created while saving the send claim is checked again before dispatch"
+        },
+        {
+          "file": "tests/reinforcement-integration.test.cjs",
+          "name": "ordinary queue missions retain editing, production, resume and send without route authority"
+        },
+        {
+          "file": "tests/reinforcement-integration.test.cjs",
+          "name": "explicit review of a real uncertain queue preserves pause and prevents immediate replay"
+        },
+        {
+          "file": "tests/reinforcement-queue-ui.test.cjs",
+          "name": "real queue pause and owner reconciliation immediately refresh the mounted card into review"
+        },
+        {
+          "file": "tests/reinforcement-queue-ui.test.cjs",
+          "name": "legacy waiting queue state shows its route review instead of a ready badge"
+        },
+        {
+          "file": "tests/reinforcement-queue-ui.test.cjs",
+          "name": "accepted sent history stays sent after route reconciliation retires its ticket"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "route review keeps conflicting route controls disabled while acknowledgement remains available"
+        },
+        {
+          "file": "tests/reinforcement-queue-ui.test.cjs",
+          "name": "independent: legacy fleet editor still gives reachable owner recovery instead of hidden editor instructions"
+        },
+        {
+          "file": "tests/reinforcement-queue-ui.test.cjs",
+          "name": "independent: paused queue while helper disabled never points to a missing review action"
+        },
+        {
+          "file": "tests/reinforcement-integration.test.cjs",
+          "name": "independent last-fleet reentrancy, permissive outer=true"
+        },
+        {
+          "file": "tests/reinforcement-integration.test.cjs",
+          "name": "independent last-fleet reentrancy, permissive outer=false"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Pausa y reconciliación seguidas de reanudación genérica.",
+          "expected": "Rechazar reanudación independiente sin cambiar almacenamiento.",
+          "regression": {
+            "file": "tests/reinforcement-integration.test.cjs",
+            "name": "queue pause followed by route reconciliation cannot be undone by queue resume"
+          }
+        },
+        {
+          "scenario": "Ticket histórico waiting con ruta en revisión.",
+          "expected": "No adquirir claim ni llamar dispatch aunque puertas exteriores permitan.",
+          "regression": {
+            "file": "tests/reinforcement-integration.test.cjs",
+            "name": "historically resumed waiting job remains blocked by its route review with permissive outer gates"
+          }
+        },
+        {
+          "scenario": "Revisión explícita de un intento incierto.",
+          "expected": "Pausa, intervalo y nuevo censo antes de otro envío.",
+          "regression": {
+            "file": "tests/reinforcement-integration.test.cjs",
+            "name": "explicit review of a real uncertain queue preserves pause and prevents immediate replay"
+          }
+        },
+        {
+          "scenario": "Misión ordinaria sin propietario de ruta.",
+          "expected": "Conservar edición, producción y envío.",
+          "regression": {
+            "file": "tests/reinforcement-integration.test.cjs",
+            "name": "ordinary queue missions retain editing, production, resume and send without route authority"
+          }
+        },
+        {
+          "scenario": "Resultado sent confirmado cuya ruta ya retiró ticket.",
+          "expected": "Conservar tarjeta Enviada sin revisión huérfana.",
+          "regression": {
+            "file": "tests/reinforcement-queue-ui.test.cjs",
+            "name": "accepted sent history stays sent after route reconciliation retires its ticket"
+          }
+        },
+        {
+          "scenario": "Edición legacy persistida cuyo editor independiente ya no está disponible.",
+          "expected": "Texto visible remite a cancelación local y revisión de ruta, no a terminar un editor oculto.",
+          "regression": {
+            "file": "tests/reinforcement-queue-ui.test.cjs",
+            "name": "independent: legacy fleet editor still gives reachable owner recovery instead of hidden editor instructions"
+          }
+        },
+        {
+          "scenario": "Callback de lectura de flota pausa la ruta después de guardar claim.",
+          "expected": "Revalidar propietario después de leer flota y antes dispatch, además de guarda nativa.",
+          "regression": {
+            "file": "tests/reinforcement-integration.test.cjs",
+            "name": "independent last-fleet reentrancy, permissive outer=true"
+          }
+        },
+        {
+          "scenario": "Helper desactivado con misión recién pausada sin reconciliación.",
+          "expected": "No exigir un botón de revisión que todavía no existe; indicar gestión/pausa de ruta.",
+          "regression": {
+            "file": "tests/reinforcement-queue-ui.test.cjs",
+            "name": "independent: paused queue while helper disabled never points to a missing review action"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Sesión Brave/Violentmonkey/Drive afectada y movimientos reales",
+          "reason": "No se dispone de almacenamiento/cronología; no se conoce si hubo envío ni qué controles se usaron."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Separar disponibilidad de flota de autoridad de propietario en tarjeta, contador, controles y dispatch; revisar refresco tras cambio solo de ruta.",
+        "Reconstruir recuperación de tickets modificados sin restablecer incertidumbre automáticamente; cancelar pendiente local no cancela movimiento real.",
+        "Verificar sent reconciliado sin ticket no se anuncia como huérfano y las misiones ordinarias siguen operativas.",
+        "Cuestionar harness permisivo: es defensa adicional en cola, no evidencia de doble envío previo en producción."
+      ]
+    },
+    {
+      "id": "reinforcement-native-unproject-observation",
+      "feedback": "Cámara permanece awaiting-native-projection aunque la ruta nativa GPU usa bounds/unproject sin llamar project.",
+      "beforeFail": {
+        "revision": "c766af558f6f65ad39e881375101a1e7c1ec57cd",
+        "command": "Copiar tests/reinforcement-map.test.cjs y tests/fixtures/native-camera.json candidatos a copia aislada del baseline; node --test --test-name-pattern=\"official camera bounds\" tests/reinforcement-map.test.cjs",
+        "observedFailure": "La clase oficial visibleWorldBounds produce cero snapshots en baseline; se esperaba uno. No prueba la causa exacta del dispositivo afectado.",
+        "evidence": "docs/camera-unproject-regression.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-map.test.cjs",
+          "name": "official camera bounds and hover yield camera with zero project calls in the GPU path"
+        },
+        {
+          "file": "tests/reinforcement-map.test.cjs",
+          "name": "unproject keeps native receiver, arguments, return identity, exceptions and hook ownership"
+        },
+        {
+          "file": "tests/reinforcement-map.test.cjs",
+          "name": "unproject rejects mismatched CSS sizes, backing dimensions, resize and navigation without guessing"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Ruta GPU bounds y hover sin llamadas project.",
+          "expected": "Capturar cámara y refrescar pan/zoom desde unproject nativo.",
+          "regression": {
+            "file": "tests/reinforcement-map.test.cjs",
+            "name": "official camera bounds and hover yield camera with zero project calls in the GPU path"
+          }
+        },
+        {
+          "scenario": "Receiver ajeno, excepción o sustitución de hook.",
+          "expected": "Conservar semántica original y revocar observación cuando cambia hook.",
+          "regression": {
+            "file": "tests/reinforcement-map.test.cjs",
+            "name": "unproject keeps native receiver, arguments, return identity, exceptions and hook ownership"
+          }
+        },
+        {
+          "scenario": "Dimensiones CSS incompatibles, resize o cambio de navegación.",
+          "expected": "Rechazar sin inferir coordenadas y mostrar diagnóstico específico.",
+          "regression": {
+            "file": "tests/reinforcement-map.test.cjs",
+            "name": "unproject rejects mismatched CSS sizes, backing dimensions, resize and navigation without guessing"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Brave/Violentmonkey/Drive real del usuario",
+          "reason": "No se dispone de sesión real; geometría de su dispositivo y causa exacta siguen sin acreditarse."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Contrastar firma y llamadas de visibleWorldBounds/unproject con la clase oficial conservada y su hash.",
+        "Revisar ambos hooks, preservación de descriptor/receiver/argumentos/retorno/excepciones y restauración al detener.",
+        "No confundir proyección sintética correcta con cámara disponible en la sesión real; conservar diagnóstico de discrepancia CSS."
+      ]
     }
   ]
 }

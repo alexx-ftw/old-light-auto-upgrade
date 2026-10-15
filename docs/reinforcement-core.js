@@ -473,6 +473,23 @@
         message: 'Revisión completada. La ruta sigue pausada; al reanudar esperará el intervalo y un censo posterior.' };
       return copy(find(replace(saved, next), id));
     }
+    // Read-only owner state, independent of fleet readiness and selected origin.
+    // Do not reconcile here: rendering must never create tickets or accept sends.
+    function jobState(job) {
+      if (!job?.id?.startsWith('route:')) return null;
+      const blocked = message => ({ blocked: true, needsReview: true, message });
+      try {
+        const saved = load(), route = saved.routes.find(item => item.ticket?.id === job.id);
+        if (!route || job.scope !== saved.scope) return blocked('Refuerzo sin ruta local verificable. No se enviará. Revisa los movimientos y cancela este pendiente en la cola.');
+        if (!matches(saved.scope, route.ticket, job)) return blocked('La misión de refuerzo ha cambiado. No se enviará. Pausa la ruta, comprueba los movimientos, cancela este pendiente local y completa la revisión de la ruta.');
+        if (job.fleetEdit) return blocked('La misión conserva una edición independiente pendiente. Envío bloqueado. Pausa la ruta, comprueba los movimientos, cancela el pendiente local y completa la revisión de la ruta.');
+        if (route.needsReview) return blocked('Ruta pendiente de revisión. Envío bloqueado. Comprueba los movimientos y pulsa «He revisado el envío» en la ruta.');
+        if (job.needsReview || job.status === 'uncertain') return blocked('Envío sin confirmar. Comprueba los movimientos y pausa la ruta para iniciar su revisión. No se reintentará desde la cola.');
+        if (job.status === 'paused') return blocked('Misión pausada. Gestiona o pausa su ruta; no se reanudará desde la cola.');
+        if (route.paused) return { blocked: true, needsReview: false, message: 'Ruta pausada. Gestiona este refuerzo desde su ruta.' };
+        return { blocked: false, needsReview: false, message: 'Refuerzo gestionado por su ruta; el envío requiere sus comprobaciones de seguridad.' };
+      } catch (_) { return blocked('No se puede comprobar la ruta de refuerzo. Envío bloqueado hasta recuperar su estado local.'); }
+    }
     function canRunJob(job) {
       if (typeof job?.id !== 'string' || !job.id.startsWith('route:')) return true;
       try {
@@ -565,7 +582,7 @@
       } catch (cause) { error = cause.message || 'No se pudo preparar el refuerzo.'; return { queued: [], error }; }
       finally { running = false; }
     }
-    return Object.freeze({ state, list, save, pause, resume, remove, acknowledgeRoute, tick, canRunJob, dueOrigins });
+    return Object.freeze({ state, list, save, pause, resume, remove, acknowledgeRoute, tick, canRunJob, jobState, dueOrigins });
   }
   return Object.freeze({ create, SHIPS, MAX_AGE_MS, MAX_QUANTITY, MAX_ROUTES, MAX_RECEIPTS });
 });

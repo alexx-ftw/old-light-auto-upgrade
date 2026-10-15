@@ -287,7 +287,7 @@
     }
     function updateDisabled() {
       if (!root) return;
-      for (const node of root.querySelectorAll?.('button, input, select') || []) node.disabled = busy;
+      for (const node of root.querySelectorAll?.('button, input, select') || []) node.disabled = busy || node.dataset.routeBlocked === 'true';
     }
     function render() {
       if (!root || destroyed) return;
@@ -325,6 +325,10 @@
           controls.append(button('Editar', () => { if (current() && rowEpoch === scopeEpoch) showEditor(route.originId, route.destinationId, routes().find(r => r.id === route.id)); }),
             button(route.paused ? 'Reanudar' : 'Pausar', () => { if (!current() || rowEpoch !== scopeEpoch) return; const latest = routes().find(r => r.id === route.id); if (latest) act(() => call('onPause', route.id, !latest.paused), () => report(latest.paused ? 'Ruta reanudada.' : 'Ruta pausada.')); }),
             button('Eliminar', () => { if (current() && rowEpoch === scopeEpoch && routes().some(r => r.id === route.id)) act(() => call('onDelete', route.id), () => report('Ruta eliminada.')); }));
+          if (route.needsReview) for (const control of controls.querySelectorAll('button')) {
+            control.dataset.routeBlocked = 'true';
+            control.title = 'Comprueba el envío y completa primero la revisión de la ruta.';
+          }
           if (route.needsReview) controls.append(button('He revisado el envío', () => {
             if (!current() || rowEpoch !== scopeEpoch || !routes().find(r => r.id === route.id)?.needsReview) return;
             act(() => call('onAcknowledge', route.id), () => report('Envío revisado. La ruta sigue pausada; deberá esperar su intervalo y datos nuevos.'));

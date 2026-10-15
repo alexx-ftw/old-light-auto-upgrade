@@ -92,7 +92,7 @@
   function installPageObserver({ realm = globalThis, document = realm.document, importModule = url => import(url), now = Date.now,
     onPending = () => {}, emit = () => {} } = {}) {
     let stopped = false, installed = false, importing = false, failed = false, reason = 'awaiting-native-camera';
-    let moduleValue = null, camera = null, original = null, wrapper = null, ownDescriptor = null;
+    let moduleValue = null, camera = null, original = null, wrapper = null, ownDescriptor = null, originalUnproject = null, unprojectWrapper = null, ownUnprojectDescriptor = null;
     let activeGalaxy = '', activePath = '', activeCanvas = null, cachedViewport = null, candidate = null, pending = null;
     let revision = 0, frame = null, timer = null, lastEmittedAt = 0, observing = false, notifying = false, ordinal = 0, lastObservedOrdinal = 0;
     let resolveReady; const ready = new Promise(resolve => { resolveReady = resolve; });
@@ -111,10 +111,18 @@
           else delete camera.project;
         }
       } catch (_) {}
+      try {
+        const descriptor = camera && Object.getOwnPropertyDescriptor(camera, 'unproject');
+        if (descriptor?.value === unprojectWrapper) {
+          if (ownUnprojectDescriptor) Object.defineProperty(camera, 'unproject', ownUnprojectDescriptor);
+          else delete camera.unproject;
+        }
+      } catch (_) {}
       installed = false;
     }
     function fail(why) { failed = true; if (timer !== null) realm.clearTimeout(timer); timer = null; unhook(); cancelFrame(); invalidate(why); resolveReady(false); }
-    function ownsHook() { return installed && Object.getOwnPropertyDescriptor(camera, 'project')?.value === wrapper; }
+    function ownsHook() { return installed && Object.getOwnPropertyDescriptor(camera, 'project')?.value === wrapper
+      && Object.getOwnPropertyDescriptor(camera, 'unproject')?.value === unprojectWrapper; }
     function constantsMatch(c) { return c && camera.sinTilt === c.sinTilt && camera.cosTilt === c.cosTilt && camera.L === c.L && camera.baseFocal === c.baseFocal; }
     function scheduleFrame() {
       if (frame !== null || stopped || failed) return;
@@ -161,7 +169,7 @@
         if (!view || view.canvas !== activeCanvas) { invalidate('viewport-unavailable'); return; }
         // Native dimensions are CSS pixels. Never accept canvas.width/height,
         // which are backing-store pixels and differ at DPR > 1.
-        if (width !== view.rect.width || height !== view.rect.height) return;
+        if (width !== view.rect.width || height !== view.rect.height) { invalidate('native-viewport-size-mismatch'); return; }
         if (!bounded(args[0], 1e12) || !bounded(args[1], 1e12)) return;
         const values = cameraValue({ x, y, zoom, sinTilt: camera.sinTilt, cosTilt: camera.cosTilt, L: camera.L, baseFocal: camera.baseFocal });
         if (!values) { invalidate('invalid-native-camera'); return; }
@@ -179,15 +187,17 @@
       // A changed shape or another hook is not a reason to patch prototypes.
       if (!protoProject || typeof protoProject.value !== 'function' || protoProject.value.length !== 8 || !protoProject.writable || !protoProject.configurable
         || !focal || typeof focal.value !== 'function' || focal.value.length !== 1
-        || !unproject || typeof unproject.value !== 'function' || unproject.value.length !== 7) return false;
+        || !unproject || typeof unproject.value !== 'function' || unproject.value.length !== 7 || !unproject.writable || !unproject.configurable) return false;
       for (const key of ['sinTilt', 'cosTilt', 'L', 'baseFocal']) {
         const descriptor = Object.getOwnPropertyDescriptor(shared, key);
         if (!descriptor || !('value' in descriptor) || !finite(descriptor.value)) return false;
       }
       if (!cameraValue({ x: 0, y: 0, zoom: 1, sinTilt: shared.sinTilt, cosTilt: shared.cosTilt, L: shared.L, baseFocal: shared.baseFocal })) return false;
-      const own = Object.getOwnPropertyDescriptor(shared, 'project');
-      if (own && (!('value' in own) || own.value !== protoProject.value || !own.writable || !own.configurable)) return false;
-      if (!own && !Object.isExtensible(shared)) return false;
+      for (const [key, method] of [['project', protoProject], ['unproject', unproject]]) {
+        const own = Object.getOwnPropertyDescriptor(shared, key);
+        if (own && (!('value' in own) || own.value !== method.value || !own.writable || !own.configurable)) return false;
+        if (!own && !Object.isExtensible(shared)) return false;
+      }
       return true;
     }
     function attach(value, galaxy, view) {
@@ -205,6 +215,18 @@
       };
       const descriptor = ownDescriptor || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(camera), 'project');
       Object.defineProperty(camera, 'project', { ...descriptor, value: wrapper });
+      // GPU rendering can run without any project call. Native hover, pan and
+      // visibleWorldBounds still use this same singleton's unproject method,
+      // whose arguments 2..6 carry the exact same camera and CSS dimensions.
+      ownUnprojectDescriptor = Object.getOwnPropertyDescriptor(camera, 'unproject'); originalUnproject = camera.unproject;
+      unprojectWrapper = function unproject(e, t, n, r, i, a, o) {
+        const callOrdinal = ++ordinal;
+        const result = apply(originalUnproject, this, arguments);
+        try { observe(this, arguments, callOrdinal); } catch (_) { try { invalidate('camera-observation-failed'); } catch (_) {} }
+        return result;
+      };
+      const unprojectDescriptor = ownUnprojectDescriptor || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(camera), 'unproject');
+      Object.defineProperty(camera, 'unproject', { ...unprojectDescriptor, value: unprojectWrapper });
       installed = true; reason = 'awaiting-native-projection'; resolveReady(true);
     }
     function nativeReady() {
@@ -286,7 +308,7 @@
           if (diagnostic.version === 1 && diagnostic.type === 'status' && [
             'native-camera-import-failed', 'native-camera-shape-changed', 'native-camera-unavailable',
             'camera-hook-replaced', 'camera-timing-unavailable', 'awaiting-native-projection',
-            'viewport-unavailable', 'game-navigation', 'camera-observation-failed',
+            'viewport-unavailable', 'game-navigation', 'camera-observation-failed', 'native-viewport-size-mismatch',
           ].includes(diagnostic.reason)) { clear(diagnostic.reason); return; }
         } catch (_) { /* Snapshot validation below remains authoritative. */ }
       }

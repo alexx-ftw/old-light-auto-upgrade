@@ -369,3 +369,59 @@ test('page observer failure reason crosses only the private diagnostic channel',
   h.fail('native-camera-shape-changed'); assert.equal(h.map.status().reason, 'native-camera-shape-changed');
   h.map.stop();
 });
+
+test('official camera bounds and hover yield camera with zero project calls in the GPU path', async () => {
+  const fixture = require('./fixtures/native-camera.json');
+  const Camera = vm.runInNewContext('(' + fixture.classExpression + ')', {
+    C: { tiltDegrees: 55, distance: 1100, baseFocal: 1000 }, ie: Math.PI / 180, E: 3200,
+  });
+  const module = { J: Camera, Y: new Camera(), et: nativeModule().et };
+  const originalProject = module.Y.project;
+  const h = await installed({ module });
+  // Actual official visibleWorldBounds calls this.unproject four times, never
+  // project. This is sufficient to recover current GPU camera on redraw.
+  h.mod.Y.visibleWorldBounds(340, -170, .85, 1000, 700, 46);
+  h.frame(); assert.equal(h.emitted.length, 1);
+  assert.equal(h.emitted[0].camera.x, 340); assert.equal(h.emitted[0].camera.y, -170);
+  const system = { q: 4, r: -2 }, world = module.et(system.q, system.r);
+  const expected = originalProject.call(module.Y, world.x, world.y, 340, -170, .85, 1000, 700);
+  const actual = M.projectPoint(system, h.emitted[0]);
+  assert.equal(actual.x, expected.x + h.rect.left); assert.equal(actual.y, expected.y + h.rect.top);
+  // Native pointer hover's exact signature, after a later pan/zoom.
+  module.Y.unproject(400, 300, -230, 110, 1.1, 1000, 700);
+  h.frame(); assert.equal(h.emitted.at(-1).camera.x, -230); assert.equal(h.emitted.at(-1).camera.zoom, 1.1);
+  h.observer.stop(); assert.equal(Object.hasOwn(module.Y, 'unproject'), false);
+});
+
+test('unproject keeps native receiver, arguments, return identity, exceptions and hook ownership', async () => {
+  const module = nativeModule(), calls = [], returned = {}, failure = {};
+  module.J.prototype.unproject = function(x, y, camX, camY, zoom, width, height) {
+    calls.push({ self: this, args: [...arguments] }); if (x === 999) throw failure; return returned;
+  };
+  const original = module.Y.unproject, h = await installed({ module });
+  const args = [400, 300, 45, -20, .9, 1000, 700, 'extra'];
+  assert.equal(module.Y.unproject(...args), returned); assert.deepEqual(calls[0].args, args); assert.equal(calls[0].self, module.Y);
+  h.frame(); assert.equal(h.emitted[0].camera.x, 45);
+  const before = h.marked.length;
+  assert.throws(() => module.Y.unproject(999, 0, 1, 2, 1, 1000, 700), e => e === failure);
+  module.Y.unproject.call(new module.J(), ...args); assert.equal(h.marked.length, before);
+  const replacement = function() {}; module.Y.unproject = replacement; h.tick();
+  assert.equal(h.observer.status().reason, 'camera-hook-replaced'); assert.equal(module.Y.unproject, replacement);
+  assert.equal(module.Y.project, module.J.prototype.project); assert.equal(module.J.prototype.unproject, original);
+});
+
+test('unproject rejects mismatched CSS sizes, backing dimensions, resize and navigation without guessing', async () => {
+  const h = await installed();
+  for (const [width, height] of [[2000, 1400], [200, 140], [1000.25, 700]]) {
+    h.mod.Y.unproject(1, 2, 0, 0, 1, width, height); h.frame();
+    assert.equal(h.observer.status().reason, 'native-viewport-size-mismatch'); assert.equal(h.emitted.length, 0);
+  }
+  h.mod.Y.unproject(1, 2, 10, 20, 1, 1000, 700); h.frame(); assert.equal(h.emitted.length, 1);
+  h.rect.width = 900; h.tick(); assert.equal(h.observer.status().observed, false);
+  h.mod.Y.unproject(1, 2, 10, 20, 1, 1000, 700); h.frame(); assert.equal(h.emitted.length, 1);
+  h.mod.Y.unproject(1, 2, 30, 40, 1, 900, 700); h.frame(); assert.equal(h.emitted.length, 2);
+  h.realm.location.pathname = '/game/galaxy/beta';
+  h.mod.Y.unproject(1, 2, 100, 200, 1, 900, 700); h.frame();
+  assert.equal(h.observer.status().reason, 'game-navigation'); assert.equal(h.observer.status().observed, false);
+  h.observer.stop();
+});

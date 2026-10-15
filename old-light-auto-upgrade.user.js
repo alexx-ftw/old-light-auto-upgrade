@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.2
+// @version      1.17.3
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -495,6 +495,23 @@
         message: 'Revisión completada. La ruta sigue pausada; al reanudar esperará el intervalo y un censo posterior.' };
       return copy(find(replace(saved, next), id));
     }
+    // Read-only owner state, independent of fleet readiness and selected origin.
+    // Do not reconcile here: rendering must never create tickets or accept sends.
+    function jobState(job) {
+      if (!job?.id?.startsWith('route:')) return null;
+      const blocked = message => ({ blocked: true, needsReview: true, message });
+      try {
+        const saved = load(), route = saved.routes.find(item => item.ticket?.id === job.id);
+        if (!route || job.scope !== saved.scope) return blocked('Refuerzo sin ruta local verificable. No se enviará. Revisa los movimientos y cancela este pendiente en la cola.');
+        if (!matches(saved.scope, route.ticket, job)) return blocked('La misión de refuerzo ha cambiado. No se enviará. Pausa la ruta, comprueba los movimientos, cancela este pendiente local y completa la revisión de la ruta.');
+        if (job.fleetEdit) return blocked('La misión conserva una edición independiente pendiente. Envío bloqueado. Pausa la ruta, comprueba los movimientos, cancela el pendiente local y completa la revisión de la ruta.');
+        if (route.needsReview) return blocked('Ruta pendiente de revisión. Envío bloqueado. Comprueba los movimientos y pulsa «He revisado el envío» en la ruta.');
+        if (job.needsReview || job.status === 'uncertain') return blocked('Envío sin confirmar. Comprueba los movimientos y pausa la ruta para iniciar su revisión. No se reintentará desde la cola.');
+        if (job.status === 'paused') return blocked('Misión pausada. Gestiona o pausa su ruta; no se reanudará desde la cola.');
+        if (route.paused) return { blocked: true, needsReview: false, message: 'Ruta pausada. Gestiona este refuerzo desde su ruta.' };
+        return { blocked: false, needsReview: false, message: 'Refuerzo gestionado por su ruta; el envío requiere sus comprobaciones de seguridad.' };
+      } catch (_) { return blocked('No se puede comprobar la ruta de refuerzo. Envío bloqueado hasta recuperar su estado local.'); }
+    }
     function canRunJob(job) {
       if (typeof job?.id !== 'string' || !job.id.startsWith('route:')) return true;
       try {
@@ -587,7 +604,7 @@
       } catch (cause) { error = cause.message || 'No se pudo preparar el refuerzo.'; return { queued: [], error }; }
       finally { running = false; }
     }
-    return Object.freeze({ state, list, save, pause, resume, remove, acknowledgeRoute, tick, canRunJob, dueOrigins });
+    return Object.freeze({ state, list, save, pause, resume, remove, acknowledgeRoute, tick, canRunJob, jobState, dueOrigins });
   }
   return Object.freeze({ create, SHIPS, MAX_AGE_MS, MAX_QUANTITY, MAX_ROUTES, MAX_RECEIPTS });
 });
@@ -716,7 +733,7 @@ return {create};
   function installPageObserver({ realm = globalThis, document = realm.document, importModule = url => import(url), now = Date.now,
     onPending = () => {}, emit = () => {} } = {}) {
     let stopped = false, installed = false, importing = false, failed = false, reason = 'awaiting-native-camera';
-    let moduleValue = null, camera = null, original = null, wrapper = null, ownDescriptor = null;
+    let moduleValue = null, camera = null, original = null, wrapper = null, ownDescriptor = null, originalUnproject = null, unprojectWrapper = null, ownUnprojectDescriptor = null;
     let activeGalaxy = '', activePath = '', activeCanvas = null, cachedViewport = null, candidate = null, pending = null;
     let revision = 0, frame = null, timer = null, lastEmittedAt = 0, observing = false, notifying = false, ordinal = 0, lastObservedOrdinal = 0;
     let resolveReady; const ready = new Promise(resolve => { resolveReady = resolve; });
@@ -735,10 +752,18 @@ return {create};
           else delete camera.project;
         }
       } catch (_) {}
+      try {
+        const descriptor = camera && Object.getOwnPropertyDescriptor(camera, 'unproject');
+        if (descriptor?.value === unprojectWrapper) {
+          if (ownUnprojectDescriptor) Object.defineProperty(camera, 'unproject', ownUnprojectDescriptor);
+          else delete camera.unproject;
+        }
+      } catch (_) {}
       installed = false;
     }
     function fail(why) { failed = true; if (timer !== null) realm.clearTimeout(timer); timer = null; unhook(); cancelFrame(); invalidate(why); resolveReady(false); }
-    function ownsHook() { return installed && Object.getOwnPropertyDescriptor(camera, 'project')?.value === wrapper; }
+    function ownsHook() { return installed && Object.getOwnPropertyDescriptor(camera, 'project')?.value === wrapper
+      && Object.getOwnPropertyDescriptor(camera, 'unproject')?.value === unprojectWrapper; }
     function constantsMatch(c) { return c && camera.sinTilt === c.sinTilt && camera.cosTilt === c.cosTilt && camera.L === c.L && camera.baseFocal === c.baseFocal; }
     function scheduleFrame() {
       if (frame !== null || stopped || failed) return;
@@ -785,7 +810,7 @@ return {create};
         if (!view || view.canvas !== activeCanvas) { invalidate('viewport-unavailable'); return; }
         // Native dimensions are CSS pixels. Never accept canvas.width/height,
         // which are backing-store pixels and differ at DPR > 1.
-        if (width !== view.rect.width || height !== view.rect.height) return;
+        if (width !== view.rect.width || height !== view.rect.height) { invalidate('native-viewport-size-mismatch'); return; }
         if (!bounded(args[0], 1e12) || !bounded(args[1], 1e12)) return;
         const values = cameraValue({ x, y, zoom, sinTilt: camera.sinTilt, cosTilt: camera.cosTilt, L: camera.L, baseFocal: camera.baseFocal });
         if (!values) { invalidate('invalid-native-camera'); return; }
@@ -803,15 +828,17 @@ return {create};
       // A changed shape or another hook is not a reason to patch prototypes.
       if (!protoProject || typeof protoProject.value !== 'function' || protoProject.value.length !== 8 || !protoProject.writable || !protoProject.configurable
         || !focal || typeof focal.value !== 'function' || focal.value.length !== 1
-        || !unproject || typeof unproject.value !== 'function' || unproject.value.length !== 7) return false;
+        || !unproject || typeof unproject.value !== 'function' || unproject.value.length !== 7 || !unproject.writable || !unproject.configurable) return false;
       for (const key of ['sinTilt', 'cosTilt', 'L', 'baseFocal']) {
         const descriptor = Object.getOwnPropertyDescriptor(shared, key);
         if (!descriptor || !('value' in descriptor) || !finite(descriptor.value)) return false;
       }
       if (!cameraValue({ x: 0, y: 0, zoom: 1, sinTilt: shared.sinTilt, cosTilt: shared.cosTilt, L: shared.L, baseFocal: shared.baseFocal })) return false;
-      const own = Object.getOwnPropertyDescriptor(shared, 'project');
-      if (own && (!('value' in own) || own.value !== protoProject.value || !own.writable || !own.configurable)) return false;
-      if (!own && !Object.isExtensible(shared)) return false;
+      for (const [key, method] of [['project', protoProject], ['unproject', unproject]]) {
+        const own = Object.getOwnPropertyDescriptor(shared, key);
+        if (own && (!('value' in own) || own.value !== method.value || !own.writable || !own.configurable)) return false;
+        if (!own && !Object.isExtensible(shared)) return false;
+      }
       return true;
     }
     function attach(value, galaxy, view) {
@@ -829,6 +856,18 @@ return {create};
       };
       const descriptor = ownDescriptor || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(camera), 'project');
       Object.defineProperty(camera, 'project', { ...descriptor, value: wrapper });
+      // GPU rendering can run without any project call. Native hover, pan and
+      // visibleWorldBounds still use this same singleton's unproject method,
+      // whose arguments 2..6 carry the exact same camera and CSS dimensions.
+      ownUnprojectDescriptor = Object.getOwnPropertyDescriptor(camera, 'unproject'); originalUnproject = camera.unproject;
+      unprojectWrapper = function unproject(e, t, n, r, i, a, o) {
+        const callOrdinal = ++ordinal;
+        const result = apply(originalUnproject, this, arguments);
+        try { observe(this, arguments, callOrdinal); } catch (_) { try { invalidate('camera-observation-failed'); } catch (_) {} }
+        return result;
+      };
+      const unprojectDescriptor = ownUnprojectDescriptor || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(camera), 'unproject');
+      Object.defineProperty(camera, 'unproject', { ...unprojectDescriptor, value: unprojectWrapper });
       installed = true; reason = 'awaiting-native-projection'; resolveReady(true);
     }
     function nativeReady() {
@@ -910,7 +949,7 @@ return {create};
           if (diagnostic.version === 1 && diagnostic.type === 'status' && [
             'native-camera-import-failed', 'native-camera-shape-changed', 'native-camera-unavailable',
             'camera-hook-replaced', 'camera-timing-unavailable', 'awaiting-native-projection',
-            'viewport-unavailable', 'game-navigation', 'camera-observation-failed',
+            'viewport-unavailable', 'game-navigation', 'camera-observation-failed', 'native-viewport-size-mismatch',
           ].includes(diagnostic.reason)) { clear(diagnostic.reason); return; }
         } catch (_) { /* Snapshot validation below remains authoritative. */ }
       }
@@ -1288,7 +1327,7 @@ return {create};
     }
     function updateDisabled() {
       if (!root) return;
-      for (const node of root.querySelectorAll?.('button, input, select') || []) node.disabled = busy;
+      for (const node of root.querySelectorAll?.('button, input, select') || []) node.disabled = busy || node.dataset.routeBlocked === 'true';
     }
     function render() {
       if (!root || destroyed) return;
@@ -1326,6 +1365,10 @@ return {create};
           controls.append(button('Editar', () => { if (current() && rowEpoch === scopeEpoch) showEditor(route.originId, route.destinationId, routes().find(r => r.id === route.id)); }),
             button(route.paused ? 'Reanudar' : 'Pausar', () => { if (!current() || rowEpoch !== scopeEpoch) return; const latest = routes().find(r => r.id === route.id); if (latest) act(() => call('onPause', route.id, !latest.paused), () => report(latest.paused ? 'Ruta reanudada.' : 'Ruta pausada.')); }),
             button('Eliminar', () => { if (current() && rowEpoch === scopeEpoch && routes().some(r => r.id === route.id)) act(() => call('onDelete', route.id), () => report('Ruta eliminada.')); }));
+          if (route.needsReview) for (const control of controls.querySelectorAll('button')) {
+            control.dataset.routeBlocked = 'true';
+            control.title = 'Comprueba el envío y completa primero la revisión de la ruta.';
+          }
           if (route.needsReview) controls.append(button('He revisado el envío', () => {
             if (!current() || rowEpoch !== scopeEpoch || !routes().find(r => r.id === route.id)?.needsReview) return;
             act(() => call('onAcknowledge', route.id), () => report('Envío revisado. La ruta sigue pausada; deberá esperar su intervalo y datos nuevos.'));
@@ -4935,7 +4978,7 @@ return Object.freeze({create});
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.2';
+  const SCRIPT_VERSION = '1.17.3';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -5046,6 +5089,7 @@ return Object.freeze({create});
     checkTarget: (job, previous) => allyProtection.check(job, previous) });
   fleetWait = createFleetWaitQueue({
     getContext: missionQueueContext, getFleet: currentMissionFleet,
+    getRouteState: job => reinforcementRoutes?.jobState(job),
     openFleetEditor: openMissionFleetEditor,
     isFleetEditing: id => Boolean(id?.startsWith('retry:') && attackRetry?.exportConfig().campaigns
       .find(value => value.queueJobId === id)?.fleetEdit),
@@ -6468,6 +6512,11 @@ return Object.freeze({create});
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.3', title: 'Refuerzos coherentes y observación de cámara', changes: [
+        'La cámara se observa también desde bounds/hover nativos; el render GPU no necesita llamar a project.',
+        'La cola muestra la revisión de la ruta y bloquea sus envíos; disponer de flota no significa tener autorización.',
+        'Edición y reanudación desde la ruta; los intentos modificados conservan revisión y ofrecen cancelación local, sin reenvío automático.',
+      ] },
       { version: '1.17.2', title: 'Ctrl reserva el gesto sin mover el fondo', changes: [
         'Ctrl y arrastrar sobre el mapa reserva el gesto antes de comprobar los datos; un rechazo ya no inicia pan.',
         'Vista previa desde el punto pulsado hasta el cursor y avisos visibles aunque el panel esté cerrado.',
@@ -11025,6 +11074,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     }
 
     function requireEditableJob(job, ordinary = false) {
+      requireIndependentJob(job);
       if (ordinary && job.id.startsWith('retry:')) throw new Error('Edita esta flota desde su campaña de reintentos.');
       if (!['waiting', 'paused'].includes(job.status) || job.needsReview) {
         throw new Error('No se puede editar un envío iniciado o pendiente de confirmación. Comprueba primero las misiones del juego.');
@@ -11114,11 +11164,25 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       });
     }
 
+    function routeState(job) {
+      if (!job?.id?.startsWith('route:') || job.status === 'sent') return null;
+      try {
+        const state = deps.getRouteState?.(copy(job));
+        if (state && typeof state.blocked === 'boolean' && typeof state.needsReview === 'boolean'
+          && typeof state.message === 'string') return state;
+      } catch (_) { /* Missing owner authority never permits a route send. */ }
+      return { blocked: true, needsReview: true, message: 'No se puede comprobar la ruta de refuerzo. Envío bloqueado; revisa su ruta antes de continuar.' };
+    }
+    function requireIndependentJob(job) {
+      if (job.id.startsWith('route:')) throw new Error('Gestiona este refuerzo desde su ruta. La cola no permite cambiar ni reanudar su envío por separado.');
+    }
+
     function update(id, patch) {
       if (!keys(patch, ['produce', 'autoSend']) || Object.values(patch).some(value => typeof value !== 'boolean')) {
         throw new TypeError('Opciones de misión no válidas.');
       }
       return changeJob(id, job => {
+        requireIndependentJob(job);
         if (['sending', 'sent'].includes(job.status)) throw new Error('El envío de esta misión ya se ha iniciado.');
         const next = { ...job, ...patch };
         if (!next.produce && !next.autoSend && next.status === 'waiting') next.status = 'paused';
@@ -11129,6 +11193,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     function reconnect(id, value) {
       const refreshedTarget = target(value);
       return changeJob(id, job => {
+        requireIndependentJob(job);
         if (!['waiting', 'paused'].includes(job.status) || job.needsReview) {
           throw new Error('Comprueba primero si esta misión llegó a enviarse.');
         }
@@ -11157,6 +11222,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
 
     function resume(id) {
       return changeJob(id, job => {
+        requireIndependentJob(job);
         if (!['waiting', 'paused'].includes(job.status) || job.needsReview) throw new Error('Comprueba primero si esta misión llegó a enviarse.');
         if (job.fleetEdit) throw new Error('Termina o cancela la edición de flota antes de reanudar.');
         if (!job.produce && !job.autoSend) throw new Error('Activa la producción o el envío antes de reanudar.');
@@ -11167,6 +11233,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     function acknowledge(id, { notSent = false } = {}) {
       if (notSent !== true) throw new Error('Debes confirmar que la misión no se envió antes de reintentar.');
       return changeJob(id, job => {
+        requireIndependentJob(job);
         if (job.status !== 'uncertain' && !job.needsReview) throw new Error('La misión no tiene un envío sin confirmar.');
         if (!job.produce && !job.autoSend) throw new Error('Activa la producción o el envío antes de reanudar.');
         return { ...job, status: 'waiting', message: '', needsReview: false };
@@ -11225,7 +11292,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       const current = context(value);
       if (!current?.active || !current.canAct) return null;
       const job = config.jobs.find(item => matches(item, current) && item.status === 'waiting' && item.produce && !item.needsReview && !item.fleetEdit);
-      if (!job) return null;
+      if (!job || routeState(job)?.blocked) return null;
       const plan = productionPlan(job, fleet);
       if (plan?.ready && !job.autoSend) {
         try { finishPreparation(job.id); } catch (_) { /* No side effect after failed persistence. */ }
@@ -11248,7 +11315,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       const current = currentContext();
       if (!current?.active || !current.canAct) { render(); return null; }
       const job = config.jobs.find(item => matches(item, current) && item.status === 'waiting' && !item.fleetEdit);
-      if (!job || !productionPlan(job, currentFleet(job))?.ready) { render(); return null; }
+      if (!job || routeState(job)?.blocked || !productionPlan(job, currentFleet(job))?.ready) { render(); return null; }
       if (!job.autoSend) {
         if (job.produce) try { finishPreparation(job.id); } catch (_) { /* Keep intent paused on save failure. */ }
         return null;
@@ -11270,7 +11337,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         if (saved?.status !== 'sending' || saved.claimedAt !== claim.claimedAt) return null;
         const latestContext = currentContext();
         if (!matches(saved, latestContext) || !latestContext.active || !latestContext.canAct ||
-            !productionPlan(saved, currentFleet(saved))?.ready) {
+            !productionPlan(saved, currentFleet(saved))?.ready || routeState(saved)?.blocked) {
           retryAfter.set(saved.id, now() + 1000);
           changeJob(saved.id, item => ({ ...item, status: 'waiting', message: 'Esperando la flota y el origen correctos.' }));
           return null;
@@ -11365,7 +11432,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         const jobs = (config?.jobs || []).map(job => {
           let editing = Boolean(job.fleetEdit);
           try { editing ||= deps.isFleetEditing?.(job.id) === true; } catch (_) { /* The owner displays its own storage errors. */ }
-          return { job, editing, plan: matches(job, current) ? productionPlan(job, currentFleet(job)) : null };
+          return { job, editing, owner: routeState(job), plan: matches(job, current) ? productionPlan(job, currentFleet(job)) : null };
         });
         const key = JSON.stringify({ jobs, context: current, notice, readError, storageError });
         if (key === renderKey) return;
@@ -11425,11 +11492,11 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
           try { const result = action(); if (result && typeof result.then === 'function') Promise.resolve(result).catch(actionError); }
           catch (error) { actionError(error); }
         };
-        for (const { job, plan, editing } of jobs) {
+        for (const { job, plan, editing, owner } of jobs) {
           const article = el('article');
           article.dataset.fleetWaitJob = job.id;
           article.dataset.operationStatus = job.status;
-          article.dataset.operationAttention = String(Boolean(job.needsReview || editing));
+          article.dataset.operationAttention = String(Boolean(job.needsReview || editing || owner?.needsReview));
           const statuses = { paused: 'Pausada', sending: 'Enviando…', sent: 'Enviada',
             uncertain: 'Envío sin confirmar. Comprueba las misiones del juego.' };
           let state = statuses[job.status];
@@ -11438,10 +11505,11 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
               : plan ? 'Esperando: ' + fleetText(plan.missing) : 'Selecciona este origen para comprobar su flota.';
           }
           if (editing) state = 'Edición de flota pendiente. La producción y el envío esperan hasta terminarla.';
-          const tone = job.status === 'uncertain' || job.needsReview || editing ? 'warning'
+          if (owner?.blocked) state = owner.message;
+          const tone = job.status === 'uncertain' || job.needsReview || editing || owner?.blocked ? 'warning'
             : job.status === 'sent' || job.status === 'waiting' && plan?.ready ? 'ready' : '';
           const cardHeading = el('div', undefined, 'fw-card-heading');
-          const badge = el('span', editing ? 'Editando flota' : { waiting: plan?.ready ? 'Lista' : 'Esperando flota', paused: 'En pausa',
+          const badge = el('span', owner?.blocked ? (owner.needsReview ? 'Revisar ruta' : 'Ruta pausada') : editing ? 'Editando flota' : { waiting: plan?.ready ? 'Lista' : 'Esperando flota', paused: 'En pausa',
             sending: 'Enviando', sent: 'Enviada', uncertain: 'Revisar envío' }[job.status], 'fw-badge');
           badge.dataset.tone = tone;
           cardHeading.append(el('strong', job.target.label), badge);
@@ -11455,10 +11523,11 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
           status.setAttribute('role', 'status');
           article.append(status);
           if (!editing && job.message && job.message !== state) article.append(el('p', job.message, 'fw-muted'));
-          if (job.produce && job.status === 'waiting' && plan && fleetText(plan.production)) {
+          if (!owner?.blocked && job.produce && job.status === 'waiting' && plan && fleetText(plan.production)) {
             article.append(el('p', 'Por producir: ' + fleetText(plan.production), 'fw-muted'));
           }
-          if (['waiting', 'paused', 'uncertain'].includes(job.status)) {
+          if (owner) article.append(el('p', owner.blocked ? 'El envío automático está bloqueado por la ruta.' : owner.message, 'fw-muted'));
+          if (!owner && ['waiting', 'paused', 'uncertain'].includes(job.status)) {
             const options = el('div', undefined, 'fw-options');
             for (const [field, text] of [['produce', 'Producir las naves que faltan'], ['autoSend', 'Enviar cuando la flota esté completa']]) {
               const row = el('label');
@@ -11482,13 +11551,13 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
             control.addEventListener('click', () => safeAction(action));
             actions.append(control);
           };
-          if (job.status !== 'sent' && typeof deps.openFleetEditor === 'function') {
+          if (!owner && job.status !== 'sent' && typeof deps.openFleetEditor === 'function') {
             button(editing ? 'Continuar edición' : 'Editar flota', () => deps.openFleetEditor(job.id), 'edit-fleet',
               !['waiting', 'paused'].includes(job.status) || job.needsReview);
           }
           if (job.status === 'waiting') button('Pausar', () => pause(job.id), 'pause');
-          if (job.status === 'paused' && !job.needsReview && !editing) button('Reanudar', () => resume(job.id), 'resume');
-          if (job.status === 'uncertain' || job.needsReview) button('He comprobado que no se envió: reanudar', () => acknowledge(job.id, { notSent: true }), 'acknowledge');
+          if (!owner && job.status === 'paused' && !job.needsReview && !editing) button('Reanudar', () => resume(job.id), 'resume');
+          if (!owner && (job.status === 'uncertain' || job.needsReview)) button('He comprobado que no se envió: reanudar', () => acknowledge(job.id, { notSent: true }), 'acknowledge');
           button(job.status === 'sent' ? 'Quitar' : 'Cancelar pendiente', () => cancel(job.id), 'cancel', job.status === 'sending');
           article.append(actions);
           section.append(article);
@@ -11538,7 +11607,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     return { queue, update, reconnect, cancel, pause, resume, acknowledge, productionPlan, productionDemand, setCampaignOwner,
       beginFleetEdit, getFleetEdit, setFleetDraft, applyFleetEdit, cancelFleetEdit, setFleetQuantities,
       getJobFor, tick, exportConfig, validateConfig, importConfig, backupCheckpoint, restoreCheckpoint,
-      refreshConfig, mount, destroy,
+      refreshConfig, refreshView: render, mount, destroy,
       list: () => exportConfig().jobs,
       getDiagnostics: () => ({ storageError, readError, running, count: config?.jobs.length ?? null }) };
   }
@@ -18029,7 +18098,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         getWorld: () => globalThis.OldLightEmpireBridge?.snapshot({ includeOwnership: false }) || null,
         getJobs: () => fleetWait.list(), queue: (spec, options) => fleetWait.queue(spec, options),
         cancel: id => { missionAdapter.cancel(id, 'Ruta de refuerzos detenida.'); return fleetWait.cancel(id); },
-        onChange: schedule });
+        onChange: () => { fleetWait?.refreshView(); schedule(); } });
       reinforcementMap = globalThis.OldLightReinforcementMap?.create({ realm: globalThis, document,
         addElement: typeof GM_addElement === 'function' ? GM_addElement : null,
         getScope: () => missionContext().scope });

@@ -1,0 +1,6 @@
+{
+  "source": "https://oldlight.io/assets/transits-DloGaxtE.js",
+  "sha256": "4d79f1bb4e9ca042385be2b49cea6c952d7c21d660de35e30b20b11ec5c11880",
+  "offset": 7190,
+  "classExpression": "class{tilt;sinTilt;cosTilt;L;baseFocal;constructor(){this.tilt=C.tiltDegrees*ie,this.sinTilt=Math.sin(this.tilt),this.cosTilt=Math.cos(this.tilt),this.L=C.distance,this.baseFocal=C.baseFocal}focal(e){return this.baseFocal*e}project(e,t,n,r,i,a,o,s){let c=e-n,l=t-r,u=l*this.cosTilt+this.L,d=this.focal(i),f=s??{x:0,y:0,scale:0,depth:0,visible:!1};return u<=1?(f.x=0,f.y=0,f.scale=0,f.depth=u,f.visible=!1,f):(f.x=d*c/u+a/2,f.y=-d*l*this.sinTilt/u+o/2,f.scale=d/u,f.depth=u,f.visible=!0,f)}unproject(e,t,n,r,i,a,o){let s=t-o/2,c=e-a/2,l=this.focal(i),u=l*this.sinTilt+s*this.cosTilt;if(Math.abs(u)<1e-6)return{x:n+c*1e3,y:r+1e6};let d=-s*this.L/u;return{x:n+c*(d*this.cosTilt+this.L)/l,y:r+d}}visibleWorldBounds(e,t,n,r,i,a=0){let o=this.focal(n),s=E*this.cosTilt+this.L,c=-o*E*this.sinTilt/s,l=Math.max(-i/2-a,c),u=i/2+a,d=[[-r/2-a,l],[r/2+a,l],[-r/2-a,u],[r/2+a,u]],f=1/0,p=-1/0,m=1/0,h=-1/0;for(let[a,o]of d){let s=this.unproject(a+r/2,o+i/2,e,t,n,r,i);s.x<f&&(f=s.x),s.x>p&&(p=s.x),s.y<m&&(m=s.y),s.y>h&&(h=s.y)}return h>t+3200&&(h=t+E),{minX:f,minY:m,maxX:p,maxY:h}}}"
+}
