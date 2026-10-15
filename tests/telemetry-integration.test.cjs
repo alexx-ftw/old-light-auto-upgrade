@@ -108,11 +108,11 @@ test('telemetry fake clicks cannot change configured consent and local metrics r
   toggle.checked = true; toggle.fire('change'); assert.equal(changes, 1); assert.equal(enabled, true);
   clear.fire('click', { isTrusted: false }); assert.equal(changes, 1);
   clear.fire('click'); assert.equal(changes, 2); assert.equal(enabled, false);
-  assert.equal(h.local.isEnabled(), false); assert.equal(h.storage.size, 0);
+  assert.equal(h.local.isEnabled(), true); assert.equal(h.storage.size, 0);
 });
 
-test('telemetry performance clock is not read with inactive remote collection', () => {
-  const h = harness(); const started = h.local.startTiming(); h.local.finishTiming(started);
+test('performance clock is not read with local opt-out and inactive remote collection', () => {
+  const h = harness(); h.local.setEnabled(false); const started = h.local.startTiming(); h.local.finishTiming(started);
   assert.equal(started, null); assert.equal(h.clockReads(), 0); assert.equal(h.remote.getStatus().queued, 0);
 });
 
@@ -120,11 +120,12 @@ test('telemetry local wrapper forwards only closed events and numeric durations 
   const h = harness(), events = [], durations = [];
   h.context.observer = { record: (...args) => events.push(args), isEnabled: () => true, duration: (...args) => durations.push(args) };
   const local = vm.runInContext('createLocalMetrics(observer);', h.context);
+  local.setEnabled(false);
   local.observeHelperEvent('request.sent', 'PRIVATE_SYSTEM'); local.observeDriveStatus('connected');
   local.observeEmpireStatus('missing_init'); local.finishTiming(local.startTiming());
   assert.deepEqual(events, [['automation.sent'], ['drive.connected'], ['empire.observer.missing_init']]);
   assert.deepEqual(durations, [['helper.step', 10]]);
-  assert.equal(local.isEnabled(), false); assert.equal(h.storage.size, 0);
+  assert.equal(local.isEnabled(), false); assert.equal(h.storage.size, 2);
   assert.match(source, /const timing = metrics.startTiming\?\.\(\);\s+try \{ step\(\); \} catch \(cause\) \{ metrics.record\('error.runtime'\); throw cause; \}\s+finally \{ metrics.finishTiming\?\.\(timing\); \}/);
 });
 
@@ -132,6 +133,24 @@ test('telemetry throwing optional adapter cannot break local recording or timing
   const h = harness(); h.context.observer = { record() { throw new Error('private'); }, isEnabled() { throw new Error('private'); }, duration() { throw new Error('private'); } };
   const local = vm.runInContext('createLocalMetrics(observer);', h.context);
   local.setEnabled(true); assert.doesNotThrow(() => local.record('helper.loaded'));
-  assert.equal(local.getStatus().total, 1); assert.equal(local.startTiming(), null);
+  assert.equal(local.getStatus().total, 1); const timing = local.startTiming();
+  assert.ok(timing.local); assert.equal(timing.remoteStart, null);
+  local.finishTiming(timing); assert.equal(local.getStatus().total, 2);
   assert.doesNotThrow(() => local.finishTiming(1));
+});
+
+
+test('local duration samples stay local with independent remote collection enabled or disabled', () => {
+  for (const enabled of [false, true]) {
+    const h = harness(), events = [], durations = [];
+    h.context.observer = { record: (...args) => events.push(args), isEnabled: () => enabled,
+      duration: (...args) => durations.push(args) };
+    const local = vm.runInContext('createLocalMetrics(observer);', h.context);
+    local.setEnabled(true); const timing = local.startTiming(); local.finishTiming(timing);
+    assert.equal(local.getStatus().total, 1);
+    assert.match(Object.keys(local.snapshot().days[0].counts)[0], /^performance\.step\./);
+    assert.deepEqual(events, [], 'local bins bypass remote record forwarding');
+    assert.equal(durations.length, enabled ? 1 : 0);
+    assert.equal(h.network(), 0);
+  }
 });

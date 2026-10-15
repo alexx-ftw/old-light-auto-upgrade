@@ -150,11 +150,11 @@ function metricsHarness(sharedStorage = new Map(), options = {}) {
   };
 }
 
-test('diagnostic review: imperial metrics default off and never replay pre-consent transitions', () => {
-  const h = metricsHarness();
+test('diagnostic review: imperial metrics preserve opt-out and never replay disabled transitions', () => {
+  const h = metricsHarness(new Map([['old-light-auto-upgrade:metrics-consent:v1', JSON.stringify({enabled:false,generation:'00000000-0000-4000-8000-000000000002'})]]));
   for (const code of ['socket_unobserved', 'awaiting_init', 'missing_init']) h.metrics.observeEmpireStatus(code);
   assert.deepEqual(h.counts(), {});
-  assert.equal(h.storage.size, 0);
+  assert.equal(h.storage.size, 1);
   assert.equal(h.writes.length, 0);
   h.metrics.setEnabled(true);
   assert.deepEqual(h.counts(), {});
@@ -287,9 +287,9 @@ test('diagnostic integration: all fixed counters over 30 days fit the existing s
     counts: Object.fromEntries(core.EVENTS.map(name => [name, core.MAX_COUNT])),
   }));
   const raw = JSON.stringify(state);
-  assert.equal(core.EVENTS.length, 36, 'frozen category set must be reviewed before expansion');
+  assert.equal(core.EVENTS.length, 41, 'frozen category set must be reviewed before expansion');
   assert.equal(core.RETENTION_DAYS, 30);
-  assert.equal(raw.length, 33676);
+  assert.equal(raw.length, 38836);
   assert.ok(raw.length < 65536);
   h.storage.set(key, raw);
   assert.equal(h.metrics.isEnabled(), true);

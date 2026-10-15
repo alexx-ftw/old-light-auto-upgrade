@@ -19,6 +19,8 @@
     'automation.unconfirmed', 'automation.failed', 'automation.rejected', 'automation.paused',
     'mission.sent', 'mission.uncertain', 'drive.connected', 'drive.synced', 'drive.retry', 'drive.error',
     'error.runtime', 'error.storage',
+    'performance.step.lt4ms', 'performance.step.lt16ms', 'performance.step.lt50ms',
+    'performance.step.lt200ms', 'performance.step.gte200ms',
     'empire.observer.installation_failed', 'empire.observer.socket_unobserved',
     'empire.observer.awaiting_init', 'empire.observer.missing_init',
     'empire.observer.format_rejected', 'empire.observer.observation_rejected',
@@ -164,6 +166,46 @@
     let storageError = false;
     let errorCode = null;
     let deletionPending = false;
+    let timingProbeAt = null;
+    let pendingTiming = null;
+
+    // Sample at most one step/minute per tab. The gate avoids storage reads on
+    // every scheduler tick. Exact times and consent generations never leave this
+    // closure; only a fixed bucket is recorded in the existing local counters.
+    function startTiming() {
+      try {
+        const now = clock();
+        if (!Number.isFinite(now) || now < 0 || now > 253402300799999) return null;
+        if (timingProbeAt !== null && now < timingProbeAt) { timingProbeAt = now; return null; }
+        if (timingProbeAt !== null && now - timingProbeAt < 60000) return null;
+        timingProbeAt = now;
+        pendingTiming = null;
+        if (forcedOff || typeof config.performanceNow !== 'function') return null;
+        const permission = consent();
+        if (!permission.ok) { config.onTimingFailure?.(); return null; }
+        if (!permission.enabled) return null;
+        const start = config.performanceNow();
+        if (typeof start !== 'number' || !Number.isFinite(start) || start < 0) return null;
+        const token = Object.freeze({});
+        pendingTiming = { token, start, permission };
+        return token;
+      } catch (_) { return null; }
+    }
+
+    function finishTiming(token) {
+      if (!pendingTiming || pendingTiming.token !== token) return false;
+      const sample = pendingTiming;
+      pendingTiming = null;
+      try {
+        const end = config.performanceNow();
+        if (forcedOff || !sameConsent(sample.permission, consent())) return false;
+        const duration = end - sample.start;
+        if (typeof end !== 'number' || !Number.isFinite(duration) || duration < 0 || duration > 60000) return false;
+        const bucket = duration < 4 ? 'lt4ms' : duration < 16 ? 'lt16ms' : duration < 50 ? 'lt50ms'
+          : duration < 200 ? 'lt200ms' : 'gte200ms';
+        return recordAttempt('performance.step.' + bucket, true, sample.permission);
+      } catch (_) { return false; }
+    }
 
     function fail(code) {
       forcedOff = true;
@@ -313,6 +355,7 @@
     }
 
     function changePermission(enabled, previous) {
+      pendingTiming = null; timingProbeAt = null;
       forcedOff = true;
       const permission = writePermission(enabled, previous);
       if (!permission) return false;
@@ -388,7 +431,7 @@
       return { enabled, storageError, days: days.length, total, deletionPending, errorCode };
     }
 
-    return Object.freeze({ setEnabled, isEnabled, record, snapshot, clear, getStatus });
+    return Object.freeze({ setEnabled, isEnabled, record, snapshot, clear, getStatus, startTiming, finishTiming });
   }
 
   return Object.freeze({ create, EVENTS, SCHEMA, RETENTION_DAYS, MAX_COUNT });

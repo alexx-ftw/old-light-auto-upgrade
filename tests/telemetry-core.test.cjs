@@ -34,11 +34,14 @@ function fixture(overrides = {}) {
   };
 }
 
-test('telemetry core exports frozen API and the exact closed local event vocabulary', () => {
+test('telemetry core exports frozen API and keeps local timing bins out of remote vocabulary', () => {
   assert.equal(Object.isFrozen(core), true);
   assert.equal(Object.isFrozen(core.EVENTS), true);
   assert.equal(Object.isFrozen(core.BUCKETS), true);
-  assert.deepEqual(core.EVENTS, metrics.EVENTS);
+  assert.deepEqual(core.EVENTS, metrics.EVENTS.filter(name => !name.startsWith('performance.step.')));
+  for (const name of metrics.EVENTS.filter(name => name.startsWith('performance.step.'))) {
+    assert.equal(core.EVENTS.includes(name), false);
+  }
   assert.equal(core.EVENTS.length, 36);
   assert.equal(Object.isFrozen(core.create()), true);
   for (const value of [null, false, 'invalid']) assert.equal(core.create(value).getStatus().configured, false);

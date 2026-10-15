@@ -2056,7 +2056,7 @@
         },
         {
           "file": "tests/telemetry-integration.test.cjs",
-          "name": "telemetry performance clock is not read with inactive remote collection"
+          "name": "performance clock is not read with local opt-out and inactive remote collection"
         }
       ],
       "boundaries": [
@@ -2918,6 +2918,42 @@
         "Review exact geometry identity coverage and stale/order protection.",
         "Adversarially test delayed old messages, geometry mutations, and invalidation.",
         "Ensure route metadata does not churn identical SVG, but pause/endpoint changes repaint."
+      ]
+    },
+    {
+      "id": "route-initial-ownership-review-loop",
+      "feedback": "A route repeatedly requested review when the linked queue mission reported missing fresh ownership before native preparation.",
+      "beforeFail": {
+        "revision": "a45e73509a45c9ba147b5f2679cc7f695d54ce54",
+        "command": "QA_REINFORCEMENT_ADAPTER_SOURCE=<unchanged a45e735 userscript> node --test tests/reinforcement-approval-review.test.cjs",
+        "observedFailure": "Independent identical regression fixture: baseline 16 passed and 7 failed; candidate 23 passed. Initial missing/stale/disconnected/unknown ownership and replay/one-ticket recovery are covered.",
+        "evidence": "docs/1.17.8-route-review-independent.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-approval-review.test.cjs",
+          "name": "independent route review: real route, queue, and adapter keep one waiting ticket until census returns"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Initial missing ownership before native preparation",
+          "expected": "Keep one durable ticket waiting, zero preparation, then one confirmed send after fresh census.",
+          "regression": {
+            "file": "tests/reinforcement-approval-review.test.cjs",
+            "name": "independent route review: real route, queue, and adapter keep one waiting ticket until census returns"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Live game / Brave / Violentmonkey / Drive",
+          "reason": "Not accessed. Existing pending reviews are not cleared; uncertain attempts still require human review."
+        }
+      ],
+      "independentReviewCriteria": [
+        "No waiting fallback for protected, invalid, exceptional, already-clicked or later-stage failures.",
+        "Do not clear persisted pending review or bypass owner/generation/scope guard tokens."
       ]
     }
   ]

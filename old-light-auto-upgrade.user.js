@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.7
+// @version      1.17.8
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -3785,6 +3785,8 @@ return Object.freeze({create});
     'automation.unconfirmed', 'automation.failed', 'automation.rejected', 'automation.paused',
     'mission.sent', 'mission.uncertain', 'drive.connected', 'drive.synced', 'drive.retry', 'drive.error',
     'error.runtime', 'error.storage',
+    'performance.step.lt4ms', 'performance.step.lt16ms', 'performance.step.lt50ms',
+    'performance.step.lt200ms', 'performance.step.gte200ms',
     'empire.observer.installation_failed', 'empire.observer.socket_unobserved',
     'empire.observer.awaiting_init', 'empire.observer.missing_init',
     'empire.observer.format_rejected', 'empire.observer.observation_rejected',
@@ -3930,6 +3932,46 @@ return Object.freeze({create});
     let storageError = false;
     let errorCode = null;
     let deletionPending = false;
+    let timingProbeAt = null;
+    let pendingTiming = null;
+
+    // Sample at most one step/minute per tab. The gate avoids storage reads on
+    // every scheduler tick. Exact times and consent generations never leave this
+    // closure; only a fixed bucket is recorded in the existing local counters.
+    function startTiming() {
+      try {
+        const now = clock();
+        if (!Number.isFinite(now) || now < 0 || now > 253402300799999) return null;
+        if (timingProbeAt !== null && now < timingProbeAt) { timingProbeAt = now; return null; }
+        if (timingProbeAt !== null && now - timingProbeAt < 60000) return null;
+        timingProbeAt = now;
+        pendingTiming = null;
+        if (forcedOff || typeof config.performanceNow !== 'function') return null;
+        const permission = consent();
+        if (!permission.ok) { config.onTimingFailure?.(); return null; }
+        if (!permission.enabled) return null;
+        const start = config.performanceNow();
+        if (typeof start !== 'number' || !Number.isFinite(start) || start < 0) return null;
+        const token = Object.freeze({});
+        pendingTiming = { token, start, permission };
+        return token;
+      } catch (_) { return null; }
+    }
+
+    function finishTiming(token) {
+      if (!pendingTiming || pendingTiming.token !== token) return false;
+      const sample = pendingTiming;
+      pendingTiming = null;
+      try {
+        const end = config.performanceNow();
+        if (forcedOff || !sameConsent(sample.permission, consent())) return false;
+        const duration = end - sample.start;
+        if (typeof end !== 'number' || !Number.isFinite(duration) || duration < 0 || duration > 60000) return false;
+        const bucket = duration < 4 ? 'lt4ms' : duration < 16 ? 'lt16ms' : duration < 50 ? 'lt50ms'
+          : duration < 200 ? 'lt200ms' : 'gte200ms';
+        return recordAttempt('performance.step.' + bucket, true, sample.permission);
+      } catch (_) { return false; }
+    }
 
     function fail(code) {
       forcedOff = true;
@@ -4079,6 +4121,7 @@ return Object.freeze({create});
     }
 
     function changePermission(enabled, previous) {
+      pendingTiming = null; timingProbeAt = null;
       forcedOff = true;
       const permission = writePermission(enabled, previous);
       if (!permission) return false;
@@ -4154,7 +4197,7 @@ return Object.freeze({create});
       return { enabled, storageError, days: days.length, total, deletionPending, errorCode };
     }
 
-    return Object.freeze({ setEnabled, isEnabled, record, snapshot, clear, getStatus });
+    return Object.freeze({ setEnabled, isEnabled, record, snapshot, clear, getStatus, startTiming, finishTiming });
   }
 
   return Object.freeze({ create, EVENTS, SCHEMA, RETENTION_DAYS, MAX_COUNT });
@@ -5147,7 +5190,7 @@ return Object.freeze({create});
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.7';
+  const SCRIPT_VERSION = '1.17.8';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -5346,8 +5389,14 @@ return Object.freeze({create});
     const key = 'old-light-auto-upgrade:metrics:v1';
     const consentKey = 'old-light-auto-upgrade:metrics-consent:v1';
     const core = globalThis.OldLightMetricsCore.create({ version: SCRIPT_VERSION,
+      performanceNow: () => performance.now(),
+      onTimingFailure: () => { try { onChange?.(); } catch (_) {} },
       readConsent: () => {
         const raw = localStorage.getItem(consentKey);
+        // An unset local choice defaults on without writing consent. A stored
+        // opt-out always wins, including one written by another tab mid-step.
+        // This shared local-only generation is not an identity or remote grant.
+        if (raw === null) return { enabled: true, generation: '00000000-0000-4000-8000-000000000001' };
         if (raw !== null && raw.length > 1024) throw new Error('Metrics consent exceeds its limit');
         return JSON.parse(raw || 'null');
       },
@@ -5406,11 +5455,24 @@ return Object.freeze({create});
       record('empire.observer.' + code);
     }
     function startTiming() {
-      try { return remote?.isEnabled() && typeof performance?.now === 'function' ? performance.now() : null; }
-      catch (_) { return null; }
+      const local = core.startTiming();
+      let remoteStart = null;
+      try { if (remote?.isEnabled() && typeof performance?.now === 'function') remoteStart = performance.now(); }
+      catch (_) { /* Optional remote failures do not block local sampling. */ }
+      return local || remoteStart !== null ? { local, remoteStart } : null;
     }
     function finishTiming(start) {
-      try { if (typeof start === 'number') remote?.duration('helper.step', performance.now() - start); }
+      if (!start || typeof start !== 'object') return;
+      let remoteDuration = null;
+      try { if (typeof start.remoteStart === 'number') remoteDuration = performance.now() - start.remoteStart; }
+      catch (_) { /* Keep clock failures independent. */ }
+      // Local duration bins never pass through record(), which also forwards
+      // usage events to the independently consented remote collector.
+      core.finishTiming(start.local);
+      if (start.local) {
+        try { onChange?.(); } catch (_) { /* Metrics UI cannot affect the helper. */ }
+      }
+      try { if (remoteDuration !== null) remote?.duration('helper.step', remoteDuration); }
       catch (_) { /* Performance measurement cannot affect the game loop. */ }
     }
     return { ...core, record, observeHelperEvent, observeDriveStatus, observeEmpireStatus, startTiming, finishTiming,
@@ -5430,8 +5492,8 @@ return Object.freeze({create});
     const heading = el('h3', 'Métricas locales'); heading.id = 'oldlight-metrics-heading';
     const label = el('label', undefined, 'count-away');
     const toggle = el('input'); toggle.type = 'checkbox'; toggle.dataset.action = 'metrics-toggle';
-    label.append(toggle, el('span', 'Medir uso y errores en este navegador'));
-    const explanation = el('p', 'Opcional y desactivado inicialmente. Muestra contadores de funciones y tipos de error de los últimos 30 días, incluida la apertura de Imperio y los cambios de estado de su lector: instalación, conexión, espera del estado inicial, censo recibido o datos rechazados/incompletos. No guarda mensajes, credenciales, jugadores, identificadores de cuenta o sistema, coordenadas ni direcciones web. No envía datos a ningún servidor.', 'hint');
+    label.append(toggle, el('span', 'Medir uso, errores y rendimiento en este navegador'));
+    const explanation = el('p', 'Activado por defecto si no hay una elección guardada. Respeta cualquier desactivación anterior; puedes desactivarlo y borrar los datos aquí. Muestra contadores de funciones, tipos de error y muestras de rendimiento de los últimos 30 días, incluida la apertura de Imperio y los cambios de estado de su lector: instalación, conexión, espera del estado inicial, censo recibido o datos rechazados/incompletos. No guarda mensajes, credenciales, jugadores, identificadores de cuenta o sistema, coordenadas ni direcciones web. No envía datos a ningún servidor.', 'hint');
     const status = el('p', '', 'backup-status'); status.dataset.field = 'metrics-status';
     status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
     const actions = el('div', undefined, 'backup-actions');
@@ -5443,7 +5505,7 @@ return Object.freeze({create});
     preview.id = 'oldlight-metrics-report'; preview.setAttribute('aria-label', 'Informe local de métricas en JSON');
     preview.style.cssText = 'width:100%;max-width:100%;box-sizing:border-box;resize:vertical';
     previewButton.setAttribute('aria-controls', preview.id); previewButton.setAttribute('aria-expanded', 'false');
-    const note = el('p', 'Puedes revisar el informe antes de compartirlo manualmente. No se incluye en las copias ni se sincroniza por Drive. Desactivar también borra los contadores locales. El informe incluye versión, días UTC y contadores con categorías fijas; no contiene tramas del juego ni textos de error. Los estados imperiales repetidos no se vuelven a contar hasta que cambian; al activar no se recupera el historial anterior. Los días antiguos se descartan al registrar nuevos eventos.', 'hint');
+    const note = el('p', 'Puedes revisar el informe antes de compartirlo manualmente. No se incluye en las copias ni se sincroniza por Drive. Desactivar también borra los contadores locales. El informe incluye versión, días UTC y contadores con categorías fijas; no contiene tramas del juego ni textos de error. Los estados imperiales repetidos no se vuelven a contar hasta que cambian; al activar no se recupera el historial anterior. Se mide como máximo un paso del helper por minuto y pestaña, en intervalos de menos de 4, 16, 50 o 200 ms, o de 200 ms en adelante. Son muestras del trabajo del helper, no FPS ni tiempos de red; no detectan todos los picos. No se guardan duraciones exactas. Los días antiguos se descartan al registrar nuevos eventos.', 'hint');
     box.append(heading, label, explanation, actions, status, preview, note);
     shadow.querySelector('[data-page="data"]').append(box);
     function refresh(message = '') {
@@ -6713,6 +6775,11 @@ return Object.freeze({create});
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.8', title: 'Rutas estables y diagnósticos locales', changes: [
+        'Las rutas esperan datos de propiedad antes de preparar el envío. Los envíos inciertos y las revisiones ya pendientes siguen requiriendo comprobación.',
+        'Activa uso, errores y rendimiento locales si no hay elección guardada; respeta el rechazo previo y permite borrar y desactivar.',
+        'Muestrea un paso por minuto y pestaña en categorías, sin guardar duraciones exactas ni enviarlas. La telemetría remota sigue sin destino configurado.',
+      ] },
       { version: '1.17.7', title: 'Flechas sin parpadeo periódico', changes: [
         'Mantiene la proyección vigente durante los latidos de una cámara idéntica; invalida inmediatamente cualquier cambio real.',
         'Evita recrear las líneas cuando solo cambian contadores o tiempos de una ruta.',
@@ -10376,19 +10443,30 @@ return Object.freeze({create});
     async function dispatch(job) {
       const spec = specOf(job), jobId = job?.id;
       if (destroyed || !spec || typeof jobId !== 'string') return result('paused', 'La misión guardada no tiene un origen, destino o preset válido.');
-      let protection, protectionError = '';
+      const claim = attemptKey(job);
+      if (attempted.has(claim)) return result('uncertain', 'Esta misión ya pasó al juego. Comprueba sus movimientos antes de volver a enviarla.');
+      let protection, protectionError = '', protectionCode = '';
       const protectedTarget = () => {
         const next = checkTarget(job, protection?.token || null);
         if (next?.allowed !== true) {
+          protectionCode = next?.allowed === false ? next.code || '' : '';
           protectionError = next?.message || 'La protección de aliados impide este envío.';
           throw new Error(protectionError);
         }
         protectionError = '';
         protection = next; return true;
       };
-      try { protectedTarget(); } catch (e) { return result('paused', e.message); }
-      const claim = attemptKey(job);
-      if (attempted.has(claim)) return result('uncertain', 'Esta misión ya pasó al juego. Comprueba sus movimientos antes de volver a enviarla.');
+      try { protectedTarget(); } catch (e) {
+        // No native preparation or confirmation has started. A route's durable
+        // intent stays valid while its initial ownership census is unavailable;
+        // keep waiting with every safety check enabled instead of demanding a
+        // human acknowledgement for an attempt that never reached the game.
+        // Later guard failures and material mismatches still pause for review.
+        const waitForOwnership = jobId.startsWith('route:')
+          && ['ownership', 'unknown-owner'].includes(protectionCode);
+        return result(waitForOwnership ? 'waiting' : 'paused', waitForOwnership
+          ? 'Esperando datos recientes de propiedad del juego. La ruta sigue activa; no se enviará hasta verificarlos.' : e.message);
+      }
       if (active || capturing) return result('waiting', 'Hay otra misión en preparación.');
       if (!readyToAct(job)) return result('waiting', 'Esperando a que el helper pueda actuar.');
       if (quietUntil > 0 && performance.now() < quietUntil) return result('waiting', 'Esperando a que termines de interactuar con el juego.');

@@ -42,12 +42,12 @@ test('Published userscript embeds the exact reviewed metrics core', () => {
     fs.readFileSync(path.join(__dirname, '..', 'docs/metrics-core.js'), 'utf8').trim() + '\n');
 });
 
-test('Helper metrics stay off without consent and never touch configuration or Drive storage', () => {
-  const { metrics, storage, writes } = harness();
+test('Helper metrics preserve a stored opt-out and never touch configuration or Drive storage', () => {
+  const { metrics, storage, writes } = harness({ storage: new Map([[consentKey, JSON.stringify({enabled:false,generation:'00000000-0000-4000-8000-000000000002'})]]) });
   metrics.observeHelperEvent('request.sent', 'sent:private-system-id');
   metrics.observeDriveStatus('connected');
   assert.deepEqual(counts(metrics), {});
-  assert.equal(storage.size, 0);
+  assert.equal(storage.size, 1);
   assert.equal(metrics.setEnabled(true), true);
   metrics.observeHelperEvent('request.sent', 'sent:private-system-id');
   metrics.observeHelperEvent('settings.minimum', 'some-private-draft');
@@ -143,8 +143,8 @@ function panelHarness(options = {}) {
   return { metrics, storage, setFailWrite, nodes, dataPage, shadow, window, action, field, urls };
 }
 
-test('Metrics controls need explicit trusted consent, support preview, and preserve game settings', () => {
-  const h = panelHarness();
+test('Metrics controls require trusted reactivation after opt-out, support preview, and preserve game settings', () => {
+  const h = panelHarness({ storage: new Map([[consentKey, JSON.stringify({enabled:false,generation:'00000000-0000-4000-8000-000000000002'})]]) });
   assert.equal(h.action('metrics-toggle').checked, false);
   assert.match(h.field('metrics-status').textContent, /Desactivadas/);
   h.storage.set('old-light-auto-upgrade:v1', '{"enabled":true,"token":"private"}');
@@ -255,7 +255,7 @@ test('Opt-out succeeds across tabs even when the revoking browser lacks secure r
 test('Imperial consent text describes fixed local startup categories and report export is exact', async () => {
   const h = panelHarness();
   const text = h.nodes.map(node => node.textContent).join(' ');
-  for (const expected of [/Opcional y desactivado inicialmente/, /apertura de Imperio/,
+  for (const expected of [/Activado por defecto si no hay una elección guardada/, /apertura de Imperio/,
     /cambios de estado de su lector/, /No envía datos a ningún servidor/,
     /no contiene tramas del juego ni textos de error/, /al activar no se recupera el historial anterior/,
     /No se incluye en las copias ni se sincroniza por Drive/]) assert.match(text, expected);
