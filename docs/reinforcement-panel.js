@@ -50,9 +50,10 @@
     const id = ++sequence, markerId = `oldlight-route-arrow-${id}`, miniMarkerId = markerId + '-mini';
     let root, style, details, list, status, error, availability, editor, mini, overlay, origin, destination, interval, saveButton, mapHint;
     let destroyed = false, scope = null, scopeEpoch = 0, editorScope = '', draftId = null, busy = false, operation = 0;
-    let pointerSample = null;
+    let pointerSample = null, intent = null, gestureNotice = null;
     let gesture = null, releaseTimer = null, ignoreClick = null, anchors = new Map(), hoverSample = null;
     let listSignature = '', selectSignature = '', overlaySignature = '', miniSignature = '', frame = null, lastFrame = 0, viewIdentity = '';
+    let explicitEndpoints = false;
     let sourceError = '', mapCache = null;
     const readError = () => { try { return clean(options.getError?.() || ''); } catch (_) { return 'No se puede leer el estado de las rutas.'; } };
     const fields = new Map(), listeners = [];
@@ -77,10 +78,14 @@
     const button = (text, action) => { const node = el('button', text); node.type = 'button'; node.addEventListener('click', action); return node; };
     const current = () => !destroyed && root && scope && scope === getScope();
     const report = (message, failed = false) => { write(error, failed ? message : ''); write(status, failed ? '' : message); };
+    function reportGesture(message, failed = false) {
+      report(message, failed);
+      if (gestureNotice) { write(gestureNotice, message); gestureNotice.hidden = !message; gestureNotice.setAttribute('role', failed ? 'alert' : 'status'); }
+    }
     function observeScope(next) {
       next = typeof next === 'string' ? next : '';
       if (next === scope) return false;
-      scope = next; scopeEpoch++; operation++; busy = false; editorScope = ''; draftId = null;
+      scope = next; scopeEpoch++; operation++; busy = false; editorScope = ''; draftId = null; explicitEndpoints = false;
       if (editor) editor.hidden = true;
       cancelGesture(); invalidateMap(); mapCache = null; listSignature = ''; selectSignature = ''; miniSignature = '';
       if (root) report('');
@@ -92,9 +97,11 @@
     }
     function cancelGesture() {
       const previous = gesture; gesture = null;
+      if (gestureNotice) gestureNotice.hidden = true;
       try { if (previous?.capture?.hasPointerCapture?.(previous.pointerId)) previous.capture.releasePointerCapture(previous.pointerId); } catch (_) {}
       if (releaseTimer !== null) clearTimer(releaseTimer);
       releaseTimer = null; overlaySignature = '';
+      if (overlay) { overlay.replaceChildren(); hideSVG(overlay, true); }
     }
     function makeMarker(container, name) {
       const defs = svg('defs'), marker = svg('marker'), path = svg('path');
@@ -181,7 +188,7 @@
       if (!overlay || destroyed) return;
       observeScope(getScope());
       const canvas = stage(), rect = canvas?.getBoundingClientRect?.();
-      if (!current() || blocked() || !rect || rect.width <= 0 || rect.height <= 0 || canvas.hidden) { hideSVG(overlay, true); return; }
+      if ((!current() && !gesture) || blocked() || !rect || rect.width <= 0 || rect.height <= 0 || canvas.hidden) { hideSVG(overlay, true); return; }
       const at = now();
       if (!mapCache || mapCache.scope !== scope || at < mapCache.at || at - mapCache.at >= 500) {
         const items = routes();
@@ -192,7 +199,9 @@
       sampleHover(rows);
       const byId = new Map(rows.map(s => [s.id, s]));
       const segments = items.map(route => ({ route, from: projected(byId.get(route.originId), rect), to: projected(byId.get(route.destinationId), rect) })).filter(s => pointValid(s.from) && pointValid(s.to));
-      if (gesture && gesture.scope === scope) segments.push({ route: { id: 'draft' }, from: projected(byId.get(gesture.originId), rect), to: { x: gesture.x - rect.left, y: gesture.y - rect.top }, preview: true });
+      // A screen-space gesture preview expresses intent, not a verified route.
+      // Persisted routes above continue to require a current camera projection.
+      if (gesture && gesture.scope === scope) segments.push({ route: { id: 'draft' }, from: { x: gesture.sourceX - rect.left, y: gesture.sourceY - rect.top }, to: { x: gesture.x - rect.left, y: gesture.y - rect.top }, preview: true });
       const signature = JSON.stringify([rect.left, rect.top, rect.width, rect.height, segments]);
       hideSVG(overlay, !segments.length);
       if (signature === overlaySignature) return;
@@ -201,12 +210,14 @@
       attr(overlay, 'viewBox', `0 0 ${rect.width} ${rect.height}`); makeMarker(overlay, markerId);
       for (const segment of segments) addLine(overlay, segment.from, segment.to, segment.route, markerId, segment.preview);
     }
-    function showEditor(originId, destinationId, route = null) {
+    function showEditor(originId, destinationId, route = null, unresolved = false) {
       observeScope(getScope()); if (!current() || busy) return;
       const rows = systems(); if (rows.length < 2) { report('Se necesitan dos sistemas propios verificados.', true); return; }
-      editorScope = scope; draftId = route?.id || null; editor.hidden = false; details.open = true;
+      editorScope = scope; draftId = route?.id || null; editor.hidden = false; details.open = true; explicitEndpoints = unresolved;
       populateSelects(rows);
-      origin.value = originId || rows[0].id; destination.value = destinationId || rows.find(s => s.id !== origin.value)?.id || '';
+      if (unresolved) {
+        for (const select of [origin, destination]) select.value = '';
+      } else { origin.value = originId || rows[0].id; destination.value = destinationId || rows.find(s => s.id !== origin.value)?.id || ''; }
       interval.value = String(route?.intervalMinutes || 5);
       for (const type of SHIPS) {
         const cfg = route?.ships?.[type], f = fields.get(type);
@@ -215,10 +226,10 @@
         updateShip(type);
       }
       saveButton.textContent = draftId ? 'Guardar cambios' : 'Crear ruta';
-      report('Revisa los extremos y la composición antes de guardar.');
+      reportGesture(unresolved ? 'No se identificó el origen del arrastre. Elige explícitamente ambos sistemas propios; no se ha creado ninguna ruta.' : 'Revisa los extremos y la composición antes de guardar.');
       const openingEpoch = scopeEpoch;
       try { options.onOpen?.({ originId: origin.value, destinationId: destination.value, routeId: draftId }); }
-      catch (_) { report('No se pudo mostrar la configuración de la ruta. Abre Flota y Misiones en el Helper.', true); return; }
+      catch (_) { reportGesture('No se pudo mostrar la configuración de la ruta. Abre Flota y Misiones en el Helper.', true); return; }
       observeScope(getScope());
       if (current() && openingEpoch === scopeEpoch && !editor.hidden && editorScope === scope) origin.focus?.();
     }
@@ -229,13 +240,15 @@
       f.amount.title = excess ? 'Dejar esta cantidad en el origen; enviar el excedente disponible.' : 'Cantidad por envío; cero desactiva este tipo.';
     }
     function populateSelects(rows) {
-      const signature = JSON.stringify(rows.map(s => [s.id, s.q, s.r, s.name]));
+      const signature = JSON.stringify([explicitEndpoints, rows.map(s => [s.id, s.q, s.r, s.name])]);
       if (signature === selectSignature) return;
       selectSignature = signature;
       for (const select of [origin, destination]) {
         const previous = select.value; select.replaceChildren();
+        if (explicitEndpoints) { const placeholder = el('option', 'Elige un sistema propio'); placeholder.value = ''; select.append(placeholder); }
         for (const system of rows) { const option = el('option', label(system)); option.value = system.id; select.append(option); }
         if (rows.some(s => s.id === previous)) select.value = previous;
+        else if (explicitEndpoints) select.value = '';
       }
     }
     function save() {
@@ -326,33 +339,45 @@
     function down(event) {
       if (destroyed) return;
       const canvas = stage();
-      // Synthetic native navigation can move the camera too; never interpret
-      // it as user intent, but revoke stale projected anchors immediately.
       if (!trusted(event)) { if (!root?.contains?.(event.target)) { cancelGesture(); invalidateMap(); } return; }
-      if (gesture && event.type === 'mousedown') { swallow(event); return; }
+      if (intent && event.type === 'mousedown') { swallow(event); return; }
       if (event.target !== canvas) { if (!root?.contains?.(event.target)) { cancelGesture(); invalidateMap(); } return; }
-      if (!event.ctrlKey || event.shiftKey || event.metaKey || event.altKey || event.button !== 0 || (event.pointerType && event.pointerType !== 'mouse')) { cancelGesture(); invalidateMap(); return; }
-      observeScope(getScope()); if (!current() || blocked() || busy) return;
-      const freshRows = systems();
-      let picked = pick(event, freshRows), nativeCard = false;
-      // A verified native tooltip is an independent identity source. Never use
-      // cached arrow anchors or approximate camera coordinates as a fallback.
-      const cameraUnavailable = options.getAvailability?.()?.cameraAvailable === false;
-      if (!picked && cameraUnavailable && pointerSample?.canvas === canvas
-          && now() - pointerSample.at >= 300 && now() - pointerSample.at <= 30000
-          && Math.hypot(event.clientX - pointerSample.x, event.clientY - pointerSample.y) <= 3) {
-        picked = pick(event, freshRows, true); nativeCard = !!picked;
-      }
-      if (!picked) { report(cameraUnavailable
-        ? 'Cámara no disponible. Mantén el puntero quieto sobre un sistema propio hasta ver su ficha y después arrastra con Ctrl, o usa Nueva ruta.'
-        : 'Señala un sistema propio hasta que aparezca su ficha; después arrastra con Ctrl.', true); return; }
-      try { options.onInteraction?.(event); } catch (_) { report('No se pudo preparar el gesto de refuerzo.', true); return; }
-      mapCache = { scope, at: now(), rows: freshRows, items: routes() };
-      gesture = { originId: picked.id, scope, nativeCard, capture: canvas, pointerId: event.pointerId, x: event.clientX, y: event.clientY, sourceX: event.clientX, sourceY: event.clientY, moved: false };
+      if (!event.ctrlKey || event.shiftKey || event.metaKey || event.altKey || event.button !== 0 || (event.pointerType && event.pointerType !== 'mouse')) { intent = null; cancelGesture(); invalidateMap(); return; }
+      // Reserve only this exact map gesture, independently of route authority.
+      // Missing census/camera must never turn a requested route into native pan.
+      const rect = canvas?.getBoundingClientRect?.();
+      if (!canvas || canvas.hidden || canvas.style?.display === 'none' || canvas.getClientRects?.().length === 0
+          || !rect || rect.width <= 0 || rect.height <= 0 || !inside(event) || blocked()) return;
       swallow(event);
-      if (event.pointerId !== undefined) { try { canvas.setPointerCapture?.(event.pointerId); } catch (_) { /* Window capture still owns the gesture. */ } }
-      if (nativeCard) report('Gesto por ficha nativa: suelta sobre otro sistema propio. Las flechas esperan una cámara verificada.');
+      intent = { pointerId: event.pointerId, canvas };
+      let interactionFailed = false;
+      try { options.onInteraction?.(event); } catch (_) { interactionFailed = true; }
+      try {
+      observeScope(getScope());
+      const freshRows = systems();
+      let picked = null, nativeCard = false, reason = '';
+      if (!current()) reason = 'No se pudo verificar la cuenta y galaxia actuales. Abre de nuevo el mapa y espera a que el Helper las reconozca.';
+      else if (busy) reason = 'Hay un cambio de ruta pendiente. Espera a que termine.';
+      else if (!freshRows.length) reason = 'No hay un censo propio completo y reciente. Espera a que se recuperen los datos antes de elegir los extremos.';
+      else {
+        picked = pick(event, freshRows);
+        const cameraUnavailable = options.getAvailability?.()?.cameraAvailable === false;
+        if (!picked && cameraUnavailable && pointerSample?.canvas === canvas
+            && now() - pointerSample.at >= 300 && now() - pointerSample.at <= 30000
+            && Math.hypot(event.clientX - pointerSample.x, event.clientY - pointerSample.y) <= 3) {
+          picked = pick(event, freshRows, true); nativeCard = !!picked;
+        }
+        if (!picked) reason = cameraUnavailable
+          ? 'Cámara no disponible: el origen no está verificado. Puedes arrastrar; al soltar elegirás ambos sistemas propios.'
+          : 'No se identificó un sistema propio en el inicio. Al soltar podrás elegir ambos sistemas propios.';
+      }
+      if (interactionFailed) { picked = null; reason = 'No se pudo preparar el gesto de refuerzo. Elige los extremos manualmente.'; }
+      mapCache = { scope, at: now(), rows: freshRows, items: routes() };
+      gesture = { originId: picked?.id || null, scope, nativeCard, capture: canvas, pointerId: event.pointerId, x: event.clientX, y: event.clientY, sourceX: event.clientX, sourceY: event.clientY, moved: false, manual: !picked };
+      if (event.pointerId !== undefined) { try { canvas.setPointerCapture?.(event.pointerId); } catch (_) {} }
+      reportGesture(reason || (nativeCard ? 'Origen verificado por ficha nativa. Suelta sobre otro sistema propio; las flechas guardadas esperan una cámara verificada.' : 'Arrastra hasta otro sistema propio y suelta para configurar la ruta.'), !!reason);
       drawOverlay();
+      } catch (_) { cancelGesture(); reportGesture('No se pudieron leer los datos del mapa. El gesto se ha detenido; vuelve a intentarlo cuando el Helper recupere sus datos.', true); }
     }
     function inside(event) {
       const rect = stage()?.getBoundingClientRect?.();
@@ -369,6 +394,7 @@
         return;
       }
       if (gesture.pointerId !== undefined && event.pointerId !== undefined && event.pointerId !== gesture.pointerId) return;
+      systems(); if (!gesture) { drawOverlay(); return; }
       if (!event.ctrlKey || !inside(event) || blocked() || scope !== getScope()) { cancelGesture(); drawOverlay(); return; }
       if (releaseTimer !== null) {
         if (Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 3) { cancelGesture(); drawOverlay(); }
@@ -381,7 +407,12 @@
       // updates hover. This gives a fresh destination card without selecting it.
     }
     function up(event) {
-      if (!gesture || !trusted(event) || event.button !== 0) return;
+      if (!trusted(event) || event.button !== 0) return;
+      if (intent && (intent.pointerId === undefined || event.pointerId === undefined || event.pointerId === intent.pointerId)) {
+        swallow(event); intent = null;
+        ignoreClick = { until: now() + 700, x: event.clientX, y: event.clientY };
+      }
+      if (!gesture) return;
       if (gesture.pointerId !== undefined && event.pointerId !== undefined && event.pointerId !== gesture.pointerId) return;
       swallow(event);
       if (releaseTimer !== null) return;
@@ -392,6 +423,14 @@
       try { if (active.capture?.hasPointerCapture?.(active.pointerId)) active.capture.releasePointerCapture(active.pointerId); } catch (_) {}
       ignoreClick = { until: now() + 700, x: event.clientX, y: event.clientY };
       if (!event.ctrlKey || event.target !== stage() || !inside(event) || !active.moved || blocked() || active.scope !== getScope()) { cancelGesture(); drawOverlay(); return; }
+      if (active.manual) {
+        const rows = systems();
+        if (gesture !== active) { drawOverlay(); return; }
+        cancelGesture();
+        if (rows.length >= 2 && current() && !busy) showEditor('', '', null, true);
+        else reportGesture('No hay dos sistemas propios verificados disponibles. Espera al censo propio y usa Nueva ruta.', true);
+        drawOverlay(); return;
+      }
       const endpoint = { clientX: event.clientX, clientY: event.clientY };
       const finish = () => {
         releaseTimer = null;
@@ -400,7 +439,7 @@
         if (gesture !== active || !rows.some(row => row.id === active.originId)) { cancelGesture(); drawOverlay(); return; }
         const picked = pick(endpoint, rows, active.nativeCard); cancelGesture();
         if (picked && picked.id !== active.originId) showEditor(active.originId, picked.id);
-        else report('No se pudo verificar el destino. Mantén el puntero sobre su ficha o elígelo en Nueva ruta.', true);
+        else reportGesture('No se pudo verificar el destino. Mantén el puntero sobre su ficha o elígelo en Nueva ruta.', true);
         drawOverlay();
       };
       const picked = pick(endpoint, systems(), active.nativeCard);
@@ -416,11 +455,11 @@
         if (!root.contains?.(event.target)) { cancelGesture(); invalidateMap(); }
       }, true);
       listen(window, 'keydown', event => {
-        if (event.key === 'Escape') { cancelGesture(); drawOverlay(); }
+        if (event.key === 'Escape') { cancelGesture(); if (gestureNotice) gestureNotice.hidden = true; drawOverlay(); }
         else if (!['Control', 'Shift', 'Alt', 'Meta'].includes(event.key) && !root.contains?.(event.target)) { cancelGesture(); invalidateMap(); }
       }, true);
       listen(window, 'keyup', event => { if (event.key === 'Control') { cancelGesture(); drawOverlay(); } }, true);
-      for (const name of ['wheel', 'resize', 'scroll', 'blur', 'pointercancel', 'pagehide', 'popstate', 'hashchange']) listen(window, name, () => { cancelGesture(); invalidateMap(); }, true);
+      for (const name of ['wheel', 'resize', 'scroll', 'blur', 'pointercancel', 'pagehide', 'popstate', 'hashchange']) listen(window, name, () => { cancelGesture(); invalidateMap(); if (gestureNotice) gestureNotice.hidden = true; if (['blur', 'pointercancel', 'pagehide'].includes(name)) intent = null; }, true);
       listen(window, 'lostpointercapture', event => { if (gesture && !gesture.released && (event.pointerId === undefined || gesture.pointerId === event.pointerId)) { cancelGesture(); invalidateMap(); } }, true);
       listen(window, 'pointerleave', event => { if (gesture && event.target === stage()) { cancelGesture(); invalidateMap(); } }, true);
       listen(window, 'pointerout', event => { if (gesture && (event.relatedTarget === null || !inside(event))) { cancelGesture(); invalidateMap(); } }, true);
@@ -464,6 +503,10 @@
       const controls = el('div', undefined, 'oldlight-route-tools'); saveButton = button('Crear ruta', save);
       controls.append(saveButton, button('Cancelar', () => { if (busy) return; editor.hidden = true; editorScope = ''; draftId = null; report(''); })); editor.append(controls); details.append(editor);
       root.append(style, details); container.append(root);
+      gestureNotice = el('div', '', 'oldlight-route-gesture-notice'); gestureNotice.hidden = true;
+      gestureNotice.setAttribute('aria-live', 'polite');
+      Object.assign(gestureNotice.style, { position: 'fixed', bottom: '18px', left: '50%', transform: 'translateX(-50%)', maxWidth: 'min(600px,90vw)', padding: '10px 14px', background: '#101d29', color: '#e5eef6', border: '1px solid #79d7dd', borderRadius: '8px', zIndex: '2147483646', pointerEvents: 'none', font: '13px/1.4 system-ui,sans-serif' });
+      (document.body || container).append(gestureNotice);
       overlay = svg('svg'); overlay.classList?.add('oldlight-route-overlay'); attr(overlay, 'aria-hidden', 'true');
       // The panel can live in the Helper's ShadowRoot while this overlay is in
       // document.body. Inline geometry/paint and pointer exclusion must therefore
@@ -477,7 +520,7 @@
       destroyed = true; operation++; cancelGesture();
       if (frame !== null) window.cancelAnimationFrame?.(frame);
       for (const remove of listeners.splice(0)) remove();
-      root?.remove(); overlay?.remove(); anchors.clear();
+      root?.remove(); overlay?.remove(); gestureNotice?.remove(); intent = null; anchors.clear();
     }
     return Object.freeze({ mount, render, observeScope, open: showEditor, cancelGesture, invalidateMap, destroy });
   }

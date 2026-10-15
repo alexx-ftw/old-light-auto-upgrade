@@ -2,7 +2,7 @@
 // Offline DOM/interaction tests only; no native game or network calls.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const panel = require('../docs/reinforcement-panel.js');
+const panel = require(process.env.QA_REINFORCEMENT_PANEL_SOURCE || '../docs/reinforcement-panel.js');
 const A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const C = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', SCOPE = 'alpha/self';
 class Element {
@@ -61,8 +61,8 @@ function harness(extra = {}) {
     get scope() { return scope; }, set scope(v) { scope = v; }, get world() { return world; }, set world(v) { world = v; },
     get routes() { return routes; }, set routes(v) { routes = v; }, get failure() { return failure; }, set failure(v) { failure = v; },
     field: name => byLabel(container, name), click: name => { const node = byButton(container, name); assert.ok(node, name); node.dispatch('click'); },
-    get error() { return all(container).find(n => n.getAttribute('role') === 'alert').textContent; },
-    get status() { return all(container).find(n => n.getAttribute('role') === 'status').textContent; },
+    get error() { return container.querySelector('.oldlight-route-error').textContent; },
+    get status() { return container.querySelector('.oldlight-route-status').textContent; },
     advance: ms => { clock += ms; },
     tick: () => { for (const [id, fn] of [...timers]) { timers.delete(id); fn(); } },
     gesture: (type, x, y, extra = {}) => window.dispatch(type, { target: canvas, clientX: x, clientY: y, ctrlKey: true, pointerType: 'mouse', pointerId: 1, ...extra }),
@@ -76,6 +76,41 @@ function harness(extra = {}) {
 }
 function fill(h, amount = '5') { h.click('Nueva ruta'); h.field('Cantidad de Marauder').value = amount; }
 function create(h) { fill(h); h.click('Crear ruta'); }
+function visibleGestureNotice(h) {
+  const notice = h.document.querySelector('.oldlight-route-gesture-notice');
+  assert.ok(notice, 'Ctrl outcome has its own visible notice');
+  assert.ok(['status', 'alert'].includes(notice.getAttribute('role')), 'gesture notice is announced accessibly');
+  assert.ok(notice.textContent.trim(), 'gesture notice explains the outcome');
+  for (let node = notice; node; node = node.parentNode) {
+    assert.notEqual(node.tagName, 'DETAILS', 'gesture notice stays outside collapsible details');
+    assert.notEqual(node.hidden, true, 'notice ancestors remain visible');
+    assert.notEqual(node.style?.display, 'none', 'notice ancestors are not display:none');
+    assert.notEqual(node.style?.visibility, 'hidden', 'notice ancestors are not visibility:hidden');
+  }
+  return notice;
+}
+function assertManualDraft(h) {
+  assert.equal(h.container.querySelector('.oldlight-route-editor').hidden, false, 'manual editor is reachable');
+  for (const label of ['Sistema de origen', 'Sistema de destino']) {
+    const select = h.field(label);
+    assert.equal(select.value, '', label + ' requires an explicit choice');
+    assert.ok(select.children.some(option => option.value === ''), label + ' has a real blank option');
+  }
+  assert.equal(h.calls.length, 0, 'opening a manual draft never sends or saves');
+}
+function assertPreview(h, from, to) {
+  const overlay = h.document.querySelector('.oldlight-route-overlay');
+  assert.notEqual(overlay.style.display, 'none', 'screen-space preview is visible during Ctrl drag');
+  assert.notEqual(overlay.hidden, true);
+  const lines = overlay.querySelectorAll('line').filter(line => line.getAttribute('data-preview') === 'true');
+  assert.equal(lines.length, 1, 'one live preview, regardless of camera availability');
+  const rect = h.canvas.getBoundingClientRect(), distance = Math.hypot(to.x - from.x, to.y - from.y);
+  const padding = Math.min(9, distance / 4), dx = (to.x - from.x) / distance, dy = (to.y - from.y) / distance;
+  for (const [attr, expected] of Object.entries({ x1: from.x - rect.left + dx * padding, y1: from.y - rect.top + dy * padding,
+    x2: to.x - rect.left - dx * padding, y2: to.y - rect.top - dy * padding }))
+    assert.ok(Math.abs(Number(lines[0].getAttribute(attr)) - expected) < .001, attr + ' follows pointer-down screen coordinates');
+  return overlay;
+}
 
 test('exports factory in a browser global and CommonJS without game execution', () => {
   const vm = require('node:vm'), fs = require('node:fs'), context = {};
@@ -153,10 +188,10 @@ test('Ctrl drag uses fresh unique own hover names and opens an editable draft, n
   const click = h.gesture('click', 300, 200); assert.equal(click.prevented, true);
 });
 test('duplicate native hover names are not identities', () => {
-  const h = harness(); h.world.systems[1].name = 'Origen'; h.hover('Origen', 100, 100); const down = h.gesture('pointerdown', 100, 100); assert.notEqual(down.prevented, true); assert.match(h.error, /Señala/);
+  const h = harness(); h.world.systems[1].name = 'Origen'; h.hover('Origen', 100, 100); const down = h.gesture('pointerdown', 100, 100); assert.equal(down.prevented, true); visibleGestureNotice(h);
 });
 test('hover must be near actual mouse position; stale cards are rejected', () => {
-  const h = harness(); h.hover('Origen', 100, 100); const down = h.gesture('pointerdown', 500, 500); assert.notEqual(down.prevented, true);
+  const h = harness(); h.hover('Origen', 100, 100); const down = h.gesture('pointerdown', 500, 500); assert.equal(down.prevented, true); visibleGestureNotice(h);
 });
 test('late native hover may resolve release, while movement cancels delayed resolution', () => {
   const h = harness(); h.hover('Origen', 100, 100); h.gesture('pointerdown', 100, 100); h.gesture('pointermove', 300, 200); h.gesture('pointerup', 300, 200); h.hover('Destino', 300, 200); h.tick(); assert.match(h.status, /Revisa/);
@@ -285,7 +320,7 @@ test('unavailable external camera never falls back to old hover anchors for arro
 test('unavailable external camera never accepts a stale hover hit instead', () => {
   const h = harness({ hitTestSystem: () => null }); h.hover('Origen', 100, 100);
   const event = h.gesture('pointerdown', 100, 100); h.gesture('pointermove', 300, 200); h.hover('Destino', 300, 200); h.gesture('pointerup', 300, 200); h.tick();
-  assert.doesNotMatch(h.status, /Revisa/); assert.equal(h.calls.length, 0);
+  assert.equal(event.prevented, true); assertManualDraft(h); assert.equal(h.calls.length, 0);
 });
 
 test('a rejected in-flight deletion keeps the route visible and explains the blocker', () => {
@@ -345,6 +380,7 @@ test('unavailable camera: fresh own native card recovers Ctrl drag before Pixi p
   native.emit('pointermove', 100, 100, { buttons: 0 }); h.advance(301); h.hover('Origen', 100, 100);
   const down = native.emit('pointerdown', 100, 100); assert.equal(down.stopped, true);
   native.emit('mousedown', 100, 100); native.emit('pointermove', 300, 200); native.emit('mousemove', 300, 200);
+  assertPreview(h, { x: 100, y: 100 }, { x: 300, y: 200 });
   h.hover('Destino', 300, 200); native.emit('pointerup', 300, 200); native.emit('mouseup', 300, 200);
   assert.equal(native.pan, 0); assert.equal(native.downs, 0); assert.equal(native.clicks, 0); assert.equal(native.captures.size, 0);
   assert.match(h.status, /Revisa/); assert.equal(h.field('Sistema de origen').value, A); assert.equal(h.field('Sistema de destino').value, B);
@@ -359,13 +395,16 @@ test('verified camera captures a route and leaves ordinary pan and Shift untouch
   }
   assert.equal(n.downs, 2); assert.equal(n.pan, 2);
 });
-for (const kind of ['no-card', 'ambiguous', 'foreign', 'stale-position', 'no-dwell']) test('camera fallback rejects ' + kind + ' without claiming native input', () => {
+for (const kind of ['no-card', 'ambiguous', 'foreign', 'stale-position', 'no-dwell']) test('camera fallback rejects ' + kind + ' identity while reserving Ctrl intent before native input', () => {
   const h = harness({ hitTestSystem: () => null, getAvailability: () => ({ cameraAvailable: false }) }); const n = nativeEvents(h);
   n.emit('pointermove', 100, 100, { buttons: 0 }); if (kind !== 'no-dwell') h.advance(301);
   if (kind !== 'no-card') h.hover(kind === 'foreign' ? 'Enemigo' : 'Origen', kind === 'stale-position' ? 500 : 100, 100);
   if (kind === 'ambiguous') h.world.systems[1].name = 'Origen';
-  const e = n.emit('pointerdown', 100, 100); assert.notEqual(e.stopped, true); assert.equal(n.downs, 1);
-  assert.match(h.error, /Cámara no disponible/); assert.equal(h.calls.length, 0);
+  const e = n.emit('pointerdown', 100, 100); assert.equal(e.stopped, true); assert.equal(e.prevented, true); assert.equal(n.downs, 0);
+  visibleGestureNotice(h); n.emit('mousedown', 100, 100); n.emit('pointermove', 300, 200);
+  assertPreview(h, { x: 100, y: 100 }, { x: 300, y: 200 });
+  h.hover('Destino', 300, 200); n.emit('pointerup', 300, 200); h.tick();
+  assert.equal(n.pan, 0); assert.equal(n.clicks, 0); assertManualDraft(h); assert.equal(h.calls.length, 0);
 });
 for (const kind of ['Escape', 'blur', 'Control', 'pointercancel', 'lostpointercapture', 'outside-move', 'pointerout']) test('captured route cancels and releases capture on ' + kind, () => {
   const h = harness({ hitTestSystem: p => p.x === 100 ? A : B }); const n = nativeEvents(h);
@@ -391,7 +430,9 @@ test('implicit lostpointercapture after pointerup preserves pending fresh toolti
 test('available camera rejection never falls back to a native tooltip', () => {
   const h = harness({ hitTestSystem: () => null, getAvailability: () => ({ cameraAvailable: true }) }); const n = nativeEvents(h);
   n.emit('pointermove', 100, 100, { buttons: 0 }); h.advance(301); h.hover('Origen', 100, 100);
-  assert.notEqual(n.emit('pointerdown', 100, 100).stopped, true); assert.equal(n.downs, 1);
+  assert.equal(n.emit('pointerdown', 100, 100).stopped, true); assert.equal(n.downs, 0); visibleGestureNotice(h);
+  n.emit('pointermove', 300, 200); h.hover('Destino', 300, 200); n.emit('pointerup', 300, 200); h.tick();
+  assertManualDraft(h); assert.equal(n.pan, 0); assert.equal(h.calls.length, 0);
 });
 
 for (const change of ['epoch', 'path', 'origin']) test('pending native-card gesture rejects changed ' + change, () => {
@@ -402,4 +443,185 @@ for (const change of ['epoch', 'path', 'origin']) test('pending native-card gest
   if (change === 'path') h.window.location = { pathname: '/game/galaxy/other' };
   if (change === 'origin') h.world.systems.shift();
   h.hover('Destino', 300, 200); h.tick(); assert.doesNotMatch(h.status, /Revisa/); assert.equal(h.calls.length, 0);
+});
+
+// Intent is reserved before identity/readiness checks. These rows independently
+// vary the dependency, rather than requiring a fresh tooltip in every fixture.
+for (const [reason, setup, expected] of [
+  ['missing scope', h => { h.scope = ''; }, /cuenta|galaxia/i],
+  ['disconnected census', h => { h.world.connected = false; }, /censo/i],
+  ['incomplete census', h => { h.world.complete = false; }, /censo/i],
+  ['stale census', h => { h.advance(120001); }, /censo/i],
+  ['future census', h => { h.world.observedAt = 1001; }, /censo/i],
+  ['wrong self identity', h => { h.world.selfId = 'other'; }, /censo/i],
+  ['empty census', h => { h.world.systems = []; }, /censo/i],
+  ['one own system', h => { h.world.systems.splice(1); }, /origen|sistema/i],
+]) test('Ctrl intent reserves before ' + reason + ' and exposes the blocker outside closed details', () => {
+  let interactions = 0;
+  const h = harness({ hitTestSystem: () => null, projectSystem: () => null, getAvailability: () => ({ cameraAvailable: false }),
+    onInteraction: event => { interactions++; assert.equal(event.prevented, true); assert.equal(event.stopped, true); } });
+  setup(h); const n = nativeEvents(h), details = h.container.querySelector('details'); details.open = false;
+  const down = n.emit('pointerdown', 100, 100);
+  assert.equal(down.prevented, true); assert.equal(down.stopped, true); assert.equal(interactions, 1);
+  assert.match(visibleGestureNotice(h).textContent, expected); assert.equal(details.open, false);
+  assert.equal(n.emit('mousedown', 100, 100).prevented, true);
+  n.emit('pointermove', 300, 200); assertPreview(h, { x: 100, y: 100 }, { x: 300, y: 200 });
+  n.emit('pointerup', 300, 200); n.emit('mouseup', 300, 200); h.tick();
+  assert.equal(n.pan, 0); assert.equal(n.downs, 0); assert.equal(n.clicks, 0); assert.equal(n.captures.size, 0);
+  assert.equal(h.container.querySelector('.oldlight-route-editor').hidden, true); assert.equal(h.calls.length, 0);
+  assert.match(visibleGestureNotice(h).textContent, /sistemas|censo|cuenta/i);
+});
+
+test('failed interaction preparation reserves Ctrl and offers only an explicit blank manual draft', () => {
+  let attempted = 0;
+  const h = harness({ hitTestSystem: p => p.x === 100 ? A : B, projectSystem: () => null,
+    onInteraction: event => { attempted++; assert.equal(event.prevented, true); throw new Error('interruption failed'); } });
+  const n = nativeEvents(h); n.emit('pointerdown', 100, 100);
+  assert.equal(attempted, 1); assert.match(visibleGestureNotice(h).textContent, /preparar|manual/i);
+  n.emit('pointermove', 300, 200); assertPreview(h, { x: 100, y: 100 }, { x: 300, y: 200 });
+  n.emit('pointerup', 300, 200); assertManualDraft(h); assert.equal(n.pan, 0);
+});
+
+test('camera rejection still interrupts automatic navigation after reserving native down', () => {
+  let interactions = 0;
+  const h = harness({ hitTestSystem: () => null, getAvailability: () => ({ cameraAvailable: true }),
+    onInteraction: event => { interactions++; assert.equal(event.prevented, true); assert.equal(event.stopped, true); } });
+  const n = nativeEvents(h); n.emit('pointerdown', 100, 100); n.emit('mousedown', 100, 100);
+  assert.equal(interactions, 1); n.emit('pointermove', 300, 200); n.emit('pointerup', 300, 200);
+  assertManualDraft(h); assert.equal(n.pan, 0);
+});
+
+test('verified camera hit acquires immediately without native hover or dwell', () => {
+  const h = harness({ hitTestSystem: p => p.x === 100 ? A : B, projectSystem: () => null,
+    getAvailability: () => ({ cameraAvailable: true }) });
+  const n = nativeEvents(h); assert.equal(h.document.querySelector('.star-hover'), null);
+  const down = n.emit('pointerdown', 100, 100); assert.equal(down.stopped, true);
+  n.emit('pointermove', 300, 200); assertPreview(h, { x: 100, y: 100 }, { x: 300, y: 200 });
+  n.emit('pointerup', 300, 200);
+  assert.equal(h.field('Sistema de origen').value, A); assert.equal(h.field('Sistema de destino').value, B);
+  assert.equal(h.container.querySelector('.oldlight-route-editor').hidden, false); assert.equal(h.calls.length, 0); assert.equal(n.pan, 0);
+});
+
+test('camera-free live preview is screen-space while saved route arrows stay hidden', () => {
+  const h = harness({ hitTestSystem: () => null, projectSystem: () => null, getAvailability: () => ({ cameraAvailable: false }) });
+  h.canvas.rect = { left: 20, top: 30, width: 800, height: 600, right: 820, bottom: 630 };
+  h.routes = [{ id: 'saved-route', originId: A, destinationId: B, intervalMinutes: 5, ships: {}, paused: false }];
+  h.hover('Origen', 110, 100); h.app.render(); h.hover('Destino', 300, 200); h.app.render();
+  const overlay = h.document.querySelector('.oldlight-route-overlay'); assert.equal(overlay.style.display, 'none');
+  const n = nativeEvents(h); n.emit('pointerdown', 100, 100); n.emit('pointermove', 350, 210);
+  assertPreview(h, { x: 100, y: 100 }, { x: 350, y: 210 });
+  assert.equal(overlay.querySelectorAll('line').filter(line => line.getAttribute('data-preview') !== 'true').length, 0);
+  n.emit('pointerup', 350, 210); assert.equal(overlay.style.display, 'none'); assert.equal(overlay.querySelectorAll('line').length, 0);
+  assertManualDraft(h); assert.equal(h.routes.length, 1);
+});
+
+test('live preview starts at actual pointer down rather than a projected system anchor', () => {
+  const h = harness({ hitTestSystem: p => p.x === 100 ? A : B,
+    projectSystem: system => ({ x: system.id === A ? 600 : 700, y: 500 }) });
+  const n = nativeEvents(h); n.emit('pointerdown', 100, 100); n.emit('pointermove', 300, 200);
+  assertPreview(h, { x: 100, y: 100 }, { x: 300, y: 200 });
+});
+
+test('unresolved origin draft requires both explicit choices and stays blank after a fresh census render', () => {
+  const opened = [];
+  const h = harness({ hitTestSystem: () => null, projectSystem: () => null, getAvailability: () => ({ cameraAvailable: false }), onOpen: data => opened.push(data) });
+  const n = nativeEvents(h); n.emit('pointerdown', 100, 100); n.emit('pointermove', 300, 200); n.emit('pointerup', 300, 200);
+  assertManualDraft(h); assert.deepEqual(opened, [{ originId: '', destinationId: '', routeId: null }]);
+  h.field('Cantidad de Marauder').value = '5'; h.click('Crear ruta'); assert.equal(h.calls.length, 0);
+  h.world.systems.push({ id: C, q: 15, r: 6, name: 'Tercero' }); h.app.render(); assertManualDraft(h);
+  h.field('Sistema de origen').value = A; h.click('Crear ruta'); assert.equal(h.calls.length, 0);
+  h.field('Sistema de destino').value = B; assert.equal(h.calls.length, 0); h.click('Crear ruta');
+  assert.equal(h.calls.length, 1); assert.equal(h.calls[0][1].originId, A); assert.equal(h.calls[0][1].destinationId, B);
+});
+
+for (const kind of ['ordinary', 'Shift', 'Alt', 'Meta', 'touch', 'pen', 'untrusted', 'right-button', 'outside-target', 'outside-geometry', 'modal', 'ui-hidden', 'document-hidden', 'canvas-hidden', 'canvas-display-none', 'canvas-no-client-rects', 'zero-width', 'interaction-disabled']) test('Ctrl reservation leaves ' + kind + ' native input untouched', () => {
+  const h = harness({ hitTestSystem: p => p.x === 100 ? A : B, ...(kind === 'interaction-disabled' ? { canInteract: () => false } : {}) });
+  const n = nativeEvents(h), extra = {};
+  if (kind === 'ordinary') extra.ctrlKey = false;
+  if (kind === 'Shift') extra.shiftKey = true;
+  if (kind === 'Alt') extra.altKey = true;
+  if (kind === 'Meta') extra.metaKey = true;
+  if (kind === 'touch' || kind === 'pen') extra.pointerType = kind;
+  if (kind === 'untrusted') extra.isTrusted = false;
+  if (kind === 'right-button') extra.button = 2;
+  if (kind === 'outside-target') extra.target = h.container;
+  if (kind === 'modal') { const dialog = h.document.createElement('dialog'); dialog.open = true; h.document.body.append(dialog); }
+  if (kind === 'ui-hidden') h.document.body.classList.add('ui-hidden');
+  if (kind === 'document-hidden') h.document.hidden = true;
+  if (kind === 'canvas-hidden') h.canvas.hidden = true;
+  if (kind === 'canvas-display-none') h.canvas.style.display = 'none';
+  if (kind === 'canvas-no-client-rects') h.canvas.getClientRects = () => [];
+  if (kind === 'zero-width') h.canvas.rect = { left: 100, top: 0, width: 0, height: 600, right: 100, bottom: 600 };
+  const down = n.emit('pointerdown', kind === 'outside-geometry' ? 900 : 100, 100, extra);
+  assert.notEqual(down.prevented, true); assert.notEqual(down.stopped, true);
+  n.emit('pointermove', 300, 200, extra); n.emit('pointerup', 300, 200, extra);
+  assert.equal(n.downs, kind === 'outside-target' ? 0 : 1); assert.equal(n.pan, kind === 'outside-target' ? 0 : 1);
+  assert.equal(h.container.querySelector('.oldlight-route-editor').hidden, true); assert.equal(h.calls.length, 0);
+});
+
+for (const getter of ['getScope', 'getWorld', 'getRoutes', 'hitTestSystem', 'getAvailability']) test('Ctrl reservation reports a throwing ' + getter + ' without leaking native pan', () => {
+  let armed = false;
+  const values = { getScope: () => SCOPE, getWorld: () => null, getRoutes: () => [], hitTestSystem: () => null, getAvailability: () => ({ cameraAvailable: false }) };
+  const h = harness({ hitTestSystem: () => null, [getter]: (...args) => { if (armed) throw new Error('unavailable dependency'); return values[getter](...args); } });
+  const n = nativeEvents(h); armed = true;
+  let down; assert.doesNotThrow(() => { down = n.emit('pointerdown', 100, 100); });
+  assert.equal(down.prevented, true); assert.equal(down.stopped, true); assert.match(visibleGestureNotice(h).textContent, /datos|detenido|recuper/i);
+  assert.equal(n.emit('mousedown', 100, 100).prevented, true);
+  n.emit('pointermove', 300, 200); n.emit('pointerup', 300, 200);
+  assert.equal(n.downs, 0); assert.equal(n.pan, 0); assert.equal(n.clicks, 0); assert.equal(h.calls.length, 0);
+  assert.equal(h.container.querySelector('.oldlight-route-editor').hidden, true);
+});
+
+for (const kind of ['Escape', 'Control', 'blur', 'pointercancel', 'outside', 'epoch', 'scope', 'path']) test('unresolved Ctrl intent cancels safely on ' + kind, () => {
+  const h = harness({ hitTestSystem: () => null, projectSystem: () => null, getAvailability: () => ({ cameraAvailable: false }) });
+  const n = nativeEvents(h); n.emit('pointerdown', 100, 100); n.emit('pointermove', 300, 200);
+  if (kind === 'Escape') h.window.dispatch('keydown', { key: 'Escape' });
+  if (kind === 'Control') h.window.dispatch('keyup', { key: 'Control' });
+  if (kind === 'blur' || kind === 'pointercancel') h.window.dispatch(kind);
+  if (kind === 'outside') n.emit('pointermove', 900, 200);
+  if (kind === 'epoch') h.world.epoch = 2;
+  if (kind === 'scope') h.scope = 'beta/self';
+  if (kind === 'path') h.window.location = { pathname: '/game/galaxy/other' };
+  n.emit('pointerup', 300, 200); h.tick();
+  assert.equal(h.container.querySelector('.oldlight-route-editor').hidden, true); assert.equal(h.calls.length, 0);
+  assert.equal(h.document.querySelector('.oldlight-route-overlay').style.display, 'none');
+  assert.equal(n.pan, 0); assert.equal(n.captures.size, 0);
+});
+
+test('unresolved Ctrl intent can use a newly fresh census only for a blank manual draft', () => {
+  const h = harness({ hitTestSystem: () => null, projectSystem: () => null, getAvailability: () => ({ cameraAvailable: false }) });
+  h.world.complete = false; const n = nativeEvents(h);
+  n.emit('pointerdown', 100, 100); n.emit('pointermove', 300, 200); h.world.complete = true;
+  n.emit('pointerup', 300, 200); assertManualDraft(h); assert.equal(n.pan, 0);
+});
+
+test('new gesture notice is noninteractive outside a hidden Helper container and removed on destroy', () => {
+  const h = harness({ hitTestSystem: () => null, getAvailability: () => ({ cameraAvailable: false }) });
+  h.container.hidden = true; const n = nativeEvents(h); n.emit('pointerdown', 100, 100);
+  const notice = visibleGestureNotice(h); assert.equal(notice.style.pointerEvents, 'none'); assert.equal(h.container.contains(notice), false);
+  h.app.destroy(); assert.equal(h.document.querySelector('.oldlight-route-gesture-notice'), null); assert.equal(n.captures.size, 0);
+});
+
+test('Ctrl intent without camera or tooltip never pans and opens an explicit manual draft', () => {
+  const h = harness({ hitTestSystem: () => null, projectSystem: () => null, getAvailability: () => ({ cameraAvailable: false }) });
+  const n = nativeEvents(h);
+  n.emit('pointerdown', 100, 100); n.emit('mousedown', 100, 100);
+  n.emit('pointermove', 300, 200); n.emit('mousemove', 300, 200);
+  n.emit('pointerup', 300, 200); n.emit('mouseup', 300, 200); h.tick();
+  // Run the whole sequence before asserting: the same baseline probe records
+  // actual simulated Pixi pan, rather than stopping at a missing interception.
+  assert.equal(n.pan, 0, 'Ctrl route intent must never reach native pan');
+  assert.equal(n.downs, 0); assert.equal(n.clicks, 0); assertManualDraft(h);
+});
+test('cancelling Ctrl removes the visible active-gesture instruction', () => {
+  const h = harness({ hitTestSystem: () => null, getAvailability: () => ({ cameraAvailable: false }) }), n = nativeEvents(h);
+  n.emit('pointerdown', 100, 100); n.emit('pointermove', 200, 100);
+  const notice = h.document.querySelector('.oldlight-route-gesture-notice'); assert.equal(notice.hidden, false);
+  h.window.dispatch('keyup', { key: 'Control' }); assert.equal(notice.hidden, true);
+});
+test('opening failure replaces the map notice with an actionable error', () => {
+  const h = harness({ hitTestSystem: p => p.x === 100 ? A : B, onOpen() { throw new Error('probe'); } }), n = nativeEvents(h);
+  n.emit('pointerdown', 100, 100); n.emit('pointermove', 300, 200); n.emit('pointerup', 300, 200);
+  const notice = h.document.querySelector('.oldlight-route-gesture-notice'); assert.equal(notice.hidden, false);
+  assert.match(notice.textContent, /No se pudo mostrar/); assert.equal(h.calls.length, 0);
 });

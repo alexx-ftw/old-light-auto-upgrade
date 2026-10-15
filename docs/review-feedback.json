@@ -2395,6 +2395,92 @@
         "Revisar ficha fresca, cambio scope/epoch/path y pérdida del origen.",
         "Comprobar liberación implícita de captura y cancelación de espera al soltar Ctrl."
       ]
+    },
+    {
+      "id": "reinforcement-ctrl-intent-before-authority",
+      "feedback": "El usuario confirmó que 1.17.1 seguía desplazando el fondo. Los rechazos de origen aún dejaban pasar down a Pixi y el mensaje estaba en un details cerrado. La reserva de intención no debe depender de autorizar un origen.",
+      "beforeFail": {
+        "revision": "68984f30b5ae166ef5ee684e7d29cebda8d4caf4",
+        "command": "QA_REINFORCEMENT_PANEL_SOURCE=/tmp/oldlight-ctrl-intent-1.17.2-evidence/reinforcement-panel.baseline.js node --test tests/reinforcement-panel.test.cjs",
+        "observedFailure": "Mismo harness ampliado: panel base SHA256 393acec48d74d4b1269250592750c2bfeb5d334abbee5aeb1092c121301dd8a2 produce 83 aprobadas y 47 fallidas de 130, sin skips. Panel corregido 130 aprobadas. Fallos causales incluyen down nativo observado ante censo/scope/cámara ausentes, aviso oculto y origen manual preseleccionado. No acredita sesión real.",
+        "evidence": "docs/1.17.2-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "Ctrl intent without camera or tooltip never pans and opens an explicit manual draft"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "Ctrl intent reserves before missing scope and exposes the blocker outside closed details"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "camera fallback rejects no-card identity while reserving Ctrl intent before native input"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "unresolved origin draft requires both explicit choices and stays blank after a fresh census render"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "camera-free live preview is screen-space while saved route arrows stay hidden"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "camera rejection still interrupts automatic navigation after reserving native down"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "verified camera hit acquires immediately without native hover or dwell"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Ctrl izquierdo sobre canvas visible con datos no disponibles o cámara que rechaza.",
+          "expected": "Reservar antes de Pixi, informar visible y no autorizar origen ni órdenes.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "Ctrl intent reserves before missing scope and exposes the blocker outside closed details"
+          }
+        },
+        {
+          "scenario": "No se puede identificar el origen, pero hay dos sistemas propios actuales.",
+          "expected": "Vista previa del gesto y elección explícita de ambos extremos; opciones vacías persisten tras refrescar censo.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "unresolved origin draft requires both explicit choices and stays blank after a fresh census render"
+          }
+        },
+        {
+          "scenario": "Cámara ausente durante gesto y rutas guardadas existentes.",
+          "expected": "Solo preview pantalla; rutas guardadas siguen sin proyectarse.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "camera-free live preview is screen-space while saved route arrows stay hidden"
+          }
+        },
+        {
+          "scenario": "Cámara verificada, sin hover previo.",
+          "expected": "Arrastre directo sin espera y sin acción hasta guardar explícitamente.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "verified camera hit acquires immediately without native hover or dwell"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Sesión afectada Brave/Violentmonkey/Drive y flechas persistentes",
+          "reason": "Sin acceso a sesión real. No se conoce el motivo de cámara ausente/rechazo de aquella sesión. La degradación manual no acredita arrastre directo sin cámara."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Separar intención reservada de identidad autorizada; revisar todos los retornos y excepciones después de Ctrl válido, con secuencia mouse compatible y cancelaciones.",
+        "Verificar aviso fuera de details, preview pantalla no presentado como proyección de ruta y campos manuales vacíos tras refresco realista del DOM.",
+        "No atribuir al usuario una causa concreta no observada; comprobar flujo directo sin hover con cámara y límite manual sin cámara.",
+        "Confirmar interrupción de navegación automática aun si el origen no se identifica; conservar eventos fuera del mapa, modificadores, modal, touch, cancelación, snapshot/epoch y ausencia de órdenes."
+      ]
     }
   ]
 }
