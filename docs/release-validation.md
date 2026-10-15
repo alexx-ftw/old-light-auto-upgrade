@@ -48,7 +48,8 @@ Con cada fallo reproducible o hueco de revisión detectado:
 2. Corrige y ejecuta ese mismo caso. Añade límites realistas a ambos lados de la guarda: el flujo que debe bloquearse y el flujo legítimo que debe seguir funcionando. Incluye el orden de eventos y otras superficies afectadas cuando importen.
 3. Añade una entrada a `docs/review-feedback.json` y conserva las anteriores. Los nombres enlazados son exactos y deben ser únicos dentro de su archivo; al renombrar un test, actualiza también sus referencias. Una eliminación de cobertura exige revisar y justificar la sustitución, no borrar el registro para poner el gate en verde.
 4. Especifica los gaps pendientes y criterios concretos que otro revisor pueda contrastar contra el diff, los escenarios y la evidencia. Si un informe no se reproduce, anótalo como límite en la matriz; no inventes un fallo previo ni cierres su incertidumbre por tener una suite verde.
-5. Revisa de forma independiente el árbol final y ejecuta el gate completo sobre su commit limpio. Las correcciones posteriores invalidan el resultado anterior y requieren volver a validar.
+5. Actualiza el [registro de lecciones del revisor](independent-code-review.md): qué hipótesis falló o falta contrastar, qué pregunta cambia y qué evidencia se exigirá. Los fallos aún no reproducidos se conservan como incertidumbre, sin inventar un `beforeFail`.
+6. Revisa de forma independiente el árbol final y ejecuta el gate completo sobre su commit limpio. Las correcciones posteriores invalidan el resultado anterior y requieren volver a validar.
 
 El esquema versión 1 exige un objeto con `schemaVersion: 1` y un array `entries` no vacío. Cada entrada contiene exactamente:
 
@@ -75,7 +76,7 @@ El caso esperaba que el CLI rechazara un manifiesto ausente. El validador anteri
 
 Un resultado offline satisfactorio no significa «listo para publicar» por sí solo:
 
-- Un revisor independiente debe estudiar el árbol final y las regresiones fuera de la función modificada. No basta con repetir el mismo test o sumar sus ejecuciones como casos distintos.
+- Un revisor independiente debe recibir el [encargo reutilizable y protocolo de revisión](independent-code-review.md), estudiar el árbol final y las regresiones fuera de la función modificada. No basta con repetir el mismo test o sumar sus ejecuciones como casos distintos.
 - La matriz debe cubrir los flujos afectados y su orden temporal: entrada de datos, validación, coordinación, interfaz y efectos. Cuando corresponda, incluir confirmación temprana/tardía/duplicada, timeout, rechazo, cero efectos demostrable, cambios de identidad, pausa/reanudación, reconexión, conflictos y clientes antiguos.
 - Deben quedar explícitas las invariantes de identidad y frescura, la exclusión mientras hay una operación pendiente, la posibilidad de reintentar cuando procede y los mensajes que verá el usuario.
 - Hay que distinguir pruebas sintéticas, visuales y de integración real. Un gap de navegador o servicio real no se convierte en una prueba aprobada. No se envían órdenes a una partida real para completar este gate.

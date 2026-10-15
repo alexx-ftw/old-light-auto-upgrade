@@ -253,6 +253,8 @@ Pruebas: `node --test tests/*.test.cjs`. El núcleo compartido se incluye dentro
 
 ## Validación para mantenedores
 
+Cada revisión independiente debe usar el [protocolo y encargo reutilizable del revisor](docs/independent-code-review.md): reconstruir el recorrido del usuario, cuestionar los supuestos de integración y separar evidencia offline de usabilidad real.
+
 Antes de publicar una candidata, guarda el árbol final en un commit limpio y ejecuta `node validate-release.cjs`. El gate agrupa la suite offline completa, la sintaxis, la coherencia de versiones y dos pasadas reproducibles de los cuatro builders en una copia temporal. Rechaza pruebas omitidas y sustituciones de fuente; no repara silenciosamente el userscript ni publica nada.
 
 El informe queda ligado a los hashes probados. La revisión independiente, la matriz de flujos afectados y las comprobaciones de concurrencia/autoupdate/Pages siguen siendo obligatorias. Las pruebas de navegador no ejecutadas se declaran como límite. Consulta el [procedimiento de validación y publicación](docs/release-validation.md).
