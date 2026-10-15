@@ -280,6 +280,16 @@
     function fail(why) { failed = true; installed = false; cleanupBootstrap(); try { port?.postMessage('stop'); } catch (_) {} port?.close(); port = null; clear(why); }
     function receive(event) {
       if (stopped || failed) return;
+      if (typeof event.data === 'string' && event.data.length <= 256) {
+        try {
+          const diagnostic = JSON.parse(event.data);
+          if (diagnostic.version === 1 && diagnostic.type === 'status' && [
+            'native-camera-import-failed', 'native-camera-shape-changed', 'native-camera-unavailable',
+            'camera-hook-replaced', 'camera-timing-unavailable', 'awaiting-native-projection',
+            'viewport-unavailable', 'game-navigation', 'camera-observation-failed',
+          ].includes(diagnostic.reason)) { clear(diagnostic.reason); return; }
+        } catch (_) { /* Snapshot validation below remains authoritative. */ }
+      }
       const value = typeof event.data === 'string' ? validateSnapshot(event.data) : null;
       if (!value || value.galaxy !== galaxyAt(realm) || value.observedAt > now() || now() - value.observedAt > LIMITS.staleMs) { clear('invalid-camera-observation'); return; }
       if (value.revision <= lastRevision) { clear('out-of-order-camera-observation'); return; }
@@ -301,7 +311,7 @@
       const source = typeof observerSource === 'string'
         ? observerSource + '\nconst api=globalThis.OldLightReinforcementMap;'
         : 'const api=(' + mapFactory.toString() + ')();';
-      const textContent = `(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected)return;target.remove();${source}\nconst channel=${JSON.stringify(channel)},attribute=${JSON.stringify(pendingAttribute)};const pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;const cleanup=()=>{try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();};pipe.port1.addEventListener('message',event=>{if(event.data==='stop')cleanup();});try{handle=api.installPageObserver({onPending:value=>{if(value)target.setAttribute(attribute,JSON.stringify([value.galaxy,value.revision,value.observedAt]));else target.removeAttribute(attribute);},emit:value=>{const data=JSON.stringify(value);if(ready)send(data);else pending=data;}});target.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);}catch(_){cleanup();}})();`;
+      const textContent = `(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected)return;target.remove();${source}\nconst channel=${JSON.stringify(channel)},attribute=${JSON.stringify(pendingAttribute)};const pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;const cleanup=()=>{try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();};pipe.port1.addEventListener('message',event=>{if(event.data==='stop')cleanup();});try{handle=api.installPageObserver({onPending:value=>{if(value)target.setAttribute(attribute,JSON.stringify([value.galaxy,value.revision,value.observedAt]));else {target.removeAttribute(attribute);const reason=handle?.status?.().reason;if(ready&&reason)send(JSON.stringify({version:1,type:'status',reason}));}},emit:value=>{const data=JSON.stringify(value);if(ready)send(data);else pending=data;}});target.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);handle.ready?.then(()=>{const reason=handle?.status?.().reason;if(reason)send(JSON.stringify({version:1,type:'status',reason}));});}catch(_){cleanup();}})();`;
       try {
         parent.appendChild(container);
         ackTimer = realm.setTimeout(() => { ackTimer = null; if (!installed && !stopped) fail('camera-injection-unavailable'); }, 2000);

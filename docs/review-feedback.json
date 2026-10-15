@@ -2330,6 +2330,71 @@
         "Revisar migración, límites y poda de recibos por origen; el límite no debe eliminar evidencia necesaria.",
         "Comprobar revisión explícita, conservación de pausa, borrado rechazado visible y ausencia de recibos huérfanos irrecuperables."
       ]
+    },
+    {
+      "id": "reinforcement-ctrl-native-pan",
+      "feedback": "Ctrl+clic y mover el ratón desplazaba todo el mapa. La cámara indisponible dejaba pasar pointerdown a Pixi en lugar de iniciar el borrador.",
+      "beforeFail": {
+        "revision": "dd6e0d44ee4768266cc5888e5171b93040d88606",
+        "command": "node --test tests/reinforcement-panel.test.cjs",
+        "observedFailure": "Suite extendida sobre bytes originales del panel: 75 tests, 64 pasan y 11 fallan. El caso cámara indisponible no detiene pointerdown; además se pierden cancelaciones durante captura o espera.",
+        "evidence": "docs/1.17.1-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "unavailable camera: fresh own native card recovers Ctrl drag before Pixi pan, without stale anchors"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "implicit lostpointercapture after pointerup preserves pending fresh tooltip verification"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "Control release also cancels delayed native destination verification"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "available camera rejection never falls back to a native tooltip"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Cámara ausente y ficha nativa propia actual",
+          "expected": "Capturar antes de Pixi, abrir solo borrador y mantener flechas ocultas.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "unavailable camera: fresh own native card recovers Ctrl drag before Pixi pan, without stale anchors"
+          }
+        },
+        {
+          "scenario": "Pointerup libera captura antes de que la ficha destino aparezca",
+          "expected": "No confundir lostpointercapture implícito con cancelación durante arrastre.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "implicit lostpointercapture after pointerup preserves pending fresh tooltip verification"
+          }
+        },
+        {
+          "scenario": "Cámara disponible rechaza un punto",
+          "expected": "No sustituir el rechazo por una ficha potencialmente vieja.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "available camera rejection never falls back to a native tooltip"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Brave/Violentmonkey/Drive reales y causa concreta de cámara ausente",
+          "reason": "Sin sesión accesible; Chromium offline bloqueado por restricciones del entorno. No se ejecutaron órdenes reales."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Verificar propagación window/document/canvas, Ctrl, Shift y arrastre normal.",
+        "Revisar ficha fresca, cambio scope/epoch/path y pérdida del origen.",
+        "Comprobar liberación implícita de captura y cancelación de espera al soltar Ctrl."
+      ]
     }
   ]
 }

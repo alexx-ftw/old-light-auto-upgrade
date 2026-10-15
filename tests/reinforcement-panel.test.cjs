@@ -63,6 +63,7 @@ function harness(extra = {}) {
     field: name => byLabel(container, name), click: name => { const node = byButton(container, name); assert.ok(node, name); node.dispatch('click'); },
     get error() { return all(container).find(n => n.getAttribute('role') === 'alert').textContent; },
     get status() { return all(container).find(n => n.getAttribute('role') === 'status').textContent; },
+    advance: ms => { clock += ms; },
     tick: () => { for (const [id, fn] of [...timers]) { timers.delete(id); fn(); } },
     gesture: (type, x, y, extra = {}) => window.dispatch(type, { target: canvas, clientX: x, clientY: y, ctrlKey: true, pointerType: 'mouse', pointerId: 1, ...extra }),
     hover: (name, x, y) => {
@@ -307,4 +308,98 @@ test('review acknowledgement rejected while sending stays visible without claimi
 test('a detached review button cannot acknowledge after an account change',()=>{
   let calls=0;const h=harness({onAcknowledge:()=>{calls++;}});create(h);h.routes[0].needsReview=true;h.routes[0].paused=true;h.app.render();const old=byButton(h.container,'He revisado el envío');assert.ok(old);
   h.scope='beta/self';h.world={...h.world,scope:h.scope,galaxy:'beta'};h.app.render();old.dispatch('click');assert.equal(calls,0);
+});
+
+// Browser order: window capture precedes Pixi's document/canvas listeners.
+// Native camera behavior is transcribed from galaxy-CqK10P8m.js pt.
+// FederatedEventTarget-wp-sye9G.js (SHA256 a02af9618c6edab9cb9d6001c03a70fa6de319962ee3023195e623467b1ad0c8):
+// down on canvas capture, move on document capture, up on window capture.
+function nativeEvents(h) {
+  let dragging = false, pan = 0, downs = 0, clicks = 0;
+  const captures = new Set();
+  h.canvas.setPointerCapture = id => captures.add(id);
+  h.canvas.hasPointerCapture = id => captures.has(id);
+  h.canvas.releasePointerCapture = id => captures.delete(id);
+  const emit = (type, x, y, extra = {}) => {
+    const event = { type, target: h.canvas, isTrusted: true, button: 0, buttons: /down|move/.test(type) ? 1 : 0,
+      ctrlKey: true, pointerType: 'mouse', pointerId: 1, clientX: x, clientY: y,
+      preventDefault() { this.prevented = true; }, stopImmediatePropagation() { this.stopped = true; }, ...extra };
+    for (const node of [h.window, h.document, h.canvas]) {
+      for (const callback of node.listeners.get(type) || []) { callback(event); if (event.stopped) break; }
+      if (event.stopped) break;
+    }
+    return event;
+  };
+  // Pixi registers DOM listeners before the userscript mounts; capture phase,
+  // rather than registration time on another target, decides precedence.
+  h.canvas.addEventListener('pointerdown', e => { if (e.target === h.canvas) { dragging = true; downs++; } });
+  h.document.addEventListener('pointermove', () => { if (dragging) pan++; });
+  const nativeUp = () => { if (dragging) clicks++; dragging = false; };
+  // The game's window listener was registered before the late panel mount.
+  h.window.listeners.set('pointerup', new Set([nativeUp, ...(h.window.listeners.get('pointerup') || [])]));
+  return { emit, captures, get pan() { return pan; }, get downs() { return downs; }, get clicks() { return clicks; } };
+}
+test('unavailable camera: fresh own native card recovers Ctrl drag before Pixi pan, without stale anchors', () => {
+  const h = harness({ hitTestSystem: () => null, projectSystem: () => null, getAvailability: () => ({ cameraAvailable: false }) });
+  const native = nativeEvents(h);
+  native.emit('pointermove', 100, 100, { buttons: 0 }); h.advance(301); h.hover('Origen', 100, 100);
+  const down = native.emit('pointerdown', 100, 100); assert.equal(down.stopped, true);
+  native.emit('mousedown', 100, 100); native.emit('pointermove', 300, 200); native.emit('mousemove', 300, 200);
+  h.hover('Destino', 300, 200); native.emit('pointerup', 300, 200); native.emit('mouseup', 300, 200);
+  assert.equal(native.pan, 0); assert.equal(native.downs, 0); assert.equal(native.clicks, 0); assert.equal(native.captures.size, 0);
+  assert.match(h.status, /Revisa/); assert.equal(h.field('Sistema de origen').value, A); assert.equal(h.field('Sistema de destino').value, B);
+  assert.equal(h.calls.length, 0); assert.equal(h.document.querySelector('.oldlight-route-overlay').style.display, 'none');
+});
+test('verified camera captures a route and leaves ordinary pan and Shift untouched', () => {
+  const h = harness({ hitTestSystem: p => p.x === 100 ? A : B }); const n = nativeEvents(h);
+  n.emit('pointerdown', 100, 100); assert.equal(n.captures.has(1), true); n.emit('pointermove', 300, 200); n.emit('pointerup', 300, 200);
+  assert.equal(n.pan, 0); assert.match(h.status, /Revisa/);
+  for (const modifiers of [{ ctrlKey: false }, { shiftKey: true }]) {
+    n.emit('pointerdown', 100, 100, modifiers); n.emit('pointermove', 300, 200, modifiers); n.emit('pointerup', 300, 200, modifiers);
+  }
+  assert.equal(n.downs, 2); assert.equal(n.pan, 2);
+});
+for (const kind of ['no-card', 'ambiguous', 'foreign', 'stale-position', 'no-dwell']) test('camera fallback rejects ' + kind + ' without claiming native input', () => {
+  const h = harness({ hitTestSystem: () => null, getAvailability: () => ({ cameraAvailable: false }) }); const n = nativeEvents(h);
+  n.emit('pointermove', 100, 100, { buttons: 0 }); if (kind !== 'no-dwell') h.advance(301);
+  if (kind !== 'no-card') h.hover(kind === 'foreign' ? 'Enemigo' : 'Origen', kind === 'stale-position' ? 500 : 100, 100);
+  if (kind === 'ambiguous') h.world.systems[1].name = 'Origen';
+  const e = n.emit('pointerdown', 100, 100); assert.notEqual(e.stopped, true); assert.equal(n.downs, 1);
+  assert.match(h.error, /Cámara no disponible/); assert.equal(h.calls.length, 0);
+});
+for (const kind of ['Escape', 'blur', 'Control', 'pointercancel', 'lostpointercapture', 'outside-move', 'pointerout']) test('captured route cancels and releases capture on ' + kind, () => {
+  const h = harness({ hitTestSystem: p => p.x === 100 ? A : B }); const n = nativeEvents(h);
+  n.emit('pointerdown', 100, 100); n.emit('pointermove', 300, 200);
+  if (kind === 'Escape') h.window.dispatch('keydown', { key: 'Escape' });
+  else if (kind === 'Control') h.window.dispatch('keyup', { key: 'Control' });
+  else if (kind === 'outside-move') n.emit('pointermove', 900, 200);
+  else if (kind === 'pointerout') n.emit('pointerout', 300, 200, { relatedTarget: null });
+  else h.window.dispatch(kind);
+  n.emit('pointerup', 300, 200); h.tick(); assert.doesNotMatch(h.status, /Revisa/); assert.equal(n.captures.size, 0); assert.equal(h.calls.length, 0);
+});
+test('Control release also cancels delayed native destination verification', () => {
+  const h = harness(); h.hover('Origen', 100, 100); h.gesture('pointerdown', 100, 100); h.gesture('pointermove', 300, 200); h.gesture('pointerup', 300, 200);
+  h.window.dispatch('keyup', { key: 'Control' }); h.hover('Destino', 300, 200); h.tick(); assert.doesNotMatch(h.status, /Revisa/);
+});
+
+test('implicit lostpointercapture after pointerup preserves pending fresh tooltip verification', () => {
+  const h = harness({ hitTestSystem: () => null, projectSystem: () => null, getAvailability: () => ({ cameraAvailable: false }) }); const n = nativeEvents(h);
+  n.emit('pointermove', 100, 100, { buttons: 0 }); h.advance(301); h.hover('Origen', 100, 100);
+  n.emit('pointerdown', 100, 100); n.emit('pointermove', 300, 200); n.emit('pointerup', 300, 200);
+  n.emit('lostpointercapture', 300, 200); h.hover('Destino', 300, 200); h.tick(); assert.match(h.status, /Revisa/); assert.equal(h.calls.length, 0);
+});
+test('available camera rejection never falls back to a native tooltip', () => {
+  const h = harness({ hitTestSystem: () => null, getAvailability: () => ({ cameraAvailable: true }) }); const n = nativeEvents(h);
+  n.emit('pointermove', 100, 100, { buttons: 0 }); h.advance(301); h.hover('Origen', 100, 100);
+  assert.notEqual(n.emit('pointerdown', 100, 100).stopped, true); assert.equal(n.downs, 1);
+});
+
+for (const change of ['epoch', 'path', 'origin']) test('pending native-card gesture rejects changed ' + change, () => {
+  const h = harness({ hitTestSystem: () => null, projectSystem: () => null, getAvailability: () => ({ cameraAvailable: false }) }); const n = nativeEvents(h);
+  n.emit('pointermove', 100, 100, { buttons: 0 }); h.advance(301); h.hover('Origen', 100, 100);
+  n.emit('pointerdown', 100, 100); n.emit('pointermove', 300, 200); n.emit('pointerup', 300, 200);
+  if (change === 'epoch') h.world.epoch = 2;
+  if (change === 'path') h.window.location = { pathname: '/game/galaxy/other' };
+  if (change === 'origin') h.world.systems.shift();
+  h.hover('Destino', 300, 200); h.tick(); assert.doesNotMatch(h.status, /Revisa/); assert.equal(h.calls.length, 0);
 });

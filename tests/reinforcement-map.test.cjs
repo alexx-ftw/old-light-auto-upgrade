@@ -254,7 +254,7 @@ function bridgeHarness({ injectionFailure = false, rootAvailable = true } = {}) 
     Object.defineProperty(realm, key, { get() { throw new Error('Must not use ' + key); } });
   }
   page = vm.createContext({ document, MessageChannel, onStop: () => { stopped++; }, MessageEvent: class { constructor(type, options) { this.type = type; Object.assign(this, options); } } });
-  const observerSource = 'globalThis.OldLightReinforcementMap={installPageObserver(options){globalThis.observerOptions=options;return{stop(){onStop();}};}};';
+  const observerSource = 'globalThis.observerReason="";globalThis.OldLightReinforcementMap={installPageObserver(options){globalThis.observerOptions=options;return{status(){return{reason:globalThis.observerReason};},stop(){onStop();}};}};';
   const map = M.create({ realm, document, now: () => time, observerSource,
     addElement(container, tag, attributes) {
       if (injectionFailure) throw new Error('CSP');
@@ -264,6 +264,7 @@ function bridgeHarness({ injectionFailure = false, rootAvailable = true } = {}) 
   });
   return { ...geo, realm, map, channels, nodes, scripts, handoffs, timers,
     pending(value) { page.observerOptions.onPending(value); },
+    fail(reason) { page.observerReason = reason; page.observerOptions.onPending(null); },
     deliver(value) { channels[0].port1.postMessage(typeof value === 'string' ? value : JSON.stringify(value)); },
     send(value) { this.pending(value); this.deliver(value); }, advance(ms) { time += ms; },
     mount() { document.documentElement = parent; watcher(); }, get stopped() { return stopped; },
@@ -360,4 +361,11 @@ test('production factory source is self-contained and refuses missing page capab
   assert.equal(script.includes(SELF), false);
   const source = fs.readFileSync(require.resolve('../docs/reinforcement-map.js'), 'utf8');
   assert.equal(/fetch\s*\(|XMLHttpRequest|WebSocket|\.emit\s*\(|dispatchOrder|sessionStorage|localStorage/.test(source), false); map.stop();
+});
+
+test('page observer failure reason crosses only the private diagnostic channel', () => {
+  const h = bridgeHarness(); h.fail('native-camera-import-failed');
+  assert.equal(h.map.status().available, false); assert.equal(h.map.status().reason, 'native-camera-import-failed');
+  h.fail('native-camera-shape-changed'); assert.equal(h.map.status().reason, 'native-camera-shape-changed');
+  h.map.stop();
 });

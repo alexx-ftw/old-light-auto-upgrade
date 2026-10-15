@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.0
+// @version      1.17.1
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -904,6 +904,16 @@ return {create};
     function fail(why) { failed = true; installed = false; cleanupBootstrap(); try { port?.postMessage('stop'); } catch (_) {} port?.close(); port = null; clear(why); }
     function receive(event) {
       if (stopped || failed) return;
+      if (typeof event.data === 'string' && event.data.length <= 256) {
+        try {
+          const diagnostic = JSON.parse(event.data);
+          if (diagnostic.version === 1 && diagnostic.type === 'status' && [
+            'native-camera-import-failed', 'native-camera-shape-changed', 'native-camera-unavailable',
+            'camera-hook-replaced', 'camera-timing-unavailable', 'awaiting-native-projection',
+            'viewport-unavailable', 'game-navigation', 'camera-observation-failed',
+          ].includes(diagnostic.reason)) { clear(diagnostic.reason); return; }
+        } catch (_) { /* Snapshot validation below remains authoritative. */ }
+      }
       const value = typeof event.data === 'string' ? validateSnapshot(event.data) : null;
       if (!value || value.galaxy !== galaxyAt(realm) || value.observedAt > now() || now() - value.observedAt > LIMITS.staleMs) { clear('invalid-camera-observation'); return; }
       if (value.revision <= lastRevision) { clear('out-of-order-camera-observation'); return; }
@@ -925,7 +935,7 @@ return {create};
       const source = typeof observerSource === 'string'
         ? observerSource + '\nconst api=globalThis.OldLightReinforcementMap;'
         : 'const api=(' + mapFactory.toString() + ')();';
-      const textContent = `(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected)return;target.remove();${source}\nconst channel=${JSON.stringify(channel)},attribute=${JSON.stringify(pendingAttribute)};const pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;const cleanup=()=>{try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();};pipe.port1.addEventListener('message',event=>{if(event.data==='stop')cleanup();});try{handle=api.installPageObserver({onPending:value=>{if(value)target.setAttribute(attribute,JSON.stringify([value.galaxy,value.revision,value.observedAt]));else target.removeAttribute(attribute);},emit:value=>{const data=JSON.stringify(value);if(ready)send(data);else pending=data;}});target.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);}catch(_){cleanup();}})();`;
+      const textContent = `(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected)return;target.remove();${source}\nconst channel=${JSON.stringify(channel)},attribute=${JSON.stringify(pendingAttribute)};const pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;const cleanup=()=>{try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();};pipe.port1.addEventListener('message',event=>{if(event.data==='stop')cleanup();});try{handle=api.installPageObserver({onPending:value=>{if(value)target.setAttribute(attribute,JSON.stringify([value.galaxy,value.revision,value.observedAt]));else {target.removeAttribute(attribute);const reason=handle?.status?.().reason;if(ready&&reason)send(JSON.stringify({version:1,type:'status',reason}));}},emit:value=>{const data=JSON.stringify(value);if(ready)send(data);else pending=data;}});target.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);handle.ready?.then(()=>{const reason=handle?.status?.().reason;if(reason)send(JSON.stringify({version:1,type:'status',reason}));});}catch(_){cleanup();}})();`;
       try {
         parent.appendChild(container);
         ackTimer = realm.setTimeout(() => { ackTimer = null; if (!installed && !stopped) fail('camera-injection-unavailable'); }, 2000);
@@ -1041,6 +1051,7 @@ return {create};
     const id = ++sequence, markerId = `oldlight-route-arrow-${id}`, miniMarkerId = markerId + '-mini';
     let root, style, details, list, status, error, availability, editor, mini, overlay, origin, destination, interval, saveButton, mapHint;
     let destroyed = false, scope = null, scopeEpoch = 0, editorScope = '', draftId = null, busy = false, operation = 0;
+    let pointerSample = null;
     let gesture = null, releaseTimer = null, ignoreClick = null, anchors = new Map(), hoverSample = null;
     let listSignature = '', selectSignature = '', overlaySignature = '', miniSignature = '', frame = null, lastFrame = 0, viewIdentity = '';
     let sourceError = '', mapCache = null;
@@ -1060,7 +1071,7 @@ return {create};
     const systems = () => {
       const world = getWorld();
       const identity = `${getScope()}|${world?.epoch ?? ''}|${window.location?.pathname || ''}|${window.location?.search || ''}|${document.querySelector?.('[data-field="nameplate-name"]')?.textContent || ''}`;
-      if (identity !== viewIdentity) { viewIdentity = identity; invalidateMap(); }
+      if (identity !== viewIdentity) { viewIdentity = identity; cancelGesture(); invalidateMap(); }
       return ownSystems(world, getScope(), now());
     };
     const routes = () => { const value = getRoutes(); return Array.isArray(value) ? value.filter(route => route && (!route.scope || route.scope === scope)) : []; };
@@ -1077,11 +1088,12 @@ return {create};
       return true;
     }
     function invalidateMap() {
-      anchors.clear(); hoverSample = null; overlaySignature = '';
+      anchors.clear(); hoverSample = null; pointerSample = null; overlaySignature = '';
       if (overlay) { overlay.replaceChildren(); hideSVG(overlay, true); }
     }
     function cancelGesture() {
-      gesture = null;
+      const previous = gesture; gesture = null;
+      try { if (previous?.capture?.hasPointerCapture?.(previous.pointerId)) previous.capture.releasePointerCapture(previous.pointerId); } catch (_) {}
       if (releaseTimer !== null) clearTimer(releaseTimer);
       releaseTimer = null; overlaySignature = '';
     }
@@ -1147,7 +1159,11 @@ return {create};
     function blocked() {
       return document.hidden === true || !!document.querySelector?.('dialog[open]') || document.body?.classList?.contains('ui-hidden') || options.canInteract?.() === false;
     }
-    function pick(event, rows) {
+    function pick(event, rows, nativeCard = false) {
+      if (nativeCard) {
+        const sample = nativeHover(rows);
+        return sample && Math.hypot(sample.point.x - event.clientX, sample.point.y - event.clientY) <= 22 ? sample.system : null;
+      }
       if (typeof options.hitTestSystem === 'function') {
         const found = options.hitTestSystem({ x: event.clientX, y: event.clientY }, rows);
         const system = rows.find(s => s.id === (typeof found === 'string' ? found : found?.id));
@@ -1268,7 +1284,7 @@ return {create};
       if (sourceError) write(error, sourceError); else if (previousError && error.textContent === previousError) write(error, '');
       const capability = options.getAvailability?.();
       write(mapHint, typeof options.projectSystem === 'function'
-        ? capability?.cameraAvailable === false ? 'Mapa nativo: esperando una cámara verificada. Puedes configurar las rutas con los selectores.' : 'Las flechas del mapa siguen la cámara y el zoom con posiciones verificadas. Debajo aparece un esquema por coordenadas.'
+        ? capability?.cameraAvailable === false ? `Cámara no disponible${capability.cameraReason ? ' (' + clean(capability.cameraReason) + ')' : ''}: las flechas están detenidas. Para arrastrar con Ctrl, deja el puntero sobre la ficha de un sistema propio; también puedes usar los selectores.` : 'Las flechas del mapa siguen la cámara y el zoom con posiciones verificadas. Debajo aparece un esquema por coordenadas.'
         : 'Esquema por coordenadas. Las flechas sobre el mapa principal aparecen con posiciones verificadas; se ocultan al mover o ampliar la vista.');
       write(availability, capability?.coordinated === false ? 'Envíos bloqueados: este navegador no ofrece Web Locks para coordinar las pestañas.' : 'Los envíos necesitan datos recientes y coordinación Web Locks entre pestañas.');
       const rows = systems(), items = routes(), byId = new Map(rows.map(s => [s.id, s]));
@@ -1318,17 +1334,43 @@ return {create};
       if (event.target !== canvas) { if (!root?.contains?.(event.target)) { cancelGesture(); invalidateMap(); } return; }
       if (!event.ctrlKey || event.shiftKey || event.metaKey || event.altKey || event.button !== 0 || (event.pointerType && event.pointerType !== 'mouse')) { cancelGesture(); invalidateMap(); return; }
       observeScope(getScope()); if (!current() || blocked() || busy) return;
-      const freshRows = systems(), picked = pick(event, freshRows);
-      if (!picked) { report('Señala un sistema propio hasta que aparezca su ficha; después arrastra con Ctrl.', true); return; }
+      const freshRows = systems();
+      let picked = pick(event, freshRows), nativeCard = false;
+      // A verified native tooltip is an independent identity source. Never use
+      // cached arrow anchors or approximate camera coordinates as a fallback.
+      const cameraUnavailable = options.getAvailability?.()?.cameraAvailable === false;
+      if (!picked && cameraUnavailable && pointerSample?.canvas === canvas
+          && now() - pointerSample.at >= 300 && now() - pointerSample.at <= 30000
+          && Math.hypot(event.clientX - pointerSample.x, event.clientY - pointerSample.y) <= 3) {
+        picked = pick(event, freshRows, true); nativeCard = !!picked;
+      }
+      if (!picked) { report(cameraUnavailable
+        ? 'Cámara no disponible. Mantén el puntero quieto sobre un sistema propio hasta ver su ficha y después arrastra con Ctrl, o usa Nueva ruta.'
+        : 'Señala un sistema propio hasta que aparezca su ficha; después arrastra con Ctrl.', true); return; }
       try { options.onInteraction?.(event); } catch (_) { report('No se pudo preparar el gesto de refuerzo.', true); return; }
       mapCache = { scope, at: now(), rows: freshRows, items: routes() };
-      gesture = { originId: picked.id, scope, pointerId: event.pointerId, x: event.clientX, y: event.clientY, sourceX: event.clientX, sourceY: event.clientY, moved: false };
-      swallow(event); drawOverlay();
+      gesture = { originId: picked.id, scope, nativeCard, capture: canvas, pointerId: event.pointerId, x: event.clientX, y: event.clientY, sourceX: event.clientX, sourceY: event.clientY, moved: false };
+      swallow(event);
+      if (event.pointerId !== undefined) { try { canvas.setPointerCapture?.(event.pointerId); } catch (_) { /* Window capture still owns the gesture. */ } }
+      if (nativeCard) report('Gesto por ficha nativa: suelta sobre otro sistema propio. Las flechas esperan una cámara verificada.');
+      drawOverlay();
+    }
+    function inside(event) {
+      const rect = stage()?.getBoundingClientRect?.();
+      return rect && event.clientX >= rect.left && event.clientX <= rect.left + rect.width
+        && event.clientY >= rect.top && event.clientY <= rect.top + rect.height;
     }
     function move(event) {
-      if (!gesture || !trusted(event)) return;
+      if (!trusted(event)) return;
+      if (!gesture) {
+        if (event.target === stage() && (!event.buttons) && (!event.pointerType || event.pointerType === 'mouse')) {
+          if (!pointerSample || Math.hypot(event.clientX - pointerSample.x, event.clientY - pointerSample.y) > 3)
+            pointerSample = { canvas: stage(), x: event.clientX, y: event.clientY, at: now() };
+        } else pointerSample = null;
+        return;
+      }
       if (gesture.pointerId !== undefined && event.pointerId !== undefined && event.pointerId !== gesture.pointerId) return;
-      if (!event.ctrlKey || blocked() || scope !== getScope()) { cancelGesture(); drawOverlay(); return; }
+      if (!event.ctrlKey || !inside(event) || blocked() || scope !== getScope()) { cancelGesture(); drawOverlay(); return; }
       if (releaseTimer !== null) {
         if (Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 3) { cancelGesture(); drawOverlay(); }
         return;
@@ -1345,18 +1387,24 @@ return {create};
       swallow(event);
       if (releaseTimer !== null) return;
       const active = gesture;
+      // Pointer capture is implicitly released after pointerup. Its resulting
+      // lostpointercapture must not cancel the delayed native-hover check.
+      active.released = true;
+      try { if (active.capture?.hasPointerCapture?.(active.pointerId)) active.capture.releasePointerCapture(active.pointerId); } catch (_) {}
       ignoreClick = { until: now() + 700, x: event.clientX, y: event.clientY };
-      if (!event.ctrlKey || event.target !== stage() || !active.moved || blocked() || active.scope !== getScope()) { cancelGesture(); drawOverlay(); return; }
+      if (!event.ctrlKey || event.target !== stage() || !inside(event) || !active.moved || blocked() || active.scope !== getScope()) { cancelGesture(); drawOverlay(); return; }
       const endpoint = { clientX: event.clientX, clientY: event.clientY };
       const finish = () => {
         releaseTimer = null;
         if (gesture !== active || active.scope !== getScope() || blocked()) { cancelGesture(); drawOverlay(); return; }
-        const picked = pick(endpoint, systems()); cancelGesture();
+        const rows = systems();
+        if (gesture !== active || !rows.some(row => row.id === active.originId)) { cancelGesture(); drawOverlay(); return; }
+        const picked = pick(endpoint, rows, active.nativeCard); cancelGesture();
         if (picked && picked.id !== active.originId) showEditor(active.originId, picked.id);
         else report('No se pudo verificar el destino. Mantén el puntero sobre su ficha o elígelo en Nueva ruta.', true);
         drawOverlay();
       };
-      const picked = pick(endpoint, systems());
+      const picked = pick(endpoint, systems(), active.nativeCard);
       if (picked && picked.id !== active.originId) finish();
       else releaseTimer = timer(finish, 320); // Native own-system hover delay is 250 ms.
     }
@@ -1372,8 +1420,11 @@ return {create};
         if (event.key === 'Escape') { cancelGesture(); drawOverlay(); }
         else if (!['Control', 'Shift', 'Alt', 'Meta'].includes(event.key) && !root.contains?.(event.target)) { cancelGesture(); invalidateMap(); }
       }, true);
-      listen(window, 'keyup', event => { if (event.key === 'Control' && releaseTimer === null) { cancelGesture(); drawOverlay(); } }, true);
+      listen(window, 'keyup', event => { if (event.key === 'Control') { cancelGesture(); drawOverlay(); } }, true);
       for (const name of ['wheel', 'resize', 'scroll', 'blur', 'pointercancel', 'pagehide', 'popstate', 'hashchange']) listen(window, name, () => { cancelGesture(); invalidateMap(); }, true);
+      listen(window, 'lostpointercapture', event => { if (gesture && !gesture.released && (event.pointerId === undefined || gesture.pointerId === event.pointerId)) { cancelGesture(); invalidateMap(); } }, true);
+      listen(window, 'pointerleave', event => { if (gesture && event.target === stage()) { cancelGesture(); invalidateMap(); } }, true);
+      listen(window, 'pointerout', event => { if (gesture && (event.relatedTarget === null || !inside(event))) { cancelGesture(); invalidateMap(); } }, true);
       listen(document, 'visibilitychange', () => { cancelGesture(); invalidateMap(); });
       const tick = timestamp => {
         if (destroyed) return;
@@ -4841,7 +4892,7 @@ return Object.freeze({create});
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.0';
+  const SCRIPT_VERSION = '1.17.1';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -6374,6 +6425,11 @@ return Object.freeze({create});
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.1', title: 'Arrastre de refuerzos con Ctrl', changes: [
+        'Si la cámara no está disponible, el gesto puede verificar los extremos mediante sus fichas nativas propias.',
+        'Captura del puntero y cancelación al soltar Ctrl, salir del mapa o perder el foco; el arrastre normal se conserva.',
+        'El panel muestra el motivo de cámara no disponible. Las flechas esperan posiciones verificadas.',
+      ] },
       { version: '1.17.0', title: 'Rutas periódicas de refuerzos', changes: [
         'Rutas entre sistemas propios con intervalo y flota configurables, cantidades fijas o excedentes con reserva.',
         'Pausa, reanudación y borrado; los envíos usan Send y se detienen si su confirmación es incierta.',
@@ -17901,7 +17957,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       getWorld: () => globalThis.OldLightEmpireBridge?.snapshot({ includeOwnership: false }) || null,
       getRoutes: () => reinforcementRoutes.list(),
       getError: () => reinforcementRoutes.state().error,
-      getAvailability: () => ({ coordinated: Boolean(navigator.locks?.request), cameraAvailable: reinforcementMap?.status().available === true }),
+      getAvailability: () => { const camera = reinforcementMap?.status(); return { coordinated: Boolean(navigator.locks?.request), cameraAvailable: camera?.available === true, cameraReason: camera?.reason || 'camera-unavailable' }; },
       projectSystem: (system, options) => reinforcementMap?.projectSystem(system, options) || null,
       hitTestSystem: (point, rows) => reinforcementMap?.hitTestSystem(point, rows) || null,
       onInteraction: event => empireAdapter?.observeInteraction(event),
