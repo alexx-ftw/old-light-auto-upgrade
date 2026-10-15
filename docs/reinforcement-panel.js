@@ -295,8 +295,12 @@
       const previousError = sourceError; sourceError = readError();
       if (sourceError) write(error, sourceError); else if (previousError && error.textContent === previousError) write(error, '');
       const capability = options.getAvailability?.();
+      const measured = capability?.cameraGeometry, dimensions = ['nativeWidth', 'nativeHeight', 'cssWidth', 'cssHeight'];
+      const geometryHint = capability?.cameraReason === 'native-viewport-size-mismatch' && measured
+        && dimensions.every(key => finite(measured[key]) && measured[key] > 0 && measured[key] <= 100000)
+        ? ` Cámara ${Number(measured.nativeWidth.toFixed(4))} × ${Number(measured.nativeHeight.toFixed(4))}; lienzo ${Number(measured.cssWidth.toFixed(4))} × ${Number(measured.cssHeight.toFixed(4))} px CSS.` : '';
       write(mapHint, typeof options.projectSystem === 'function'
-        ? capability?.cameraAvailable === false ? `Cámara no disponible${capability.cameraReason ? ' (' + clean(capability.cameraReason) + ')' : ''}: las flechas están detenidas. Para arrastrar con Ctrl, deja el puntero sobre la ficha de un sistema propio; también puedes usar los selectores.` : 'Las flechas del mapa siguen la cámara y el zoom con posiciones verificadas. Debajo aparece un esquema por coordenadas.'
+        ? capability?.cameraAvailable === false ? `Flechas del mapa principal ocultas: ${capability.cameraReason === 'native-viewport-size-mismatch' ? 'el tamaño de la cámara no coincide con el lienzo' : 'cámara no disponible'}${capability.cameraReason ? ' (' + clean(capability.cameraReason) + ')' : ''}.${geometryHint} El esquema de arriba sigue disponible. Puedes crear o editar rutas con los selectores, o iniciar Ctrl + arrastre sobre la ficha de un sistema propio.` : 'Las flechas del mapa principal siguen la cámara y el zoom con posiciones verificadas. El esquema de arriba es independiente de la cámara.'
         : 'Esquema por coordenadas. Las flechas sobre el mapa principal aparecen con posiciones verificadas; se ocultan al mover o ampliar la vista.');
       write(availability, capability?.coordinated === false ? 'Envíos bloqueados: este navegador no ofrece Web Locks para coordinar las pestañas.' : 'Los envíos necesitan datos recientes y coordinación Web Locks entre pestañas.');
       const rows = systems(), items = routes(), byId = new Map(rows.map(s => [s.id, s]));
@@ -485,6 +489,7 @@
       status = el('p', '', 'oldlight-route-status'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
       error = el('p', '', 'oldlight-route-error'); error.setAttribute('role', 'alert'); details.append(status, error);
       availability = el('p', '', 'oldlight-route-hint'); details.append(availability);
+      details.append(el('p', 'Esquema de rutas · independiente de la cámara', 'oldlight-route-hint'));
       mini = svg('svg'); mini.classList?.add('oldlight-route-map'); attr(mini, 'role', 'img'); attr(mini, 'aria-label', 'Esquema de rutas entre sistemas propios'); details.append(mini);
       mapHint = el('p', '', 'oldlight-route-hint'); details.append(mapHint);
       list = el('div'); details.append(list);

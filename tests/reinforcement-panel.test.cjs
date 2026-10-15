@@ -635,3 +635,19 @@ test('route review keeps conflicting route controls disabled while acknowledgeme
   h.routes[0].needsReview=false;h.app.render();
   assert.equal(byButton(h.container,'Reanudar').disabled,false);
 });
+
+
+test('camera mismatch distinguishes static schematic from hidden main-map arrows and recovers hint', () => {
+  let cameraAvailable = false;
+  const h = harness({ projectSystem: () => null, getAvailability: () => ({ cameraAvailable, cameraReason: 'native-viewport-size-mismatch', cameraGeometry: {nativeWidth:1000.8,nativeHeight:700.8,cssWidth:1000.796875,cssHeight:700.796875} }) });
+  create(h);
+  assert.match(h.container.textContent, /Esquema de rutas · independiente de la cámara/);
+  assert.match(h.container.textContent, /Flechas del mapa principal ocultas: el tamaño de la cámara no coincide con el lienzo/);
+  assert.match(h.container.textContent, /El esquema de arriba sigue disponible/);
+  assert.match(h.container.textContent, /Cámara 1000.8 × 700.8; lienzo 1000.7969 × 700.7969 px CSS/);
+  assert.equal(h.container.querySelector('.oldlight-route-map').querySelectorAll('line').length, 1);
+  cameraAvailable = true; h.app.render();
+  assert.doesNotMatch(h.container.textContent, /native-viewport-size-mismatch|flechas están detenidas/);
+  assert.match(h.container.textContent, /siguen la cámara y el zoom/);
+  h.app.destroy();
+});

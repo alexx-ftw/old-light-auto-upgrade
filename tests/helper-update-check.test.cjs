@@ -4,7 +4,9 @@ const fs = require('node:fs'), vm = require('node:vm'), path = require('node:pat
 const source = fs.readFileSync(path.join(__dirname, '../old-light-auto-upgrade.user.js'), 'utf8');
 const block = source.split('  // BEGIN PRIVATE UPDATE CHECKER\n')[1]?.split('  // END PRIVATE UPDATE CHECKER')[0];
 const factory = vm.runInNewContext(block + ';createUpdateChecker', {});
-const meta = fs.readFileSync(path.join(__dirname, '../old-light-auto-upgrade.meta.js'), 'utf8');
+// Pin the remote fixture independently of the release being built.
+const meta = fs.readFileSync(path.join(__dirname, '../old-light-auto-upgrade.meta.js'), 'utf8')
+  .replace(/(@version\s+)\S+/, (_, prefix) => prefix + '1.17.5');
 const META = 'https://raw.githubusercontent.com/alexx-ftw/old-light-auto-upgrade/main/old-light-auto-upgrade.meta.js';
 const INSTALL = META.replace('.meta.js', '.user.js');
 function harness(extra = {}) {

@@ -34,6 +34,39 @@
     const rect = rectValue(canvas.getBoundingClientRect());
     return rect ? { canvas, rect } : null;
   }
+  // Pixi's rounded backing store / resolution may yield fractional logical
+  // dimensions. CSS layout quantizes those even though autoDensity preserves
+  // the native logical size in inline px declarations. Accept only that narrow,
+  // independently corroborated case; never infer a DPR or accept larger discrepancies.
+  function projectionSize(value, rect) {
+    if (!value || !finite(value.width) || !finite(value.height)
+      || value.width <= 0 || value.height <= 0
+      || Math.abs(value.width - rect.width) > 1 / 32
+      || Math.abs(value.height - rect.height) > 1 / 32) return null;
+    return { width: value.width, height: value.height };
+  }
+  const geometryStyles = new WeakMap();
+  function matchesProjection(view, size) {
+    if (!view || !projectionSize(size, view.rect)) return false;
+    if (size.width === view.rect.width && size.height === view.rect.height) return true;
+    const px = value => typeof value === 'string' && /^(?:\d+(?:\.\d+)?|\.\d+)px$/.test(value) ? Number.parseFloat(value) : NaN;
+    if (Math.abs(px(view.canvas.style?.width) - size.width) < 1e-6
+      && Math.abs(px(view.canvas.style?.height) - size.height) < 1e-6) return true;
+    // CSSOM can serialize long floating-point dimensions with fewer digits.
+    // Compare like-for-like declarations, using one detached style per document.
+    const owner = view.canvas.ownerDocument;
+    if (!owner?.createElement) return false;
+    let style = geometryStyles.get(owner);
+    if (!style) { style = owner.createElement('span').style; if (!style) return false; geometryStyles.set(owner, style); }
+    style.width = `${size.width}px`; style.height = `${size.height}px`;
+    return style.width === view.canvas.style?.width && style.height === view.canvas.style?.height;
+  }
+  function geometryDiagnostic(value) {
+    if (!value) return null;
+    const keys = ['nativeWidth', 'nativeHeight', 'cssWidth', 'cssHeight'];
+    if (!keys.every(key => finite(value[key]) && value[key] > 0 && value[key] <= 100000)) return null;
+    return Object.fromEntries(keys.map(key => [key, value[key]]));
+  }
   function cameraValue(value) {
     if (!value || !bounded(value.x, 1e9) || !bounded(value.y, 1e9)
       || !finite(value.zoom) || value.zoom <= 0 || value.zoom > 100
@@ -53,24 +86,29 @@
         || !Number.isSafeInteger(value.revision) || value.revision < 1
         || !Number.isSafeInteger(value.observedAt) || value.observedAt < 0) return null;
       const camera = cameraValue(value.camera), rect = rectValue(value.viewport);
-      return camera && rect ? { version: 1, galaxy: value.galaxy, revision: value.revision, observedAt: value.observedAt, camera, viewport: rect } : null;
+      const projection = value.projection === undefined ? null : rect && projectionSize(value.projection, rect);
+      if (value.projection !== undefined && !projection) return null;
+      return camera && rect ? { version: 1, galaxy: value.galaxy, revision: value.revision, observedAt: value.observedAt, camera, viewport: rect, ...(projection ? { projection } : {}) } : null;
     } catch (_) { return null; }
   }
   function projectPoint(system, value) {
     if (!system || !Number.isSafeInteger(system.q) || !Number.isSafeInteger(system.r)
       || Math.abs(system.q) > 1000000 || Math.abs(system.r) > 1000000 || !value?.camera || !value?.viewport) return null;
-    const c = value.camera, v = value.viewport;
+    const c = value.camera, v = value.viewport, size = value.projection || v;
     const dx = 69 * system.q - c.x, dy = 46 * Math.sqrt(3) * (system.r + system.q / 2) - c.y;
     const depth = dy * c.cosTilt + c.L;
     if (!finite(depth) || depth <= 1) return null;
     const focal = c.baseFocal * c.zoom;
-    const x = focal * dx / depth + v.width / 2, y = -focal * dy * c.sinTilt / depth + v.height / 2;
+    const x = (focal * dx / depth + size.width / 2) * v.width / size.width;
+    const y = (-focal * dy * c.sinTilt / depth + size.height / 2) * v.height / size.height;
     return finite(x) && finite(y) ? { x: v.left + x, y: v.top + y, scale: focal / depth, depth, visible: true } : null;
   }
   function unprojectHex(point, value) {
     const c = value?.camera, v = value?.viewport;
     if (!c || !v || !point || !finite(point.x) || !finite(point.y)) return null;
-    const screenX = point.x - v.left - v.width / 2, screenY = point.y - v.top - v.height / 2;
+    const size = value.projection || v;
+    const screenX = (point.x - v.left) * size.width / v.width - size.width / 2;
+    const screenY = (point.y - v.top) * size.height / v.height - size.height / 2;
     const focal = c.baseFocal * c.zoom, denominator = focal * c.sinTilt + screenY * c.cosTilt;
     // Native unproject uses a distant fallback at the perspective horizon.
     // A hit test must reject it instead of guessing a system at that position.
@@ -91,15 +129,15 @@
   // exact module URL already loaded by this completed, evaluated game page.
   function installPageObserver({ realm = globalThis, document = realm.document, importModule = url => import(url), now = Date.now,
     onPending = () => {}, emit = () => {} } = {}) {
-    let stopped = false, installed = false, importing = false, failed = false, reason = 'awaiting-native-camera';
+    let stopped = false, installed = false, importing = false, failed = false, reason = 'awaiting-native-camera', geometry = null;
     let moduleValue = null, camera = null, original = null, wrapper = null, ownDescriptor = null, originalUnproject = null, unprojectWrapper = null, ownUnprojectDescriptor = null;
     let activeGalaxy = '', activePath = '', activeCanvas = null, cachedViewport = null, candidate = null, pending = null;
     let revision = 0, frame = null, timer = null, lastEmittedAt = 0, observing = false, notifying = false, ordinal = 0, lastObservedOrdinal = 0;
     let resolveReady; const ready = new Promise(resolve => { resolveReady = resolve; });
     const apply = Reflect.apply;
     const safePending = value => { try { onPending(value); } catch (_) {} };
-    function invalidate(why) {
-      reason = why; candidate = null; pending = null;
+    function invalidate(why, measured = null) {
+      reason = why; geometry = geometryDiagnostic(measured); candidate = null; pending = null;
       safePending(null);
     }
     function cancelFrame() { if (frame !== null) { try { realm.cancelAnimationFrame(frame); } catch (_) {} frame = null; } }
@@ -129,6 +167,7 @@
       frame = realm.requestAnimationFrame(flush);
     }
     function queue(value) {
+      geometry = null;
       value.revision = ++revision; value.observedAt = now();
       candidate = value; pending = value;
       safePending(value); scheduleFrame();
@@ -144,7 +183,7 @@
         if (candidate && !equalRect(view.rect, candidate.viewport)) { invalidate('camera-observation-pending'); return; }
         if (!pending) return;
         const value = pending; pending = null;
-        if (!equalRect(view.rect, value.viewport) || !constantsMatch(value.camera)) { invalidate('camera-observation-pending'); return; }
+        if (!equalRect(view.rect, value.viewport) || !matchesProjection(view, value.projection || value.viewport) || !constantsMatch(value.camera)) { invalidate('camera-observation-pending'); return; }
         // Publish at most once per animation frame. Observing a newer camera has
         // already invalidated the content-world snapshot synchronously.
         notifying = true;
@@ -160,21 +199,22 @@
         // Zero allocation and no DOM/JSON work for the thousands of matching
         // projections in a frame. The frame callback refreshes CSS geometry.
         const x = args[2], y = args[3], zoom = args[4], width = args[5], height = args[6];
-        const c = candidate?.camera, r = cachedViewport?.rect;
+        const c = candidate?.camera, r = candidate?.projection || cachedViewport?.rect;
         if (c && r && x === c.x && y === c.y && zoom === c.zoom && width === r.width && height === r.height && constantsMatch(c)) {
           scheduleFrame(); return;
         }
         if (!cachedViewport) cachedViewport = viewport(document);
         const view = cachedViewport;
         if (!view || view.canvas !== activeCanvas) { invalidate('viewport-unavailable'); return; }
-        // Native dimensions are CSS pixels. Never accept canvas.width/height,
-        // which are backing-store pixels and differ at DPR > 1.
-        if (width !== view.rect.width || height !== view.rect.height) { invalidate('native-viewport-size-mismatch'); return; }
+        // Native logical pixels are not canvas backing pixels. Subpixel layout
+        // rounding requires corroborating autoDensity's explicit CSS size.
+        if (!matchesProjection(view, { width, height })) { invalidate('native-viewport-size-mismatch', { nativeWidth: width, nativeHeight: height, cssWidth: view.rect.width, cssHeight: view.rect.height }); return; }
         if (!bounded(args[0], 1e12) || !bounded(args[1], 1e12)) return;
         const values = cameraValue({ x, y, zoom, sinTilt: camera.sinTilt, cosTilt: camera.cosTilt, L: camera.L, baseFocal: camera.baseFocal });
         if (!values) { invalidate('invalid-native-camera'); return; }
-        if (candidate && c && x === c.x && y === c.y && zoom === c.zoom && constantsMatch(c) && equalRect(candidate.viewport, view.rect)) { scheduleFrame(); return; }
-        queue({ version: 1, galaxy: activeGalaxy, revision: 0, observedAt: 0, camera: values, viewport: view.rect });
+        if (candidate && c && x === c.x && y === c.y && zoom === c.zoom && width === r.width && height === r.height && constantsMatch(c) && equalRect(candidate.viewport, view.rect)) { scheduleFrame(); return; }
+        queue({ version: 1, galaxy: activeGalaxy, revision: 0, observedAt: 0, camera: values, viewport: view.rect,
+          ...(width !== view.rect.width || height !== view.rect.height ? { projection: { width, height } } : {}) });
       } finally { observing = false; }
     }
     function moduleShape(value) {
@@ -256,7 +296,7 @@
             unhook(); cancelFrame(); invalidate('viewport-unavailable'); cachedViewport = null;
           } else {
             cachedViewport = view;
-            if (candidate && (!equalRect(candidate.viewport, view.rect) || !constantsMatch(candidate.camera))) invalidate('camera-observation-pending');
+            if (candidate && (!equalRect(candidate.viewport, view.rect) || !matchesProjection(view, candidate.projection || candidate.viewport) || !constantsMatch(candidate.camera))) invalidate('camera-observation-pending');
             if (candidate && !pending && now() - lastEmittedAt >= LIMITS.heartbeatMs) queue({ ...candidate, camera: { ...candidate.camera }, viewport: { ...candidate.viewport } });
           }
         }
@@ -283,13 +323,13 @@
     if (typeof realm.requestAnimationFrame !== 'function' || typeof realm.cancelAnimationFrame !== 'function'
       || typeof realm.setTimeout !== 'function' || typeof realm.clearTimeout !== 'function') fail('camera-timing-unavailable');
     else tick();
-    return Object.freeze({ ready, status: () => ({ installed, observed: !!candidate, reason, stopped }),
+    return Object.freeze({ ready, status: () => ({ installed, observed: !!candidate, reason, stopped, geometry }),
       stop() { if (stopped) return; stopped = true; if (timer !== null) realm.clearTimeout(timer); timer = null; cancelFrame(); unhook(); invalidate('stopped'); resolveReady(false); },
     });
   }
   function create({ realm = globalThis, document = realm.document, addElement, observerSource, now = Date.now, getScope } = {}) {
     const eventName = 'oldlight-reinforcement-map-bootstrap', pendingAttribute = 'data-oldlight-map-pending';
-    let stopped = false, failed = false, installed = false, reason = 'awaiting-native-camera', current = null, currentCanvas = null;
+    let stopped = false, failed = false, installed = false, reason = 'awaiting-native-camera', current = null, currentCanvas = null, geometry = null;
     let container = null, port = null, ackTimer = null, watcher = null, lastRevision = 0, boundScope = '';
     let channel;
     try { channel = 'oldlight_map_' + realm.crypto.randomUUID().replace(/-/g, ''); } catch (_) { failed = true; reason = 'camera-channel-unavailable'; }
@@ -298,18 +338,20 @@
       if (ackTimer !== null) { realm.clearTimeout(ackTimer); ackTimer = null; }
       container?.removeEventListener(eventName, handshake); container?.remove();
     }
-    function clear(why) { current = null; currentCanvas = null; reason = why; }
+    function clear(why) { current = null; currentCanvas = null; reason = why; geometry = null; }
     function fail(why) { failed = true; installed = false; cleanupBootstrap(); try { port?.postMessage('stop'); } catch (_) {} port?.close(); port = null; clear(why); }
     function receive(event) {
       if (stopped || failed) return;
-      if (typeof event.data === 'string' && event.data.length <= 256) {
+      if (typeof event.data === 'string' && event.data.length <= 512) {
         try {
           const diagnostic = JSON.parse(event.data);
           if (diagnostic.version === 1 && diagnostic.type === 'status' && [
             'native-camera-import-failed', 'native-camera-shape-changed', 'native-camera-unavailable',
             'camera-hook-replaced', 'camera-timing-unavailable', 'awaiting-native-projection',
             'viewport-unavailable', 'game-navigation', 'camera-observation-failed', 'native-viewport-size-mismatch',
-          ].includes(diagnostic.reason)) { clear(diagnostic.reason); return; }
+          ].includes(diagnostic.reason)) { clear(diagnostic.reason);
+            if (diagnostic.reason === 'native-viewport-size-mismatch') geometry = geometryDiagnostic(diagnostic.geometry);
+            return; }
         } catch (_) { /* Snapshot validation below remains authoritative. */ }
       }
       const value = typeof event.data === 'string' ? validateSnapshot(event.data) : null;
@@ -318,8 +360,8 @@
       lastRevision = value.revision;
       try {
         const view = viewport(document);
-        if (!view || !equalRect(value.viewport, view.rect)) { clear('viewport-unavailable'); return; }
-        current = value; currentCanvas = view.canvas; reason = '';
+        if (!view || !equalRect(value.viewport, view.rect) || !matchesProjection(view, value.projection || value.viewport)) { clear('viewport-unavailable'); return; }
+        current = value; currentCanvas = view.canvas; reason = ''; geometry = null;
       } catch (_) { clear('viewport-unavailable'); }
     }
     function handshake(event) {
@@ -333,7 +375,7 @@
       const source = typeof observerSource === 'string'
         ? observerSource + '\nconst api=globalThis.OldLightReinforcementMap;'
         : 'const api=(' + mapFactory.toString() + ')();';
-      const textContent = `(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected)return;target.remove();${source}\nconst channel=${JSON.stringify(channel)},attribute=${JSON.stringify(pendingAttribute)};const pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;const cleanup=()=>{try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();};pipe.port1.addEventListener('message',event=>{if(event.data==='stop')cleanup();});try{handle=api.installPageObserver({onPending:value=>{if(value)target.setAttribute(attribute,JSON.stringify([value.galaxy,value.revision,value.observedAt]));else {target.removeAttribute(attribute);const reason=handle?.status?.().reason;if(ready&&reason)send(JSON.stringify({version:1,type:'status',reason}));}},emit:value=>{const data=JSON.stringify(value);if(ready)send(data);else pending=data;}});target.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);handle.ready?.then(()=>{const reason=handle?.status?.().reason;if(reason)send(JSON.stringify({version:1,type:'status',reason}));});}catch(_){cleanup();}})();`;
+      const textContent = `(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected)return;target.remove();${source}\nconst channel=${JSON.stringify(channel)},attribute=${JSON.stringify(pendingAttribute)};const pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;const cleanup=()=>{try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();};pipe.port1.addEventListener('message',event=>{if(event.data==='stop')cleanup();});try{handle=api.installPageObserver({onPending:value=>{if(value)target.setAttribute(attribute,JSON.stringify([value.galaxy,value.revision,value.observedAt]));else {target.removeAttribute(attribute);const status=handle?.status?.(),reason=status?.reason;if(ready&&reason)send(JSON.stringify({version:1,type:'status',reason,geometry:status.geometry}));}},emit:value=>{const data=JSON.stringify(value);if(ready)send(data);else pending=data;}});target.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);handle.ready?.then(()=>{const status=handle?.status?.(),reason=status?.reason;if(reason)send(JSON.stringify({version:1,type:'status',reason,geometry:status.geometry}));});}catch(_){cleanup();}})();`;
       try {
         parent.appendChild(container);
         ackTimer = realm.setTimeout(() => { ackTimer = null; if (!installed && !stopped) fail('camera-injection-unavailable'); }, 2000);
@@ -352,7 +394,7 @@
         if (container?.getAttribute(pendingAttribute) !== stamp(current)) return null;
         const view = viewport(document);
         if (!view || view.canvas !== currentCanvas || (canvas && canvas !== view.canvas) || !equalRect(view.rect, current.viewport)
-          || (rect && !equalRect(rect, view.rect))) return null;
+          || !matchesProjection(view, current.projection || current.viewport) || (rect && !equalRect(rect, view.rect))) return null;
         return current;
       } catch (_) { return null; }
     }
@@ -386,7 +428,7 @@
         }
         return match;
       },
-      status() { const valid = !!settled(); return { installed, observed: !!current, available: valid, reason: valid ? '' : reason || 'camera-observation-pending' }; },
+      status() { const valid = !!settled(); return { installed, observed: !!current, available: valid, reason: valid ? '' : reason || 'camera-observation-pending', geometry: valid ? null : geometry }; },
       stop() {
         if (stopped) return; stopped = true; cleanupBootstrap();
         try { port?.postMessage('stop'); } catch (_) {}

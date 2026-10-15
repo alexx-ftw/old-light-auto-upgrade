@@ -425,3 +425,92 @@ test('unproject rejects mismatched CSS sizes, backing dimensions, resize and nav
   assert.equal(h.observer.status().reason, 'game-navigation'); assert.equal(h.observer.status().observed, false);
   h.observer.stop();
 });
+
+function fractionalCanvas(h, width = 1000.8, height = 700.8) {
+  Object.assign(h.rect, { width: Math.floor(width * 64) / 64, height: Math.floor(height * 64) / 64 });
+  h.stage.style = { width: `${width}px`, height: `${height}px` };
+  return { width, height };
+}
+test('fractional Pixi logical dimensions survive CSS layout quantization without guessing DPR', async () => {
+  const fixture = require('./fixtures/native-camera.json');
+  const Camera = vm.runInNewContext('(' + fixture.classExpression + ')', {
+    C: { tiltDegrees: 55, distance: 1100, baseFocal: 1000 }, ie: Math.PI / 180, E: 3200,
+  });
+  const h = observerHarness({ module: { J: Camera, Y: new Camera(), et: nativeModule().et } });
+  const size = fractionalCanvas(h); h.start(); await drain();
+  for (const [x,y,zoom] of [[340,-170,.85],[-230,110,1.1]]) {
+    h.mod.Y.visibleWorldBounds(x,y,zoom,size.width,size.height,46); h.frame();
+    assert.equal(h.observer.status().reason, '');
+    const value = h.emitted.at(-1); assert.deepEqual(value.projection,size);
+    const system = { q: 4, r: -2 }, world = h.mod.et(system.q,system.r);
+    const expected = Camera.prototype.project.call(h.mod.Y,world.x,world.y,x,y,zoom,size.width,size.height);
+    const actual = M.projectPoint(system,value);
+    assert.ok(Math.abs(actual.x-(h.rect.left+expected.x*h.rect.width/size.width))<1e-9);
+    assert.ok(Math.abs(actual.y-(h.rect.top+expected.y*h.rect.height/size.height))<1e-9);
+    assert.deepEqual(M.unprojectHex(actual,value),system);
+    assert.deepEqual(M.validateSnapshot(JSON.stringify(value)),value);
+  }
+  assert.equal(h.emitted.length,2); h.observer.stop();
+});
+
+test('fractional correction requires explicit matching CSS sizes and rejects scale or backing pixels', async () => {
+  for (const mutate of [
+    h => { h.stage.style = {}; },
+    h => { h.stage.style.width = '1001px'; },
+    h => { h.stage.style.height = 'calc(700px + .8px)'; },
+    h => { h.rect.width -= 0.25; },
+    h => { h.rect.height /= 2; },
+  ]) {
+    const h=observerHarness(), size=fractionalCanvas(h); mutate(h); h.start(); await drain();
+    h.mod.Y.unproject(1,2,0,0,1,size.width,size.height); h.frame();
+    assert.equal(h.observer.status().reason,'native-viewport-size-mismatch');
+    assert.equal(h.emitted.length,0); h.observer.stop();
+  }
+  const h=observerHarness(),size=fractionalCanvas(h); h.start();await drain();
+  h.mod.Y.unproject(1,2,0,0,1,h.stage.width,h.stage.height);h.frame();
+  assert.equal(h.emitted.length,0);
+  h.mod.Y.unproject(1,2,0,0,1,size.width,size.height);
+  h.stage.style.width='999px';h.frame();assert.equal(h.emitted.length,0);
+  h.stage.style.width=`${size.width}px`;h.mod.Y.unproject(1,2,0,0,1,size.width,size.height);h.frame();
+  assert.equal(h.emitted.length,1);
+  h.stage.style.width='999px';h.tick();assert.equal(h.observer.status().observed,false);
+  h.observer.stop();
+});
+
+test('fractional projection transport is bounded and revalidated at every content-world use', () => {
+  const h=bridgeHarness(), size=fractionalCanvas(h), value=sample(1,{viewport:{...h.rect},projection:size});
+  h.send(value); const system={q:0,r:0};
+  const point=h.map.projectSystem(system,{scope});assert.ok(point);
+  assert.equal(h.map.hitTestSystem(point,[system]),system);
+  h.stage.style.width='999px';assert.equal(h.map.projectSystem(system,{scope}),null);
+  h.stage.style.width=`${size.width}px`;h.send({...value,revision:2});assert.ok(h.map.projectSystem(system,{scope}));
+  for (const projection of [null,{}, {width:NaN,height:size.height},{width:size.width+.25,height:size.height}, {width:2000,height:1400}]) {
+    assert.equal(M.validateSnapshot({...value,projection}),null);
+  }
+  h.map.stop();
+});
+
+
+test('mismatch diagnostics expose only bounded sizes and clear after recovery', async () => {
+  const h=await installed();h.mod.Y.unproject(1,2,5,9,1,999,700);h.frame();
+  assert.deepEqual(h.observer.status().geometry,{nativeWidth:999,nativeHeight:700,cssWidth:1000,cssHeight:700});
+  h.project();h.frame();assert.equal(h.observer.status().geometry,null);h.observer.stop();
+  const b=bridgeHarness(), geometry={nativeWidth:999,nativeHeight:700,cssWidth:1000,cssHeight:700};
+  const diagnostic={version:1,type:'status',reason:'native-viewport-size-mismatch',geometry:{...geometry,secret:'not a dimension'}};
+  b.channels[0].port1.postMessage(JSON.stringify(diagnostic));assert.deepEqual(b.map.status().geometry,geometry);
+  b.channels[0].port1.postMessage(JSON.stringify({...diagnostic,geometry:{...geometry,nativeWidth:'1000'}}));
+  assert.equal(b.map.status().geometry,null);
+  b.send(sample());assert.equal(b.map.status().geometry,null);assert.equal(b.map.status().available,true);b.map.stop();
+});
+
+test('fractional native values survive CSSOM serialization using one detached style per document', async () => {
+  const h=observerHarness(),size=fractionalCanvas(h,1091.6363636363635,701.8181818181818);
+  let created=0;
+  const normalize=value=>`${Number.parseFloat(value).toPrecision(6)}px`;
+  h.stage.style={width:normalize(`${size.width}px`),height:normalize(`${size.height}px`)};
+  h.stage.ownerDocument={createElement(tag){assert.equal(tag,'span');created++;const props={};return {style:new Proxy(props,{set(target,key,value){target[key]=normalize(value);return true;}})};}};
+  h.start();await drain();
+  h.mod.Y.unproject(1,2,0,0,1,size.width,size.height);h.frame();assert.equal(h.emitted.length,1);
+  h.mod.Y.unproject(1,2,10,20,.8,size.width,size.height);h.frame();assert.equal(h.emitted.length,2);
+  assert.equal(created,1);h.observer.stop();
+});

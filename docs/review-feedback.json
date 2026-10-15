@@ -2769,6 +2769,87 @@
         "Separar aserción CSS y geometría simulada de píxeles reales.",
         "Comprobar ausencia de cambios en automatización, rutas, permisos y sincronización."
       ]
+    },
+    {
+      "id": "reinforcement-fractional-native-viewport",
+      "feedback": "Captura native-viewport-size-mismatch con esquema visible; comparación exacta rechaza redondeo fraccionario válido y texto confunde esquema con flechas principales.",
+      "beforeFail": {
+        "revision": "4a24e7e84c4a70dc40c3f9be198820b5338c36b2",
+        "command": "Copiar tests candidatos y fixture a copia aislada del módulo base; node --test --test-name-pattern='fractional' tests/reinforcement-map.test.cjs",
+        "observedFailure": "0/3 pasan: primer caso reproduce native-viewport-size-mismatch sobre geometría fraccionaria corroborada; otros dos comprueban contratos nuevos. Panel base falla su nuevo caso de claridad.",
+        "evidence": "docs/1.17.6-camera-viewport-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-map.test.cjs",
+          "name": "fractional Pixi logical dimensions survive CSS layout quantization without guessing DPR"
+        },
+        {
+          "file": "tests/reinforcement-map.test.cjs",
+          "name": "fractional correction requires explicit matching CSS sizes and rejects scale or backing pixels"
+        },
+        {
+          "file": "tests/reinforcement-map.test.cjs",
+          "name": "fractional projection transport is bounded and revalidated at every content-world use"
+        },
+        {
+          "file": "tests/reinforcement-map.test.cjs",
+          "name": "mismatch diagnostics expose only bounded sizes and clear after recovery"
+        },
+        {
+          "file": "tests/reinforcement-map.test.cjs",
+          "name": "fractional native values survive CSSOM serialization using one detached style per document"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "camera mismatch distinguishes static schematic from hidden main-map arrows and recovers hint"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Dimensiones fraccionarias Pixi con rectángulo CSS cuantizado.",
+          "expected": "Corroborar inline y conservar medidas nativas separadas para proyección e inversa.",
+          "regression": {
+            "file": "tests/reinforcement-map.test.cjs",
+            "name": "fractional Pixi logical dimensions survive CSS layout quantization without guessing DPR"
+          }
+        },
+        {
+          "scenario": "Backing pixels o tamaños mayores/sin corroboración.",
+          "expected": "Rechazar sin inferir DPR ni permitir flechas incorrectas.",
+          "regression": {
+            "file": "tests/reinforcement-map.test.cjs",
+            "name": "fractional correction requires explicit matching CSS sizes and rejects scale or backing pixels"
+          }
+        },
+        {
+          "scenario": "Mutación de tamaño tras transporte.",
+          "expected": "Revalidar y no usar geometría obsoleta.",
+          "regression": {
+            "file": "tests/reinforcement-map.test.cjs",
+            "name": "fractional projection transport is bounded and revalidated at every content-world use"
+          }
+        },
+        {
+          "scenario": "Aviso persiste o cámara recupera.",
+          "expected": "Mostrar solo medidas acotadas, limpiar diagnóstico al recuperar y distinguir esquema estático.",
+          "regression": {
+            "file": "tests/reinforcement-map.test.cjs",
+            "name": "mismatch diagnostics expose only bounded sizes and clear after recovery"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Camoufox render y sesión real Brave/Violentmonkey/Drive",
+          "reason": "Launcher bloqueado antes de ejecución; dimensiones del dispositivo de la captura desconocidas."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Contrastar fórmula Pixi real, cuantización simulada, límite y serialización CSSOM; evitar atribuir causa exacta sin medidas.",
+        "Probar forward/inverse, hot path, cambios CSS entre observación/publicación y uso, transporte inválido y recuperación.",
+        "Revisar mensajes visibles y medidas diagnósticas sin nombres/coordenadas/secretos; confirmar que no cambian órdenes, permisos ni Drive."
+      ]
     }
   ]
 }
