@@ -11,11 +11,11 @@ const observer = require('../docs/empire-observer.js');
 const root = path.join(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'old-light-auto-upgrade.user.js'), 'utf8');
 
-test('early observation retains content isolation and only the specifically approved extra grant', () => {
+test('early observation retains content isolation and only the approved observer and update-installer grants', () => {
   const meta = fs.readFileSync(path.join(root, 'old-light-auto-upgrade.meta.js'), 'utf8');
   for (const text of [source, meta]) {
     assert.match(text, /@run-at\s+document-start/); assert.match(text, /@inject-into\s+content/);
-    assert.deepEqual([...text.matchAll(/^\/\/ @grant\s+(\S+)/gm)].map(x=>x[1]), ['GM_xmlhttpRequest','GM_getValue','GM_setValue','GM.setValue','GM_addElement']);
+    assert.deepEqual([...text.matchAll(/^\/\/ @grant\s+(\S+)/gm)].map(x=>x[1]), ['GM_xmlhttpRequest','GM_getValue','GM_setValue','GM.setValue','GM_openInTab','GM_addElement']);
     assert.doesNotMatch(text, /@grant\s+unsafeWindow/);
   }
 });

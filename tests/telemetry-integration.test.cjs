@@ -58,7 +58,7 @@ test('telemetry released integration contains no destination, token, network or 
   assert.match(factory, /destination: null, transport: null/);
   assert.doesNotMatch(factory, /https?:|phc_|api_key|projectToken|GM_getValue|GM_setValue|localStorage|readConsent|writeConsent|fetch/);
   const metadata = source.slice(0, source.indexOf('// ==/UserScript=='));
-  assert.deepEqual([...metadata.matchAll(/^\/\/ @connect\s+(.*)$/gm)].map(match => match[1]), ['api.telegram.org']);
+  assert.deepEqual([...metadata.matchAll(/^\/\/ @connect\s+(.*)$/gm)].map(match => match[1]), ['api.telegram.org', 'raw.githubusercontent.com']);
 });
 
 test('telemetry public installation remains inert despite local opt-in and attempted remote toggle', async () => {

@@ -244,10 +244,10 @@ test('empire transport: global activation, local names and runtime alone create 
   assert.equal(cloud.writes(), writes);
   assert.equal(a.snapshot().empire.config.enabled, true);
   assert.doesNotMatch(JSON.stringify([...cloud.files.values()]), /private-renamed-system|private-runtime-change|111222333/);
-  // Sync adds no grant beyond the separately approved 1.14.1 observer fix.
+  // Sync adds no grant. The observer and update-installer permissions are separately approved.
   const metadata = source.slice(0, source.indexOf('// ==/UserScript=='));
   assert.deepEqual([...metadata.matchAll(/^\/\/ @grant\s+(\S+)/gm)].map(match => match[1]),
-    ['GM_xmlhttpRequest', 'GM_getValue', 'GM_setValue', 'GM.setValue', 'GM_addElement']);
+    ['GM_xmlhttpRequest', 'GM_getValue', 'GM_setValue', 'GM.setValue', 'GM_openInTab', 'GM_addElement']);
 });
 
 test('empire transport: an offline journal survives reload and combines with a remote role edit', async () => {

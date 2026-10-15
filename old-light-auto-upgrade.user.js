@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.3
+// @version      1.17.5
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -14,8 +14,10 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM.setValue
+// @grant        GM_openInTab
 // @grant        GM_addElement
 // @connect      api.telegram.org
+// @connect      raw.githubusercontent.com
 // @noframes
 // ==/UserScript==
 
@@ -4969,6 +4971,105 @@ return Object.freeze({create});
 (() => {
   'use strict';
 
+  // BEGIN PRIVATE UPDATE CHECKER
+  // Metadata is data only. The only executable download is opened in the manager.
+  function createUpdateChecker(options) {
+    const META_URL = 'https://raw.githubusercontent.com/alexx-ftw/old-light-auto-upgrade/main/old-light-auto-upgrade.meta.js';
+    const INSTALL_URL = 'https://raw.githubusercontent.com/alexx-ftw/old-light-auto-upgrade/main/old-light-auto-upgrade.user.js';
+    const MARKER = 'old-light-helper:update-installer-offered:v1';
+    const versionParts = value => typeof value === 'string' && /^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/.test(value)
+      ? value.split('.').map(Number) : null;
+    function newer(a, b) {
+      const left = versionParts(a), right = versionParts(b);
+      if (!left || !right) return false;
+      for (let i = 0; i < 3; i++) if (left[i] !== right[i]) return left[i] > right[i];
+      return false;
+    }
+    function parseMetadata(text) {
+      if (typeof text !== 'string' || text.length > 16384 || !text.startsWith('// ==UserScript==\n')) return null;
+      const lines = text.trimEnd().split(/\r?\n/);
+      if (lines.at(-1) !== '// ==/UserScript==' || lines.slice(1, -1).some(line => !line.startsWith('//'))) return null;
+      const fields = new Map();
+      for (const line of lines.slice(1, -1)) {
+        const match = /^\/\/\s+@(name|namespace|version|updateURL|downloadURL)\s+(.+?)\s*$/.exec(line);
+        if (!match) continue;
+        if (fields.has(match[1])) return null;
+        fields.set(match[1], match[2]);
+      }
+      if (fields.get('name') !== 'Old Light Auto Upgrade' || fields.get('namespace') !== 'old-light-auto-upgrade'
+        || fields.get('updateURL') !== META_URL || fields.get('downloadURL') !== INSTALL_URL
+        || !versionParts(fields.get('version'))) return null;
+      return fields.get('version');
+    }
+    let started = false, available = null, busy = false, lastPhase = 'checking';
+    const status = (phase, version = available) => {
+      lastPhase = phase; options.status({ phase, version, current: options.current, busy });
+    };
+    function metadata() {
+      return new Promise((resolve, reject) => {
+        let settled = false, request;
+        const finish = (error, value) => {
+          if (settled) return;
+          settled = true; options.clearTimeout(timer);
+          if (error) reject(error); else resolve(value);
+        };
+        const timer = options.setTimeout(() => { finish(new Error('timeout')); try { request?.abort?.(); } catch {} }, 10000);
+        try {
+          request = options.request({ method: 'GET', url: META_URL, anonymous: true, timeout: 8000,
+            headers: { 'Cache-Control': 'no-cache' }, responseType: 'text',
+            onload: response => {
+              const version = response?.status === 200 && response.finalUrl === META_URL ? parseMetadata(response.responseText) : null;
+              finish(version ? null : new Error('invalid metadata'), version);
+            },
+            onerror: () => finish(new Error('network')), ontimeout: () => finish(new Error('timeout')),
+            onabort: () => finish(new Error('aborted')) });
+        } catch (error) { finish(error); }
+      });
+    }
+    async function openInstaller(automatic = true) {
+      if (!available || typeof options.open !== 'function') return status('manual');
+      // Origin storage is synchronously visible to the next Web Lock owner.
+      // GM_getValue is deliberately avoided: managers may cache it per tab.
+      // Only a version is stored here; the page can suppress an offer but cannot
+      // supply an executable URL or change the fixed installer destination.
+      status('opening');
+      if (automatic) await options.write(MARKER, available);
+      // Explicit manual retries do not mutate the automatic-offer marker or
+      // race its lock owner, and remain possible when storage is unavailable.
+      const tab = await options.open(INSTALL_URL, { active: true, insert: true, setParent: true });
+      if (!tab) return status('manual');
+      status('confirm');
+    }
+    async function start() {
+      if (started) return;
+      started = true; busy = true; status('checking');
+      try {
+        const remote = await metadata();
+        if (!newer(remote, options.current)) return status('current', null);
+        available = remote; status('available');
+        // Web Locks prevent two same-origin tabs from offering the same version.
+        // Fail closed when the browser cannot provide cross-tab serialization.
+        if (typeof options.lock !== 'function') return status('manual');
+        await options.lock('old-light-helper:update-installer:v1', { ifAvailable: true }, async lock => {
+          if (!lock) return status('available');
+          const previous = await options.read(MARKER, null);
+          if (previous != null && !versionParts(previous)) return status('manual');
+          if (previous === remote || newer(previous, remote)) return status('offered');
+          await openInstaller();
+        });
+      } catch { status(available ? 'manual' : 'unavailable'); }
+      finally { busy = false; status(lastPhase); }
+    }
+    async function manual() {
+      if (!available || busy) return;
+      busy = true;
+      try { await openInstaller(false); } catch { status('manual'); }
+      finally { busy = false; status(lastPhase); }
+    }
+    return Object.freeze({ start, manual, parseMetadata, newer });
+  }
+  // END PRIVATE UPDATE CHECKER
+
   function startOldLightHelper() {
 
   // Usa los controles normales del juego, también cuando la vista estrecha
@@ -4978,7 +5079,7 @@ return Object.freeze({create});
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.3';
+  const SCRIPT_VERSION = '1.17.5';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -5060,6 +5161,38 @@ return Object.freeze({create});
   const observeGameEvents = createGameEventObserver(emitEvent);
   let host;
   let ui;
+  let updateState = { phase: 'checking', current: SCRIPT_VERSION, version: null };
+  function renderUpdateStatus() {
+    const badge = host?.shadowRoot?.querySelector('[data-field="script-version"]');
+    const button = host?.shadowRoot?.querySelector('[data-action="update-installer"]');
+    const messages = {
+      opening: 'Abriendo el instalador…',
+      checking: 'Comprobando nuevas versiones…', current: 'No se detectó una versión más reciente.',
+      unavailable: 'No se pudo comprobar la actualización. Se reintentará al recargar.',
+      available: 'Hay una versión nueva disponible.', offered: 'Ya se ofreció el instalador de esta versión.',
+      confirm: 'Instalador abierto: confirma en Violentmonkey y recarga el juego.',
+      manual: 'Abre el instalador para revisar y confirmar la actualización.'
+    };
+    const detail = `Versión en ejecución: ${SCRIPT_VERSION}. ${messages[updateState.phase] || ''}`
+      + (updateState.version ? ` Disponible: ${updateState.version}.` : '');
+    if (badge) badge.title = detail;
+    if (button) {
+      button.hidden = !updateState.version;
+      button.disabled = Boolean(updateState.busy);
+      button.textContent = updateState.version ? `Instalar ${updateState.version}` : '';
+      button.title = detail;
+      button.setAttribute('aria-label', detail);
+    }
+  }
+  const updateChecker = createUpdateChecker({ current: SCRIPT_VERSION,
+    request: typeof GM_xmlhttpRequest === 'function' ? GM_xmlhttpRequest : null,
+    read: key => localStorage.getItem(key),
+    write: (key, value) => localStorage.setItem(key, value),
+    open: typeof GM_openInTab === 'function' ? GM_openInTab : null,
+    lock: typeof navigator.locks?.request === 'function' ? navigator.locks.request.bind(navigator.locks) : null,
+    setTimeout, clearTimeout,
+    status: value => { updateState = value; renderUpdateStatus(); }
+  });
   let pending = null;
   let upgradeEtaClock = null;
   let unconfirmed = 0;
@@ -6512,6 +6645,15 @@ return Object.freeze({create});
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.5', title: 'Comprobar actualizaciones al recargar', changes: [
+        'Consulta los metadatos oficiales al cargar y abre el instalador una vez por versión nueva.',
+        'Confirma la actualización en Violentmonkey y recarga. La cabecera muestra siempre la versión que se está ejecutando.',
+      ] },
+      { version: '1.17.4', title: 'Más espacio vertical para el panel', changes: [
+        'El panel se extiende hasta el borde inferior disponible, sin el límite fijo de 720 píxeles.',
+        'Conserva el anclaje superior al moverlo y adapta la altura al cambiar el tamaño de la ventana.',
+        'Minimizar sigue dejando una cabecera compacta; restaurar mantiene espacio para navegar y desplazarse.',
+      ] },
       { version: '1.17.3', title: 'Refuerzos coherentes y observación de cámara', changes: [
         'La cámara se observa también desde bounds/hover nativos; el render GPU no necesita llamar a project.',
         'La cola muestra la revisión de la ruta y bloquea sus envíos; disponer de flota no significa tener autorización.',
@@ -6727,7 +6869,7 @@ return Object.freeze({create});
           :host([hidden]), [hidden] { display:none !important; }
           * { box-sizing:border-box; }
           .helper-shell { position:relative; display:flex; flex-direction:column; container-type:inline-size; container-name:helper;
-            width:var(--helper-width,360px); max-width:calc(100vw - 24px); height:min(720px,calc(100dvh - 24px));
+            width:var(--helper-width,360px); max-width:calc(100vw - 24px); height:calc(100dvh - var(--helper-top,12px) - 12px);
             color:var(--ol-text); background:var(--ol-bg); border:1px solid var(--ol-border-strong);
             border-radius:14px; box-shadow:0 12px 48px #0007,0 1px 4px #0005; overflow:hidden; }
           .helper-header { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-shrink:0;
@@ -6918,6 +7060,8 @@ return Object.freeze({create});
           .workspace-density > span { flex:1; }
           .workspace-density button { font-size:11.5px; min-height:34px; padding:6px 8px; }
           .helper-footer { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; min-height:39px; padding:4px 10px; gap:0 8px; color:var(--ol-muted); }
+          .helper-footer [data-action="update-installer"] { grid-column:1 / -1; grid-row:3; min-height:32px; margin-top:4px; }
+          .helper-footer [data-action="update-installer"][hidden] { display:none; }
           .helper-save-state { grid-column:1; overflow-wrap:anywhere; }
           .helper-changelog-shortcut { grid-column:1; justify-self:start; min-height:30px; padding:4px 0; border-color:transparent; background:transparent; color:var(--ol-accent); font-size:11px; }
           .helper-footer .helper-drive-shortcut { grid-column:2; grid-row:1 / span 2; max-width:min(180px,45cqw); }
@@ -7029,7 +7173,7 @@ return Object.freeze({create});
             </div>
             <details class="helper-activity" data-ui-section="automationDetails"><summary>Actividad del helper</summary><p class="helper-status" role="status"></p><small class="helper-last"></small></details>
           </div>
-          <footer class="helper-footer"><span class="helper-save-state">Autoguardado local</span><button type="button" class="helper-changelog-shortcut" data-action="changelog-shortcut" aria-controls="oldlight-changelog" aria-expanded="false" title="Ver las novedades del helper">Changelog</button><button type="button" class="helper-drive-shortcut" data-action="drive-shortcut">Conectar Drive</button></footer>
+          <footer class="helper-footer"><button type="button" data-action="update-installer" hidden></button><span class="helper-save-state">Autoguardado local</span><button type="button" class="helper-changelog-shortcut" data-action="changelog-shortcut" aria-controls="oldlight-changelog" aria-expanded="false" title="Ver las novedades del helper">Changelog</button><button type="button" class="helper-drive-shortcut" data-action="drive-shortcut">Conectar Drive</button></footer>
           <button type="button" class="helper-resize" data-action="helper-resize" role="separator" aria-orientation="vertical" aria-label="Ajustar ancho del helper" aria-valuemin="300" aria-valuemax="560" aria-valuenow="360" title="Arrastra hacia la izquierda para ampliar. Usa las flechas para ajustar; doble clic para restablecer."></button>
           <span class="sr-only" data-field="reorder-status" role="status" aria-live="polite"></span>
         </section>`;
@@ -7316,6 +7460,8 @@ return Object.freeze({create});
       installPresentationPreferences(shadow);
       installHelperWorkspace(shadow);
       installHelperChangelog(shadow);
+      shadow.querySelector('[data-action="update-installer"]').addEventListener('click', () => { void updateChecker.manual(); });
+      renderUpdateStatus();
       installEmpirePanel(shadow);
       installReinforcementPanel(shadow);
       syncSettingsTabs();
@@ -7787,6 +7933,14 @@ return Object.freeze({create});
     const setStyle = (name, value) => {
       if (host.style.getPropertyValue(name) !== value) host.style.setProperty(name, value);
     };
+    // Grow to the viewport bottom from the chosen top anchor. Keep enough room
+    // for navigation and a usable scroll area when dragging down or restoring.
+    const minHeight = settings.minimized ? ui.section.getBoundingClientRect().height : Math.min(360, innerHeight - 24);
+    const top = settings.panelPosition
+      ? Math.round(Math.max(12, Math.min(settings.panelPosition.y, innerHeight - minHeight - 12))) : 12;
+    if (ui.section.style.getPropertyValue('--helper-top') !== top + 'px') {
+      ui.section.style.setProperty('--helper-top', top + 'px');
+    }
     if (!settings.panelPosition) {
       for (const name of ['left', 'top', 'right', 'bottom']) {
         if (host.style.getPropertyValue(name)) host.style.removeProperty(name);
@@ -7795,7 +7949,7 @@ return Object.freeze({create});
     }
     const rect = ui.section.getBoundingClientRect();
     const x = Math.max(12, Math.min(settings.panelPosition.x, innerWidth - rect.width - 12));
-    const y = Math.max(12, Math.min(settings.panelPosition.y, innerHeight - rect.height - 12));
+    const y = top;
     settings.panelPosition = { x: Math.round(x), y: Math.round(y) };
     setStyle('right', 'auto');
     setStyle('bottom', 'auto');
@@ -18160,6 +18314,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     } catch { /* Retry after game identity/storage recovers. */ }
   }, 1000);
   schedule();
+  void updateChecker.start();
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startOldLightHelper, { once: true });
   else startOldLightHelper();

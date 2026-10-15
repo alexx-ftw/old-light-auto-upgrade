@@ -72,3 +72,11 @@ Reconstruye el recorrido del usuario con código de producción y dependencias r
 No equipares tests verdes con usabilidad ni simulación con sesión real. Trabaja sobre una copia aislada, sin modificar/publicar la candidata ni efectuar acciones reales no autorizadas.
 Entrega hallazgos priorizados con archivos/líneas, pasos o comando, esperado/observado, impacto y cierre; separa hechos, hipótesis, bloqueantes y QA pendiente. Por cada fallo descubierto o comunicado, indica qué hipótesis de revisión falló y qué pregunta/evidencia debe conservarse para futuras revisiones. Cierra con un dictamen limitado al commit y alcance revisados.
 ```
+
+## Lección 1.17.4: altura visible no equivale a límite fijo
+
+Observación: captura con scroll y unos 300 píxeles libres bajo el panel. Hipótesis fallida: 720 píxeles CSS bastan para cualquier viewport. Pregunta al revisor: ¿el anclaje superior y el mínimo utilizable sobreviven a drag/cancelación, resize y restauración? Evidencia requerida: contrato CSS y pruebas de layout productivo; el harness de rectángulos no acredita render. Camino conservado: minimizado compacto y margen inferior. QA pendiente: Camoufox y sesión real, explícita en la matriz 1.17.4.
+
+## Lección 1.17.5: un lock no vuelve fresca una caché del gestor
+
+Observación: el primer borrador del comprobador abría dos instaladores con cachés GM distintas, aunque los callbacks adquirieran Web Lock en serie. Hipótesis fallida: esperar GM.setValue garantiza que GM_getValue en otra pestaña observe la escritura. Pregunta nueva: ¿quién garantiza la frescura de la lectura después del lock, y qué acuse espera realmente la API? Evidencia: implementación oficial y constructor productivo con cachés obsoletas, [revisión 1.17.5](1.17.5-update-review.md). Añadir reentrada durante escritura, doble clic y reintento desde pestaña antigua; el registro no debe retroceder y la degradación manual debe seguir utilizable. Límite: los dobles no acreditan permisos, interceptación del instalador o experiencia real del navegador.

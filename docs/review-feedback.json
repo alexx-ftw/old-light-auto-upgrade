@@ -2692,6 +2692,83 @@
         "Revisar ambos hooks, preservación de descriptor/receiver/argumentos/retorno/excepciones y restauración al detener.",
         "No confundir proyección sintética correcta con cámara disponible en la sesión real; conservar diagnóstico de discrepancia CSS."
       ]
+    },
+    {
+      "id": "helper-vertical-space",
+      "feedback": "Panel con scroll y espacio libre debajo: límite fijo de 720 píxeles CSS.",
+      "beforeFail": {
+        "revision": "6e40e25c0c589deb353f01d8c51f1c673bdce07f",
+        "command": "node --test tests/helper-vertical-space.test.cjs",
+        "observedFailure": "El contrato CSS exige altura disponible; la fuente base conserva height:min(720px,calc(100dvh - 24px)). No es una medición renderizada.",
+        "evidence": "docs/1.17.4-vertical-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/helper-vertical-space.test.cjs",
+          "name": "expanded shell uses available viewport height instead of the fixed 720px ceiling"
+        },
+        {
+          "file": "tests/helper-vertical-space.test.cjs",
+          "name": "saved top anchor fills the tall viewport down to its bottom margin"
+        },
+        {
+          "file": "tests/helper-vertical-space.test.cjs",
+          "name": "default bottom anchored panel clears an old top offset after reset"
+        },
+        {
+          "file": "tests/helper-vertical-space.test.cjs",
+          "name": "low windows clamp the anchor to retain an accessible expanded body"
+        },
+        {
+          "file": "tests/helper-vertical-space.test.cjs",
+          "name": "minimized panel remains movable near bottom and restores with usable content"
+        },
+        {
+          "file": "tests/helper-vertical-space.test.cjs",
+          "name": "moving the top anchor recomputes remaining height and repeated layout is stable"
+        },
+        {
+          "file": "tests/helper-vertical-space.test.cjs",
+          "name": "viewport growth expands content without changing the saved top anchor"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Ventana baja o restauración desde cabecera cerca del fondo.",
+          "expected": "Conservar navegación y área desplazable con anclaje limitado a la altura disponible.",
+          "regression": {
+            "file": "tests/helper-vertical-space.test.cjs",
+            "name": "low windows clamp the anchor to retain an accessible expanded body"
+          }
+        },
+        {
+          "scenario": "Restablecer posición tras anclaje personalizado.",
+          "expected": "Limpiar coordenadas y recuperar márgenes de 12 píxeles.",
+          "regression": {
+            "file": "tests/helper-vertical-space.test.cjs",
+            "name": "default bottom anchored panel clears an old top offset after reset"
+          }
+        },
+        {
+          "scenario": "Crecimiento del viewport.",
+          "expected": "Extender cuerpo sin mover el anclaje superior.",
+          "regression": {
+            "file": "tests/helper-vertical-space.test.cjs",
+            "name": "viewport growth expands content without changing the saved top anchor"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Render Camoufox y sesión real Brave/Violentmonkey/Drive",
+          "reason": "QA visual no ejecutada satisfactoriamente; pruebas offline usan geometría simulada."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Revisar arrastre, cancelación, resize, minimizado/restauración y el orden de lecturas/escrituras de geometría.",
+        "Separar aserción CSS y geometría simulada de píxeles reales.",
+        "Comprobar ausencia de cambios en automatización, rutas, permisos y sincronización."
+      ]
     }
   ]
 }
