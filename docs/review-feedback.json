@@ -2850,6 +2850,75 @@
         "Probar forward/inverse, hot path, cambios CSS entre observación/publicación y uso, transporte inválido y recuperación.",
         "Revisar mensajes visibles y medidas diagnósticas sin nombres/coordenadas/secretos; confirmar que no cambian órdenes, permisos ni Drive."
       ]
+    },
+    {
+      "id": "reinforcement-identical-heartbeat-flicker",
+      "feedback": "The line flickers, reported after 1.17.6. Reproduced unchanged-camera heartbeat invalidation independently of live visual attribution.",
+      "beforeFail": {
+        "revision": "1f7c063ef2496f8a0fa2f47fd99343893ed81d1e",
+        "command": "node --test --test-name-pattern='identical heartbeat' tests/reinforcement-map.test.cjs (candidate test with base module)",
+        "observedFailure": "Before: null projection at heartbeat pending; expected unchanged point. After: five heartbeat queue/frame/delivery cycles retain mapping; actual pan blocks immediately.",
+        "evidence": "docs/1.17.7-route-flicker-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-map.test.cjs",
+          "name": "identical heartbeat keeps projection available before frame and delayed port delivery"
+        },
+        {
+          "file": "tests/reinforcement-flicker-review.test.cjs",
+          "name": "flicker review: route metadata refresh leaves main and schematic SVG nodes intact"
+        },
+        {
+          "file": "tests/reinforcement-flicker-review.test.cjs",
+          "name": "layer review: overlay is the immediate zero-layer canvas sibling before native HUD"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Identical heartbeat pending before RAF or async delivery.",
+          "expected": "Keep only fresh identical geometry, with no timeout extension before delivery.",
+          "regression": {
+            "file": "tests/reinforcement-map.test.cjs",
+            "name": "identical heartbeat keeps projection available before frame and delayed port delivery"
+          }
+        },
+        {
+          "scenario": "Actual native camera movement before delivery.",
+          "expected": "Invalidate immediately for projection and hit tests.",
+          "regression": {
+            "file": "tests/reinforcement-map.test.cjs",
+            "name": "identical heartbeat keeps projection available before frame and delayed port delivery"
+          }
+        },
+        {
+          "scenario": "Counter and scheduling changes with identical route visual geometry.",
+          "expected": "Preserve main and schematic SVG node identity.",
+          "regression": {
+            "file": "tests/reinforcement-flicker-review.test.cjs",
+            "name": "flicker review: route metadata refresh leaves main and schematic SVG nodes intact"
+          }
+        },
+        {
+          "scenario": "Route arrow or Ctrl-drag preview crosses native game chrome.",
+          "expected": "Place the overlay immediately after the canvas and before native HUD at zero layer; never fall back to body top layer.",
+          "regression": {
+            "file": "tests/reinforcement-flicker-review.test.cjs",
+            "name": "layer review: overlay is the immediate zero-layer canvas sibling before native HUD"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Live browser and Brave/Violentmonkey/Drive session",
+          "reason": "Not executed; offline tests cannot establish all causes of user-reported visual flicker."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Review exact geometry identity coverage and stale/order protection.",
+        "Adversarially test delayed old messages, geometry mutations, and invalidation.",
+        "Ensure route metadata does not churn identical SVG, but pause/endpoint changes repaint."
+      ]
     }
   ]
 }

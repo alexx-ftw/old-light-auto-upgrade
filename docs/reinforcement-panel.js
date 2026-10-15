@@ -17,7 +17,7 @@
   const SVG = 'http://www.w3.org/2000/svg';
   const CSS = `
 .oldlight-routes{font:13px/1.4 system-ui,sans-serif;color:#e5eef6;background:#101d29;border:1px solid #415a70;border-radius:9px;padding:10px;max-width:100%;box-sizing:border-box;color-scheme:dark}
-.oldlight-routes *{box-sizing:border-box}.oldlight-routes summary{font-weight:650;cursor:pointer;min-height:28px;padding:3px 0}.oldlight-routes p{margin:7px 0}.oldlight-routes button,.oldlight-routes select,.oldlight-routes input{font:inherit;color:inherit;background:#172b3c;border:1px solid #526b7e;border-radius:6px;min-height:32px;max-width:100%;padding:5px;min-width:0}.oldlight-routes button{cursor:pointer}.oldlight-routes button:disabled{opacity:.5;cursor:default}.oldlight-routes :focus-visible{outline:2px solid #79d7dd;outline-offset:2px}.oldlight-routes [hidden]{display:none!important}.oldlight-route-hint{font-size:11px;color:#b5c6d6}.oldlight-route-error{color:#ffb3a7}.oldlight-route-status{color:#a7d9d6}.oldlight-route-tools{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}.oldlight-route-editor{border-top:1px solid #415a70;margin-top:9px;padding-top:8px}.oldlight-route-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.oldlight-route-fields label{display:grid;gap:3px;min-width:0}.oldlight-route-ship{display:grid;grid-template-columns:minmax(64px,1fr) minmax(90px,1.3fr) minmax(50px,1fr);gap:6px;align-items:center;margin:6px 0}.oldlight-route-ship input{width:100%}.oldlight-route-row{padding:8px 0;border-top:1px solid #30485a}.oldlight-route-row p{overflow-wrap:anywhere}.oldlight-route-map{display:block;width:100%;height:150px;background:#09131e;border-radius:6px;margin:8px 0}.oldlight-route-map text{fill:#c9dce7;font:10px system-ui,sans-serif}.oldlight-route-map circle{fill:#b7e9ee;stroke:#0c1721;stroke-width:2}.oldlight-route-map line,.oldlight-route-overlay line{stroke:#6be1d3;stroke-width:2;vector-effect:non-scaling-stroke}.oldlight-route-map line[data-paused=true],.oldlight-route-overlay line[data-paused=true]{stroke:#adb6c4;stroke-dasharray:5 4}.oldlight-route-overlay{position:fixed;pointer-events:none;z-index:140;overflow:hidden}.oldlight-route-overlay *{pointer-events:none}.oldlight-route-overlay line[data-preview=true]{stroke-dasharray:4 4}.oldlight-route-row[data-paused=true]{opacity:.8}
+.oldlight-routes *{box-sizing:border-box}.oldlight-routes summary{font-weight:650;cursor:pointer;min-height:28px;padding:3px 0}.oldlight-routes p{margin:7px 0}.oldlight-routes button,.oldlight-routes select,.oldlight-routes input{font:inherit;color:inherit;background:#172b3c;border:1px solid #526b7e;border-radius:6px;min-height:32px;max-width:100%;padding:5px;min-width:0}.oldlight-routes button{cursor:pointer}.oldlight-routes button:disabled{opacity:.5;cursor:default}.oldlight-routes :focus-visible{outline:2px solid #79d7dd;outline-offset:2px}.oldlight-routes [hidden]{display:none!important}.oldlight-route-hint{font-size:11px;color:#b5c6d6}.oldlight-route-error{color:#ffb3a7}.oldlight-route-status{color:#a7d9d6}.oldlight-route-tools{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}.oldlight-route-editor{border-top:1px solid #415a70;margin-top:9px;padding-top:8px}.oldlight-route-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.oldlight-route-fields label{display:grid;gap:3px;min-width:0}.oldlight-route-ship{display:grid;grid-template-columns:minmax(64px,1fr) minmax(90px,1.3fr) minmax(50px,1fr);gap:6px;align-items:center;margin:6px 0}.oldlight-route-ship input{width:100%}.oldlight-route-row{padding:8px 0;border-top:1px solid #30485a}.oldlight-route-row p{overflow-wrap:anywhere}.oldlight-route-map{display:block;width:100%;height:150px;background:#09131e;border-radius:6px;margin:8px 0}.oldlight-route-map text{fill:#c9dce7;font:10px system-ui,sans-serif}.oldlight-route-map circle{fill:#b7e9ee;stroke:#0c1721;stroke-width:2}.oldlight-route-map line,.oldlight-route-overlay line{stroke:#6be1d3;stroke-width:2;vector-effect:non-scaling-stroke}.oldlight-route-map line[data-paused=true],.oldlight-route-overlay line[data-paused=true]{stroke:#adb6c4;stroke-dasharray:5 4}.oldlight-route-overlay{position:fixed;pointer-events:none;z-index:0;overflow:hidden}.oldlight-route-overlay *{pointer-events:none}.oldlight-route-overlay line[data-preview=true]{stroke-dasharray:4 4}.oldlight-route-row[data-paused=true]{opacity:.8}
 @media(max-width:420px){.oldlight-route-fields{grid-template-columns:minmax(0,1fr)}.oldlight-routes button,.oldlight-routes select,.oldlight-routes input{min-height:40px}.oldlight-route-ship{grid-template-columns:minmax(60px,1fr) minmax(90px,1.5fr) minmax(50px,1fr)}}`;
   let sequence = 0;
   const finite = n => typeof n === 'number' && Number.isFinite(n);
@@ -184,11 +184,22 @@
       const point = typeof options.projectSystem === 'function' ? given : anchors.get(system.id);
       return pointValid(point) ? { x: point.x - rect.left, y: point.y - rect.top, visible: point.visible } : null;
     }
+    function placeOverlay(canvas) {
+      const parent = canvas?.parentNode;
+      if (!canvas || canvas.isConnected === false || !parent || typeof parent.insertBefore !== 'function') return false;
+      // Native #stage is unpositioned; its later #hud sibling is absolute/auto.
+      // At z-index 0, DOM order keeps us above the canvas and below even auto
+      // HUD layers, not just positive-z panels. Reattach after native remounts.
+      try {
+        if (overlay.parentNode !== parent || canvas.nextSibling !== overlay) parent.insertBefore(overlay, canvas.nextSibling);
+        return true;
+      } catch (_) { return false; }
+    }
     function drawOverlay() {
       if (!overlay || destroyed) return;
       observeScope(getScope());
       const canvas = stage(), rect = canvas?.getBoundingClientRect?.();
-      if ((!current() && !gesture) || blocked() || !rect || rect.width <= 0 || rect.height <= 0 || canvas.hidden) { hideSVG(overlay, true); return; }
+      if ((!current() && !gesture) || blocked() || !rect || rect.width <= 0 || rect.height <= 0 || canvas.hidden || !placeOverlay(canvas)) { hideSVG(overlay, true); return; }
       const at = now();
       if (!mapCache || mapCache.scope !== scope || at < mapCache.at || at - mapCache.at >= 500) {
         const items = routes();
@@ -202,7 +213,10 @@
       // A screen-space gesture preview expresses intent, not a verified route.
       // Persisted routes above continue to require a current camera projection.
       if (gesture && gesture.scope === scope) segments.push({ route: { id: 'draft' }, from: { x: gesture.sourceX - rect.left, y: gesture.sourceY - rect.top }, to: { x: gesture.x - rect.left, y: gesture.y - rect.top }, preview: true });
-      const signature = JSON.stringify([rect.left, rect.top, rect.width, rect.height, segments]);
+      // Runtime counters and scheduling timestamps do not change a line. Keep
+      // its SVG nodes when the actual endpoints/style are unchanged.
+      const signature = JSON.stringify([rect.left, rect.top, rect.width, rect.height,
+        segments.map(s => [s.route.id, s.route.paused, s.from, s.to, !!s.preview])]);
       hideSVG(overlay, !segments.length);
       if (signature === overlaySignature) return;
       overlaySignature = signature; overlay.replaceChildren();
@@ -517,11 +531,10 @@
       Object.assign(gestureNotice.style, { position: 'fixed', bottom: '18px', left: '50%', transform: 'translateX(-50%)', maxWidth: 'min(600px,90vw)', padding: '10px 14px', background: '#101d29', color: '#e5eef6', border: '1px solid #79d7dd', borderRadius: '8px', zIndex: '2147483646', pointerEvents: 'none', font: '13px/1.4 system-ui,sans-serif' });
       (document.body || container).append(gestureNotice);
       overlay = svg('svg'); overlay.classList?.add('oldlight-route-overlay'); attr(overlay, 'aria-hidden', 'true');
-      // The panel can live in the Helper's ShadowRoot while this overlay is in
-      // document.body. Inline geometry/paint and pointer exclusion must therefore
-      // work without any stylesheet crossing that shadow boundary.
-      Object.assign(overlay.style, { position: 'fixed', pointerEvents: 'none', zIndex: '140', overflow: 'hidden' });
-      attr(overlay, 'pointer-events', 'none'); hideSVG(overlay, true); (document.body || container).append(overlay);
+      // The panel may live in Helper's ShadowRoot, but the arrow belongs beside
+      // the native canvas, below its UI. Inline paint crosses no shadow boundary.
+      Object.assign(overlay.style, { position: 'fixed', pointerEvents: 'none', zIndex: '0', overflow: 'hidden' });
+      attr(overlay, 'pointer-events', 'none'); hideSVG(overlay, true); placeOverlay(stage());
       installMap(); render(); return root;
     }
     function destroy() {

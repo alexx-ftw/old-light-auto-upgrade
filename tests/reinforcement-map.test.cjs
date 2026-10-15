@@ -514,3 +514,23 @@ test('fractional native values survive CSSOM serialization using one detached st
   h.mod.Y.unproject(1,2,10,20,.8,size.width,size.height);h.frame();assert.equal(h.emitted.length,2);
   assert.equal(created,1);h.observer.stop();
 });
+
+test('identical heartbeat keeps projection available before frame and delayed port delivery', async () => {
+  const b = bridgeHarness(), queued = [];
+  const h = await installed({ onPending: value => b.pending(value), emit: value => queued.push(value) });
+  h.project(); h.frame(); b.deliver(queued.shift());
+  const system = { id: 'home', q: 0, r: 0 }, point = b.map.projectSystem(system, { scope });
+  assert.ok(point);
+  for (let n = 0; n < 5; n++) {
+    h.tick(500); b.advance(500);
+    assert.deepEqual(b.map.projectSystem(system, { scope }), point, 'heartbeat pending must not blank unchanged geometry');
+    assert.equal(b.map.hitTestSystem(point, [system]), system);
+    h.frame();
+    assert.deepEqual(b.map.projectSystem(system, { scope }), point, 'queued port message must not blank unchanged geometry');
+    b.deliver(queued.shift());
+  }
+  h.project(100); assert.equal(b.map.projectSystem(system, { scope }), null);
+  assert.equal(b.map.hitTestSystem(point, [system]), null);
+  h.frame(); b.deliver(queued.shift()); assert.ok(b.map.projectSystem(system, { scope }));
+  h.observer.stop(); b.map.stop();
+});

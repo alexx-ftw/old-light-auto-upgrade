@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.6
+// @version      1.17.7
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -660,7 +660,15 @@ return {create};
   const galaxyAt = realm => realm.location?.origin === 'https://oldlight.io'
     ? /^\/game\/galaxy\/([A-Za-z0-9_-]{1,64})(?:\/|$)/.exec(realm.location.pathname)?.[1] || '' : '';
   const equalRect = (a, b) => !!a && !!b && a.left === b.left && a.top === b.top && a.width === b.width && a.height === b.height;
-  const stamp = value => JSON.stringify([value.galaxy, value.revision, value.observedAt]);
+  // Transport revision/time establish ordering and freshness, not geometry.
+  // Identical heartbeats must not revoke a still-fresh projection while their
+  // frame and MessagePort delivery are pending. Every mapping input remains in
+  // this exact identity, so actual camera changes still revoke synchronously.
+  const stamp = value => {
+    const c = value.camera, v = value.viewport, p = value.projection || v;
+    return JSON.stringify([value.galaxy, c.x, c.y, c.zoom, c.sinTilt, c.cosTilt,
+      c.L, c.baseFocal, v.left, v.top, v.width, v.height, p.width, p.height]);
+  };
   function rectValue(value) {
     if (!value || !bounded(value.left, 100000) || !bounded(value.top, 100000)
       || !finite(value.width) || value.width <= 0 || value.width > 100000
@@ -1018,7 +1026,7 @@ return {create};
       const source = typeof observerSource === 'string'
         ? observerSource + '\nconst api=globalThis.OldLightReinforcementMap;'
         : 'const api=(' + mapFactory.toString() + ')();';
-      const textContent = `(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected)return;target.remove();${source}\nconst channel=${JSON.stringify(channel)},attribute=${JSON.stringify(pendingAttribute)};const pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;const cleanup=()=>{try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();};pipe.port1.addEventListener('message',event=>{if(event.data==='stop')cleanup();});try{handle=api.installPageObserver({onPending:value=>{if(value)target.setAttribute(attribute,JSON.stringify([value.galaxy,value.revision,value.observedAt]));else {target.removeAttribute(attribute);const status=handle?.status?.(),reason=status?.reason;if(ready&&reason)send(JSON.stringify({version:1,type:'status',reason,geometry:status.geometry}));}},emit:value=>{const data=JSON.stringify(value);if(ready)send(data);else pending=data;}});target.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);handle.ready?.then(()=>{const status=handle?.status?.(),reason=status?.reason;if(reason)send(JSON.stringify({version:1,type:'status',reason,geometry:status.geometry}));});}catch(_){cleanup();}})();`;
+      const textContent = `(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected)return;target.remove();${source}\nconst channel=${JSON.stringify(channel)},attribute=${JSON.stringify(pendingAttribute)},stamp=${stamp.toString()};const pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;const cleanup=()=>{try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();};pipe.port1.addEventListener('message',event=>{if(event.data==='stop')cleanup();});try{handle=api.installPageObserver({onPending:value=>{if(value)target.setAttribute(attribute,stamp(value));else {target.removeAttribute(attribute);const status=handle?.status?.(),reason=status?.reason;if(ready&&reason)send(JSON.stringify({version:1,type:'status',reason,geometry:status.geometry}));}},emit:value=>{const data=JSON.stringify(value);if(ready)send(data);else pending=data;}});target.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);handle.ready?.then(()=>{const status=handle?.status?.(),reason=status?.reason;if(reason)send(JSON.stringify({version:1,type:'status',reason,geometry:status.geometry}));});}catch(_){cleanup();}})();`;
       try {
         parent.appendChild(container);
         ackTimer = realm.setTimeout(() => { ackTimer = null; if (!installed && !stopped) fail('camera-injection-unavailable'); }, 2000);
@@ -1101,7 +1109,7 @@ return {create};
   const SVG = 'http://www.w3.org/2000/svg';
   const CSS = `
 .oldlight-routes{font:13px/1.4 system-ui,sans-serif;color:#e5eef6;background:#101d29;border:1px solid #415a70;border-radius:9px;padding:10px;max-width:100%;box-sizing:border-box;color-scheme:dark}
-.oldlight-routes *{box-sizing:border-box}.oldlight-routes summary{font-weight:650;cursor:pointer;min-height:28px;padding:3px 0}.oldlight-routes p{margin:7px 0}.oldlight-routes button,.oldlight-routes select,.oldlight-routes input{font:inherit;color:inherit;background:#172b3c;border:1px solid #526b7e;border-radius:6px;min-height:32px;max-width:100%;padding:5px;min-width:0}.oldlight-routes button{cursor:pointer}.oldlight-routes button:disabled{opacity:.5;cursor:default}.oldlight-routes :focus-visible{outline:2px solid #79d7dd;outline-offset:2px}.oldlight-routes [hidden]{display:none!important}.oldlight-route-hint{font-size:11px;color:#b5c6d6}.oldlight-route-error{color:#ffb3a7}.oldlight-route-status{color:#a7d9d6}.oldlight-route-tools{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}.oldlight-route-editor{border-top:1px solid #415a70;margin-top:9px;padding-top:8px}.oldlight-route-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.oldlight-route-fields label{display:grid;gap:3px;min-width:0}.oldlight-route-ship{display:grid;grid-template-columns:minmax(64px,1fr) minmax(90px,1.3fr) minmax(50px,1fr);gap:6px;align-items:center;margin:6px 0}.oldlight-route-ship input{width:100%}.oldlight-route-row{padding:8px 0;border-top:1px solid #30485a}.oldlight-route-row p{overflow-wrap:anywhere}.oldlight-route-map{display:block;width:100%;height:150px;background:#09131e;border-radius:6px;margin:8px 0}.oldlight-route-map text{fill:#c9dce7;font:10px system-ui,sans-serif}.oldlight-route-map circle{fill:#b7e9ee;stroke:#0c1721;stroke-width:2}.oldlight-route-map line,.oldlight-route-overlay line{stroke:#6be1d3;stroke-width:2;vector-effect:non-scaling-stroke}.oldlight-route-map line[data-paused=true],.oldlight-route-overlay line[data-paused=true]{stroke:#adb6c4;stroke-dasharray:5 4}.oldlight-route-overlay{position:fixed;pointer-events:none;z-index:140;overflow:hidden}.oldlight-route-overlay *{pointer-events:none}.oldlight-route-overlay line[data-preview=true]{stroke-dasharray:4 4}.oldlight-route-row[data-paused=true]{opacity:.8}
+.oldlight-routes *{box-sizing:border-box}.oldlight-routes summary{font-weight:650;cursor:pointer;min-height:28px;padding:3px 0}.oldlight-routes p{margin:7px 0}.oldlight-routes button,.oldlight-routes select,.oldlight-routes input{font:inherit;color:inherit;background:#172b3c;border:1px solid #526b7e;border-radius:6px;min-height:32px;max-width:100%;padding:5px;min-width:0}.oldlight-routes button{cursor:pointer}.oldlight-routes button:disabled{opacity:.5;cursor:default}.oldlight-routes :focus-visible{outline:2px solid #79d7dd;outline-offset:2px}.oldlight-routes [hidden]{display:none!important}.oldlight-route-hint{font-size:11px;color:#b5c6d6}.oldlight-route-error{color:#ffb3a7}.oldlight-route-status{color:#a7d9d6}.oldlight-route-tools{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}.oldlight-route-editor{border-top:1px solid #415a70;margin-top:9px;padding-top:8px}.oldlight-route-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.oldlight-route-fields label{display:grid;gap:3px;min-width:0}.oldlight-route-ship{display:grid;grid-template-columns:minmax(64px,1fr) minmax(90px,1.3fr) minmax(50px,1fr);gap:6px;align-items:center;margin:6px 0}.oldlight-route-ship input{width:100%}.oldlight-route-row{padding:8px 0;border-top:1px solid #30485a}.oldlight-route-row p{overflow-wrap:anywhere}.oldlight-route-map{display:block;width:100%;height:150px;background:#09131e;border-radius:6px;margin:8px 0}.oldlight-route-map text{fill:#c9dce7;font:10px system-ui,sans-serif}.oldlight-route-map circle{fill:#b7e9ee;stroke:#0c1721;stroke-width:2}.oldlight-route-map line,.oldlight-route-overlay line{stroke:#6be1d3;stroke-width:2;vector-effect:non-scaling-stroke}.oldlight-route-map line[data-paused=true],.oldlight-route-overlay line[data-paused=true]{stroke:#adb6c4;stroke-dasharray:5 4}.oldlight-route-overlay{position:fixed;pointer-events:none;z-index:0;overflow:hidden}.oldlight-route-overlay *{pointer-events:none}.oldlight-route-overlay line[data-preview=true]{stroke-dasharray:4 4}.oldlight-route-row[data-paused=true]{opacity:.8}
 @media(max-width:420px){.oldlight-route-fields{grid-template-columns:minmax(0,1fr)}.oldlight-routes button,.oldlight-routes select,.oldlight-routes input{min-height:40px}.oldlight-route-ship{grid-template-columns:minmax(60px,1fr) minmax(90px,1.5fr) minmax(50px,1fr)}}`;
   let sequence = 0;
   const finite = n => typeof n === 'number' && Number.isFinite(n);
@@ -1268,11 +1276,22 @@ return {create};
       const point = typeof options.projectSystem === 'function' ? given : anchors.get(system.id);
       return pointValid(point) ? { x: point.x - rect.left, y: point.y - rect.top, visible: point.visible } : null;
     }
+    function placeOverlay(canvas) {
+      const parent = canvas?.parentNode;
+      if (!canvas || canvas.isConnected === false || !parent || typeof parent.insertBefore !== 'function') return false;
+      // Native #stage is unpositioned; its later #hud sibling is absolute/auto.
+      // At z-index 0, DOM order keeps us above the canvas and below even auto
+      // HUD layers, not just positive-z panels. Reattach after native remounts.
+      try {
+        if (overlay.parentNode !== parent || canvas.nextSibling !== overlay) parent.insertBefore(overlay, canvas.nextSibling);
+        return true;
+      } catch (_) { return false; }
+    }
     function drawOverlay() {
       if (!overlay || destroyed) return;
       observeScope(getScope());
       const canvas = stage(), rect = canvas?.getBoundingClientRect?.();
-      if ((!current() && !gesture) || blocked() || !rect || rect.width <= 0 || rect.height <= 0 || canvas.hidden) { hideSVG(overlay, true); return; }
+      if ((!current() && !gesture) || blocked() || !rect || rect.width <= 0 || rect.height <= 0 || canvas.hidden || !placeOverlay(canvas)) { hideSVG(overlay, true); return; }
       const at = now();
       if (!mapCache || mapCache.scope !== scope || at < mapCache.at || at - mapCache.at >= 500) {
         const items = routes();
@@ -1286,7 +1305,10 @@ return {create};
       // A screen-space gesture preview expresses intent, not a verified route.
       // Persisted routes above continue to require a current camera projection.
       if (gesture && gesture.scope === scope) segments.push({ route: { id: 'draft' }, from: { x: gesture.sourceX - rect.left, y: gesture.sourceY - rect.top }, to: { x: gesture.x - rect.left, y: gesture.y - rect.top }, preview: true });
-      const signature = JSON.stringify([rect.left, rect.top, rect.width, rect.height, segments]);
+      // Runtime counters and scheduling timestamps do not change a line. Keep
+      // its SVG nodes when the actual endpoints/style are unchanged.
+      const signature = JSON.stringify([rect.left, rect.top, rect.width, rect.height,
+        segments.map(s => [s.route.id, s.route.paused, s.from, s.to, !!s.preview])]);
       hideSVG(overlay, !segments.length);
       if (signature === overlaySignature) return;
       overlaySignature = signature; overlay.replaceChildren();
@@ -1601,11 +1623,10 @@ return {create};
       Object.assign(gestureNotice.style, { position: 'fixed', bottom: '18px', left: '50%', transform: 'translateX(-50%)', maxWidth: 'min(600px,90vw)', padding: '10px 14px', background: '#101d29', color: '#e5eef6', border: '1px solid #79d7dd', borderRadius: '8px', zIndex: '2147483646', pointerEvents: 'none', font: '13px/1.4 system-ui,sans-serif' });
       (document.body || container).append(gestureNotice);
       overlay = svg('svg'); overlay.classList?.add('oldlight-route-overlay'); attr(overlay, 'aria-hidden', 'true');
-      // The panel can live in the Helper's ShadowRoot while this overlay is in
-      // document.body. Inline geometry/paint and pointer exclusion must therefore
-      // work without any stylesheet crossing that shadow boundary.
-      Object.assign(overlay.style, { position: 'fixed', pointerEvents: 'none', zIndex: '140', overflow: 'hidden' });
-      attr(overlay, 'pointer-events', 'none'); hideSVG(overlay, true); (document.body || container).append(overlay);
+      // The panel may live in Helper's ShadowRoot, but the arrow belongs beside
+      // the native canvas, below its UI. Inline paint crosses no shadow boundary.
+      Object.assign(overlay.style, { position: 'fixed', pointerEvents: 'none', zIndex: '0', overflow: 'hidden' });
+      attr(overlay, 'pointer-events', 'none'); hideSVG(overlay, true); placeOverlay(stage());
       installMap(); render(); return root;
     }
     function destroy() {
@@ -5126,7 +5147,7 @@ return Object.freeze({create});
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.6';
+  const SCRIPT_VERSION = '1.17.7';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -6692,6 +6713,11 @@ return Object.freeze({create});
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.7', title: 'Flechas sin parpadeo periódico', changes: [
+        'Mantiene la proyección vigente durante los latidos de una cámara idéntica; invalida inmediatamente cualquier cambio real.',
+        'Evita recrear las líneas cuando solo cambian contadores o tiempos de una ruta.',
+        'Sitúa flechas y previsualizaciones encima del mapa pero debajo de la interfaz del juego.',
+      ] },
       { version: '1.17.6', title: 'Cámara y dimensiones fraccionarias', changes: [
         'Reconoce el redondeo subpíxel de Pixi cuando coincide con el tamaño CSS declarado, sin aceptar escalas incompatibles.',
         'Distingue el esquema estático de las flechas del mapa principal y muestra las medidas si la cámara sigue sin coincidir.',

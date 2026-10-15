@@ -17,6 +17,8 @@ class Element {
   setAttribute(key, value) { this.attributes.set(key, String(value)); }
   getAttribute(key) { return this.attributes.get(key) ?? null; }
   append(...nodes) { for (const node of nodes) { node.remove(); node.parentNode = this; this.children.push(node); } }
+  get nextSibling() { const siblings = this.parentNode?.children || []; return siblings[siblings.indexOf(this) + 1] || null; }
+  insertBefore(node, reference) { if (node === reference) return node; node.remove(); const index = reference === null ? this.children.length : this.children.indexOf(reference); if (index < 0) throw new Error('Unknown reference'); node.parentNode = this; this.children.splice(index, 0, node); return node; }
   replaceChildren(...nodes) { for (const child of this.children) child.parentNode = null; this.children = []; this._text = ''; this.append(...nodes); }
   remove() { if (this.parentNode) { const children = this.parentNode.children; children.splice(children.indexOf(this), 1); this.parentNode = null; } }
   addEventListener(type, callback) { if (!this.listeners.has(type)) this.listeners.set(type, new Set()); this.listeners.get(type).add(callback); }
@@ -287,7 +289,7 @@ test('body overlay has its own inline geometry, pointer exclusion and SVG paint 
   const overlay = h.document.querySelector('.oldlight-route-overlay');
   assert.equal(overlay.parentNode, h.document.body); assert.equal(h.container.contains(overlay), false);
   assert.equal(overlay.style.position, 'fixed'); assert.equal(overlay.style.pointerEvents, 'none');
-  assert.equal(overlay.style.zIndex, '140'); assert.equal(overlay.style.overflow, 'hidden'); assert.equal(overlay.getAttribute('pointer-events'), 'none');
+  assert.equal(overlay.style.zIndex, '0'); assert.equal(overlay.style.overflow, 'hidden'); assert.equal(overlay.getAttribute('pointer-events'), 'none');
   const line = overlay.querySelector('line'); assert.equal(line.style.pointerEvents, 'none');
   assert.equal(line.getAttribute('pointer-events'), 'none'); assert.equal(line.getAttribute('stroke'), '#6be1d3');
   assert.equal(line.getAttribute('stroke-width'), '2'); assert.equal(line.getAttribute('vector-effect'), 'non-scaling-stroke');

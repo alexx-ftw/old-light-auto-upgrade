@@ -178,7 +178,8 @@ test('review: transport accepts only current inline geometry and suppresses both
     assert.equal(h.api.status().available, false); h.geo.canvas.style[key] = previous;
     assert.ok(h.api.projectSystem(own));
   }
-  h.pending({ ...value, revision: 2 }); assert.equal(h.api.projectSystem(own), null);
+  // A transport-only heartbeat keeps the exact projection; actual movement revokes it.
+  h.pending({ ...value, revision: 2, camera: { ...value.camera, x: value.camera.x + 1 } }); assert.equal(h.api.projectSystem(own), null);
   h.geo.canvas.style.height = '999px'; h.deliver({ ...value, revision: 2 });
   assert.equal(h.api.status().available, false);
   h.geo.canvas.style.height = `${h.geo.size.height}px`; h.send({ ...value, revision: 3 });

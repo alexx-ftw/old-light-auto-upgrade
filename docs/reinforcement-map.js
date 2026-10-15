@@ -17,7 +17,15 @@
   const galaxyAt = realm => realm.location?.origin === 'https://oldlight.io'
     ? /^\/game\/galaxy\/([A-Za-z0-9_-]{1,64})(?:\/|$)/.exec(realm.location.pathname)?.[1] || '' : '';
   const equalRect = (a, b) => !!a && !!b && a.left === b.left && a.top === b.top && a.width === b.width && a.height === b.height;
-  const stamp = value => JSON.stringify([value.galaxy, value.revision, value.observedAt]);
+  // Transport revision/time establish ordering and freshness, not geometry.
+  // Identical heartbeats must not revoke a still-fresh projection while their
+  // frame and MessagePort delivery are pending. Every mapping input remains in
+  // this exact identity, so actual camera changes still revoke synchronously.
+  const stamp = value => {
+    const c = value.camera, v = value.viewport, p = value.projection || v;
+    return JSON.stringify([value.galaxy, c.x, c.y, c.zoom, c.sinTilt, c.cosTilt,
+      c.L, c.baseFocal, v.left, v.top, v.width, v.height, p.width, p.height]);
+  };
   function rectValue(value) {
     if (!value || !bounded(value.left, 100000) || !bounded(value.top, 100000)
       || !finite(value.width) || value.width <= 0 || value.width > 100000
@@ -375,7 +383,7 @@
       const source = typeof observerSource === 'string'
         ? observerSource + '\nconst api=globalThis.OldLightReinforcementMap;'
         : 'const api=(' + mapFactory.toString() + ')();';
-      const textContent = `(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected)return;target.remove();${source}\nconst channel=${JSON.stringify(channel)},attribute=${JSON.stringify(pendingAttribute)};const pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;const cleanup=()=>{try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();};pipe.port1.addEventListener('message',event=>{if(event.data==='stop')cleanup();});try{handle=api.installPageObserver({onPending:value=>{if(value)target.setAttribute(attribute,JSON.stringify([value.galaxy,value.revision,value.observedAt]));else {target.removeAttribute(attribute);const status=handle?.status?.(),reason=status?.reason;if(ready&&reason)send(JSON.stringify({version:1,type:'status',reason,geometry:status.geometry}));}},emit:value=>{const data=JSON.stringify(value);if(ready)send(data);else pending=data;}});target.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);handle.ready?.then(()=>{const status=handle?.status?.(),reason=status?.reason;if(reason)send(JSON.stringify({version:1,type:'status',reason,geometry:status.geometry}));});}catch(_){cleanup();}})();`;
+      const textContent = `(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected)return;target.remove();${source}\nconst channel=${JSON.stringify(channel)},attribute=${JSON.stringify(pendingAttribute)},stamp=${stamp.toString()};const pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;const cleanup=()=>{try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();};pipe.port1.addEventListener('message',event=>{if(event.data==='stop')cleanup();});try{handle=api.installPageObserver({onPending:value=>{if(value)target.setAttribute(attribute,stamp(value));else {target.removeAttribute(attribute);const status=handle?.status?.(),reason=status?.reason;if(ready&&reason)send(JSON.stringify({version:1,type:'status',reason,geometry:status.geometry}));}},emit:value=>{const data=JSON.stringify(value);if(ready)send(data);else pending=data;}});target.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);handle.ready?.then(()=>{const status=handle?.status?.(),reason=status?.reason;if(reason)send(JSON.stringify({version:1,type:'status',reason,geometry:status.geometry}));});}catch(_){cleanup();}})();`;
       try {
         parent.appendChild(container);
         ackTimer = realm.setTimeout(() => { ackTimer = null; if (!installed && !stopped) fail('camera-injection-unavailable'); }, 2000);
