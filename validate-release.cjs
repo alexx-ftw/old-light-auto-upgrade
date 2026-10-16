@@ -14,6 +14,9 @@ const USER_SCRIPT = 'old-light-auto-upgrade.user.js';
 const META_SCRIPT = 'old-light-auto-upgrade.meta.js';
 const FEEDBACK_MANIFEST = 'docs/review-feedback.json';
 const activeGroups = new Map();
+// Capacity budget for the complete inventory, separate from behavioral deadlines.
+const COMPLETE_SUITE_TIMEOUT_MS = 420000;
+const executionSample = () => ({logicalCpuCount:os.cpus().length,availableParallelism:os.availableParallelism(),hostLoadAverage:os.loadavg()});
 const UNSAFE_ENV = /^(?:QA_|OLD_LIGHT_|NODE_OPTIONS$|NODE_PATH$|NODE_TEST_|NODE_V8_COVERAGE$)/;
 const hash = (value, algorithm = 'sha256') => crypto.createHash(algorithm).update(value).digest('hex');
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -416,11 +419,11 @@ async function main() {
     });
     await stage('tests', async () => {
       assert(testFiles.length > 0, 'No tracked *.test.cjs files were found.');
-      const testStarted = performance.now();
+      const testStarted = performance.now(), executionStart = executionSample();
       const result = await nodeChild(['--test', '--test-concurrency=1', '--test-timeout=120000',
-        `--test-reporter=${path.join(snapshot, path.basename(__filename))}`, ...testFiles.map(name => path.join(snapshot, name))], snapshot, env, 300000);
+        `--test-reporter=${path.join(snapshot, path.basename(__filename))}`, ...testFiles.map(name => path.join(snapshot, name))], snapshot, env, COMPLETE_SUITE_TIMEOUT_MS);
       report.stages.tests = { status: 'running', command: 'node --test --test-concurrency=1 --test-timeout=120000 --test-reporter=<snapshot validator> <all tracked *.test.cjs>',
-        fileCount: testFiles.length, files: testFiles, exitCode: result.exitCode, signal: result.signal, stderr: result.stderr.slice(-4000) };
+        fileCount: testFiles.length, files: testFiles, execution:{fileConcurrency:1,start:executionStart,end:executionSample()}, exitCode: result.exitCode, signal: result.signal, stderr: result.stderr.slice(-4000) };
       try {
         const events = result.stdout.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
         report.stages.tests.failureEvents = events.filter(event => event.type === 'test:fail').slice(0, 20);
@@ -433,7 +436,7 @@ async function main() {
         };
         const completed = events.filter(event => event.type === 'test:summary' && inventoryPath(event.data.file));
         report.stages.tests.progress = {
-          elapsedMs: performance.now() - testStarted, timeoutMs: 300000,
+          elapsedMs: performance.now() - testStarted, timeoutMs: COMPLETE_SUITE_TIMEOUT_MS,
           remainingFiles: testFiles.filter(file => !completed.some(event => inventoryPath(event.data.file) === file)),
           completedFiles: completed.map(({ data }) => ({
             path: inventoryPath(data.file),

@@ -178,3 +178,7 @@ La CI38923441731 de1.17.27 agotó300s sin failureEvents; el reporte descartaba r
 ## Tiempo de arranque distinto de vida del proceso
 
 La revisión9f9af4a detectó elapsedMs reescrito al cerrar y reporter que descartaba stdout/diagnostic. Exigir firstStderrAfterMs,readyAfterMs youtcomeAtMs inmutables, timeout separado de cleanup, resumen de campos fijos sin secretos y ambos órdenes en runners nuevos sin calentar navegador para ocultar el fallo. No confundir DBus stderr con causa, primer arranque con escena específica, ni un ensayo verde con resolución. Ver [evidencia y límites](browser-startup-timing-validation.md).
+
+## Capacidad del inventario frente a deadlines de comportamiento
+
+La CI38927422752 de e48db1f localizó corte300s durante fixtures, con100archivos/241.2s completos y12pendientes. Exigir cálculo explícito para presupuesto global y preservar15s/120s/30s, fallo al cortar y todos los archivos/aserciones. No optimizar escenas ni repetir arranques para esconder fallos. Contrastar denominadores local/remoto, cola completa parcialmente ejecutada y margen acotado, sin inventar duración de archivos de la CIverde que no se registró. Carga media es indicio de capacidad, no causa. Ver [cálculo](suite-budget-validation.md).

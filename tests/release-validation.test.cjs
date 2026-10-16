@@ -91,6 +91,12 @@ test('CLI validates a recursive committed fixture and records all offline eviden
   assert.ok(report.input.files.every(file => /^[a-f0-9]{64}$/.test(file.sha256)));
   assert.deepEqual(report.stages.tests.files.map(file => file.path), ['tests/nested/sample.test.cjs']);
   assert.equal(report.stages.tests.counts.tests, 1);
+  assert.equal(report.stages.tests.progress.timeoutMs, 420000);
+  assert.equal(report.stages.tests.execution.fileConcurrency, 1);
+  assert.ok(report.stages.tests.execution.start.logicalCpuCount > 0);
+  assert.equal(report.stages.tests.execution.start.hostLoadAverage.length, 3);
+  assert.equal(report.stages.tests.execution.end.hostLoadAverage.length, 3);
+  assert.match(report.stages.tests.command, /--test-timeout=120000/);
   assert.deepEqual(report.stages.tests.progress.completedFiles.map(file => file.path), ['tests/nested/sample.test.cjs']);
   assert.equal(report.stages.tests.progress.lastPasses.at(-1).name, 'fixture passes');
   assert.equal(report.stages.feedbackManifest.scope, 'schema-and-tracked-links-only');

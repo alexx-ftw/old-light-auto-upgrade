@@ -4800,6 +4800,67 @@
         "Verificar resumen fijo sin entorno/args/perfiles/endpoints y reporter sin aceptar diagnóstico como test aprobado.",
         "Revisar que ambas órdenes ejecutan archivos completos conservando fallos, sin warmup,retry ni cambios de15s o300s."
       ]
+    },
+    {
+      "id": "measured-complete-suite-capacity-budget",
+      "feedback": "El presupuesto global300s corta el inventario ampliado antes de completar112archivos; no es un timeout funcional del arranque ni autoriza omitir pruebas.",
+      "beforeFail": {
+        "revision": "e48db1fa56dcdd45015da981b073ca88e1de2ce2",
+        "command": "node --test --test-name-pattern='CLI validates a recursive' /workspace/oldlight-transfer/suite-budget-before/tests/release-validation.test.cjs",
+        "observedFailure": "Mismo harness espera presupuesto global420000ms dimensionado, pero obtiene300000; CI38927422752 corta con100archivos completos y12pendientes.",
+        "evidence": "docs/suite-budget-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/release-validation.test.cjs",
+          "name": "CLI validates a recursive committed fixture and records all offline evidence"
+        },
+        {
+          "file": "tests/release-validation.test.cjs",
+          "name": "runtime omissions, focused sources, zero tests and premature successful exit cannot pass"
+        },
+        {
+          "file": "tests/release-validation.test.cjs",
+          "name": "a timed-out builder leaves no running ordinary descendant with inherited pipes"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Inventario completo en fixture y metadatos de capacidad",
+          "expected": "Presupuesto420s con concurrencia1 y test individual120s, sin filtros.",
+          "regression": {
+            "file": "tests/release-validation.test.cjs",
+            "name": "CLI validates a recursive committed fixture and records all offline evidence"
+          }
+        },
+        {
+          "scenario": "Fallo funcional, cancelación, omisión, foco y resumen incompleto",
+          "expected": "Continúan fallando; el presupuesto no concede aprobación parcial.",
+          "regression": {
+            "file": "tests/release-validation.test.cjs",
+            "name": "runtime omissions, focused sources, zero tests and premature successful exit cannot pass"
+          }
+        },
+        {
+          "scenario": "Builder sin terminar con descendiente propio",
+          "expected": "Deadline30s y limpieza de grupos permanecen.",
+          "regression": {
+            "file": "tests/release-validation.test.cjs",
+            "name": "a timed-out builder leaves no running ordinary descendant with inherited pipes"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Comparación histórica de carga/tiempos",
+          "reason": "CIverde no guardó duraciones por archivo ni CPU/carga. Las muestras nuevas de carga no prueban causalidad ni representan necesariamente uso del cgroup."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Recalcular241204+62531×1.25 con30% margen y redondeo420s; conservar límites funcionales.",
+        "Verificar inventario completo, resumen global obligatorio, fallos y limpieza, sin skips/retries/warmup.",
+        "No atribuir diferencias de runner/DBus/carga sin medición causal."
+      ]
     }
   ]
 }
