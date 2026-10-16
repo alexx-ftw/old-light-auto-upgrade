@@ -53,3 +53,7 @@ node --test --test-name-pattern='helper scroll and wheel preserve continuous|tem
 ```
 
 Con los tests anteriores de599f184:2/2pasan, aunque se ejecutan cero callbacks. Con el harness final y los contadores exigidos:0/2pasan,2fallan por0!==120 y0!==240. Sin esa alteración,150/150pruebas del panel pasan. El contador se incrementa dentro del dispatcher antes de invocar cada callback; no al solicitar un frame. Este control comprueba sensibilidad a un falso positivo específico, no todas las alteraciones posibles del harness.
+
+## Cobertura Chromium permanente desde1.17.21
+
+La batería incluye tests/reinforcement-overlay-browser.test.cjs dentro del gate y un job CI que exige navegador. Ejecuta el SVG real en Chromium sobre una escena Canvas2D offline, con arrastre/rueda, inercia, inversión, revisiones de censo y negativos. Conservar hashes de módulo, JSON por frame, capturas y control que desactiva callbacks. Esta referencia NO reemplaza la escena galaxy-map/Pixi ni el transporte de cámara; consultar1.17.21-browser-overlay-validation.md para artefacto faltante y alcance. Nunca trasladar su éxito a «parpadeo real resuelto».

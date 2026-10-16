@@ -3919,6 +3919,55 @@
         "Derive independent deadline/recovery probes and distinguish queue preparation from actual send.",
         "Inspect real schedule and leadership wiring; do not turn a display improvement into a claim to fix real scheduler or flicker."
       ]
+    },
+    {
+      "id": "reinforcement-browser-frame-alignment",
+      "feedback": "El propietario exige reproducir flicker en navegador y hacer permanente esa prueba. Chromium con SVG productivo sobre referencia Canvas fresca reproduce desfase/ocultaciones por throttling80ms; escena Pixi/MessagePort reales siguen pendientes.",
+      "beforeFail": {
+        "revision": "2f0b2ed13cb4cd9f42aa13dd7e4a016afc9902aa",
+        "command": "QA_REINFORCEMENT_PANEL_SOURCE=/workspace/oldlight-transfer/browser-overlay-baseline.js node --test tests/reinforcement-overlay-browser.test.cjs",
+        "observedFailure": "Mismo navegador/harness con módulo previo falla pan por frames ocultos/desalineados; exploración hasta21.87px y zoom19/48ocultos. Control sin callbacks falla expresamente.",
+        "evidence": "docs/1.17.21-browser-overlay-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-overlay-browser.test.cjs",
+          "name": "browser overlay remains visible and aligned during offline pan inertia zoom reversal and census updates"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Fresh projected pan inertia zoom reversal and repeated census revisions",
+          "expected": "All sampled valid frames visible and endpoint padding aligned within1px; actual callbacks/events counted.",
+          "regression": {
+            "file": "tests/reinforcement-overlay-browser.test.cjs",
+            "name": "browser overlay remains visible and aligned during offline pan inertia zoom reversal and census updates"
+          }
+        },
+        {
+          "scenario": "Invalid camera census or scope after explicit settling window",
+          "expected": "Hidden overlay, no game actions or network.",
+          "regression": {
+            "file": "tests/reinforcement-overlay-browser.test.cjs",
+            "name": "browser overlay remains visible and aligned during offline pan inertia zoom reversal and census updates"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Native Pixi scene, native camera transport, installed version and real user result",
+          "reason": "Reference Canvas2D renderer with fresh projection only; missing version-matched offline native scene entrypoint, asset graph and synthetic-world ticker/input harness."
+        },
+        {
+          "scope": "Raster of every compositor frame, mobile, reverse callback order and many-route CPU load",
+          "reason": "Computed DOM geometry sampled every frame plus PNG evidence; not full per-pixel movie or complete native renderer performance validation."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Run actual Chromium with an independently derived pan/zoom sequence, inspect screenshots and geometry padding, verify executed callbacks and sensitivity.",
+        "Verify browser unavailable is explicit and required CI fails closed; no npm dependency or network/game actions.",
+        "Inspect projection/census safety and unchanged cache100ms limits; distinguish reference-scene fix from unresolved native scene/transport flicker."
+      ]
     }
   ]
 }

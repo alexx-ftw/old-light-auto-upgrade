@@ -2,7 +2,7 @@
 'use strict';
 
 // Offline checks of one clean, committed tree. This is not a security sandbox,
-// browser test, network check, reviewer approval, or permission to publish.
+// complete native-game browser test, network check, reviewer approval, or permission to publish.
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -298,7 +298,7 @@ async function main() {
   const started = new Date().toISOString();
   const report = { schemaVersion: 1, scope: 'offline-validation-only', status: 'failed', startedAt: started,
     node: process.version, platform: process.platform, stages: {}, errors: [],
-    limitations: ['No real browser, game, OAuth or network validation.',
+    limitations: ['No live game, OAuth or production network validation. Offline browser reference coverage only when its inventoried test and Chromium are available.',
       'No independent reviewer approval, remote state/lease verification or publication authorization.',
       'Feedback before-fail records and review criteria are recorded claims; only current linked regression passes are checked automatically.',
       'Temporary copies isolate normal writes; trusted repository code is executed, not security-sandboxed.',
@@ -351,7 +351,9 @@ async function main() {
         reportParent = { path: path.dirname(candidate), dev: parent.dev, ino: parent.ino };
         reportPath = candidate;
       }
-      return { nodeMinimum: 24, processCleanup: 'POSIX process groups (Linux/macOS)' };
+      return { nodeMinimum: 24, processCleanup: 'POSIX process groups (Linux/macOS)',
+        offlineBrowser: { executable: ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome', '/opt/google/chrome/chrome'].find(file => fs.existsSync(file)) || null,
+          required: process.env.OVERLAY_BROWSER_REQUIRED === '1', scope: 'Inventoried overlay browser test only; not native Pixi/game/transport coverage.' } };
     });
     if (report.stages.preflight.help) return;
     await stage('snapshot', () => {

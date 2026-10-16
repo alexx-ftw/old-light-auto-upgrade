@@ -52,7 +52,7 @@
     let destroyed = false, scope = null, scopeEpoch = 0, editorScope = '', draftId = null, busy = false, operation = 0;
     let pointerSample = null, intent = null, gestureNotice = null;
     let gesture = null, releaseTimer = null, ignoreClick = null, anchors = new Map(), hoverSample = null;
-    let listSignature = '', selectSignature = '', overlaySignature = '', miniSignature = '', frame = null, lastFrame = 0, viewIdentity = '';
+    let listSignature = '', selectSignature = '', overlaySignature = '', miniSignature = '', frame = null, viewIdentity = '';
     let explicitEndpoints = false;
     let sourceError = '', mapCache = null;
     let lastPaint = null, visualGapAt = null, paintSession = null;
@@ -676,10 +676,14 @@
       listen(window, 'pointerleave', event => { if (gesture && event.target === stage()) { cancelGesture(); invalidateMap(); } }, true);
       listen(window, 'pointerout', event => { if (gesture && (event.relatedTarget === null || !inside(event))) { cancelGesture(); invalidateMap(); } }, true);
       listen(document, 'visibilitychange', () => { cancelGesture(); invalidateMap(); });
-      const tick = timestamp => {
+      const tick = () => {
         if (destroyed) return;
         countVisual('rafCallbacks'); intervalVisual('rafCallbacks');
-        if (timestamp - lastFrame >= 80) { lastFrame = timestamp; drawOverlay(); }
+        // Camera motion and wheel invalidation can change every painted frame.
+        // Throttling this to 80 ms leaves valid arrows behind the native map and
+        // prolongs hidden intervals. Census caching remains separate; projection
+        // permission is still checked afresh for every frame, without fallback.
+        drawOverlay();
         frame = window.requestAnimationFrame?.(tick) || null;
       };
       frame = window.requestAnimationFrame?.(tick) || null;

@@ -1,0 +1,30 @@
+name: Offline browser and release gate
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OVERLAY_BROWSER_REQUIRED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run complete committed release gate including real Chromium overlay frames
+        run: node validate-release.cjs --report "$RUNNER_TEMP/release-validation.json"
+      - name: Preserve browser screenshots, frame measurements and gate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-overlay-browser-evidence
+          path: |
+            /tmp/oldlight-overlay-browser-*/*.png
+            /tmp/oldlight-overlay-browser-*/frames.json
+            ${{ runner.temp }}/release-validation.json
+          if-no-files-found: warn

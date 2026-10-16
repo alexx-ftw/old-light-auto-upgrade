@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.20
+// @version      1.17.21
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -1220,7 +1220,7 @@ return {create};
     let destroyed = false, scope = null, scopeEpoch = 0, editorScope = '', draftId = null, busy = false, operation = 0;
     let pointerSample = null, intent = null, gestureNotice = null;
     let gesture = null, releaseTimer = null, ignoreClick = null, anchors = new Map(), hoverSample = null;
-    let listSignature = '', selectSignature = '', overlaySignature = '', miniSignature = '', frame = null, lastFrame = 0, viewIdentity = '';
+    let listSignature = '', selectSignature = '', overlaySignature = '', miniSignature = '', frame = null, viewIdentity = '';
     let explicitEndpoints = false;
     let sourceError = '', mapCache = null;
     let lastPaint = null, visualGapAt = null, paintSession = null;
@@ -1844,10 +1844,14 @@ return {create};
       listen(window, 'pointerleave', event => { if (gesture && event.target === stage()) { cancelGesture(); invalidateMap(); } }, true);
       listen(window, 'pointerout', event => { if (gesture && (event.relatedTarget === null || !inside(event))) { cancelGesture(); invalidateMap(); } }, true);
       listen(document, 'visibilitychange', () => { cancelGesture(); invalidateMap(); });
-      const tick = timestamp => {
+      const tick = () => {
         if (destroyed) return;
         countVisual('rafCallbacks'); intervalVisual('rafCallbacks');
-        if (timestamp - lastFrame >= 80) { lastFrame = timestamp; drawOverlay(); }
+        // Camera motion and wheel invalidation can change every painted frame.
+        // Throttling this to 80 ms leaves valid arrows behind the native map and
+        // prolongs hidden intervals. Census caching remains separate; projection
+        // permission is still checked afresh for every frame, without fallback.
+        drawOverlay();
         frame = window.requestAnimationFrame?.(tick) || null;
       };
       frame = window.requestAnimationFrame?.(tick) || null;
@@ -5633,7 +5637,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.20';
+  const SCRIPT_VERSION = '1.17.21';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -7297,6 +7301,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.21', title: 'Flechas sincronizadas por frame y prueba de navegador', changes: [
+        'El overlay redibuja en cada rAF: corrige desfase y ocultaciones reproducidos en Chromium con cámara de referencia fresca durante movimiento y zoom.',
+        'La batería permanente mide visibilidad y alineación por frame, conserva capturas y exige Chromium en CI; mantiene controles de datos inválidos.',
+        'La escena completa Pixi y el transporte nativo de cámara siguen pendientes: esta reproducción no confirma reparado el parpadeo real.',
+      ] },
       { version: '1.17.20', title: 'Motivo visible cuando vence el intervalo', changes: [
         'La línea de intervalo vencido muestra el estado comprobado: coordinación, censo, controles nativos u otro motivo disponible.',
         'Si el diagnóstico falla, informa que no puede comprobar el estado; no da por activo el planificador ni por confirmado un envío.',
