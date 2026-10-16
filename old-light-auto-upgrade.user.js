@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.25
+// @version      1.17.26
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -2262,7 +2262,7 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
  const pause=idValue=>stop(idValue,'paused','Conquista pausada. No se retiran flotas ya enviadas.');
  const cancelObjective=idValue=>stop(idValue,'cancelled','Conquista cancelada. No se retiran flotas ya enviadas.');
  function resume(idValue){if(!load())fail(error);const o=current(idValue);if(!o||!['paused','limit'].includes(o.status))fail('Este objetivo no se puede reanudar.');
-  if(o.ticket?.state==='sent')return change(o,{status:'awaiting_report',message:'Esperando el reporte de la incursión ya enviada.'});
+  if(o.ticket?.state==='sent')return change(o,o.ticket.kind==='attack'?{status:'awaiting_report',message:'Esperando el reporte de la incursión ya enviada.'}:{status:'planning',message:'Refuerzo ya enviado. Esperando llegada y censo confirmado antes de continuar.'});
   if(o.ticket){const j=jobs().find(j=>j.id===o.ticket.id);if(j&&['sending','uncertain'].includes(j.status))fail('Revisa primero el envío pendiente o incierto.');}
   return change(o,{status:'planning',ticket:null,barrierAt:clock(),message:'Revisando el plan con datos actuales.'});
  }
@@ -6234,7 +6234,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.25';
+  const SCRIPT_VERSION = '1.17.26';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -7941,6 +7941,10 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.26', title: 'Reanudar la reunión de conquista ya enviada', changes: [
+        'Reanudar un refuerzo de reunión enviado conserva su misión y espera llegada y censo; no exige un reporte de combate ni repite el envío.',
+        'Los ataques enviados siguen esperando su reporte. Se conservan defensa, reservas, propietario y límites de campaña.',
+      ] },
       { version: '1.17.25', title: 'Conquista por objetivos con reunión y una incursión por reporte', changes: [
         'Plan local autorizado con flota, defensas y límites. Reserva y reúne en un origen; espera llegada observada y un reporte por incursión. No se sincroniza por Drive.',
         'Victoria sin captura mantiene el objetivo. Captura explícita o censo propio fresco lo detiene. Los envíos inciertos no se repiten.',

@@ -124,3 +124,13 @@ test('removed manually resolved uncertain objective suppresses future delayed re
 test('terminal managed and removed targets suppress malformed list dates despite a legacy-compatible detail timestamp',()=>{
  const h=harness();h.add();h.c.tick();h.c.tick();h.send();const r=h.report(100,{item:{verdict:'Defeat'}});r.detail.route.from.name='Origin';r.detail.route.to.name='Target';r.detail.createdAt=r.item.takenAt;r.item.takenAt='invalid';const o=h.c.list()[0];h.c.cancel(o.id);assert.equal(h.c.observeReport(r),true);assert.equal(h.c.list()[0].status,'cancelled');const valid=structuredClone(r);valid.item.takenAt=valid.detail.createdAt;h.c.observeReport(valid);h.c.remove(o.id);assert.equal(h.c.observeReport(r),true);
 });
+test('paused sent assembly reinforcement resumes waiting for census without expecting a battle report or repeating transfer',()=>{
+ const h=harness();const o=h.add({fleet:q(20),maxLosses:40});h.c.tick();h.c.tick();assert.equal(h.c.list()[0].ticket.kind,'transfer');const sent=h.send();h.world.transits=[{fromQ:sent.target.originCoordinate?.q??0,fromR:0,toQ:sent.target.coordinate.q,toR:sent.target.coordinate.r}];h.c.pause(o.id);h.reload();assert.doesNotThrow(()=>h.c.resume(o.id));assert.equal(h.c.list()[0].status,'planning');assert.equal(h.c.list()[0].ticket.state,'sent');for(let i=0;i<4;i++)h.c.tick();assert.equal(h.calls.filter(c=>c.spec).length,1);assert.equal(h.c.list()[0].ticket.id,sent.id);assert.equal(h.c.list()[0].raids,0);
+ h.at+=10;h.world.observedAt=h.at;h.world.transits=[];const staging=h.world.systems.find(s=>s.id===h.c.list()[0].ticket.destinationId);staging.fleet.find(s=>s.type==='marauder').quantity=22;for(let i=0;i<4;i++)h.c.tick();assert.equal(h.c.list()[0].ticket.kind,'attack');assert.equal(h.calls.filter(c=>c.spec).length,2);
+});
+test('paused sent attack still resumes only to report waiting and cannot prepare another raid',()=>{
+ const h=harness();const o=h.add();h.c.tick();h.c.tick();h.send();h.c.pause(o.id);h.reload();h.c.resume(o.id);assert.equal(h.c.list()[0].status,'awaiting_report');for(let i=0;i<4;i++)h.c.tick();assert.equal(h.calls.filter(c=>c.spec).length,1);assert.equal(h.c.list()[0].raids,1);
+});
+test('resumed sent transfer keeps fresh ownership and capture guards without replaying the transfer',()=>{
+ for(const kind of ['owner','capture']){const h=harness();const o=h.add({fleet:q(20),maxLosses:40});h.c.tick();h.c.tick();h.send();h.c.pause(o.id);h.c.resume(o.id);if(kind==='owner')h.targetOwner=uuid(91);else h.world.systems.push(system(90,10,1));h.c.tick();assert.equal(h.c.list()[0].status,kind==='owner'?'paused':'captured');assert.equal(h.calls.filter(c=>c.spec).length,1);assert.equal(h.c.list()[0].raids,0);}
+});

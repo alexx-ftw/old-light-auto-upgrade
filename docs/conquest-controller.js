@@ -103,7 +103,7 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
  const pause=idValue=>stop(idValue,'paused','Conquista pausada. No se retiran flotas ya enviadas.');
  const cancelObjective=idValue=>stop(idValue,'cancelled','Conquista cancelada. No se retiran flotas ya enviadas.');
  function resume(idValue){if(!load())fail(error);const o=current(idValue);if(!o||!['paused','limit'].includes(o.status))fail('Este objetivo no se puede reanudar.');
-  if(o.ticket?.state==='sent')return change(o,{status:'awaiting_report',message:'Esperando el reporte de la incursión ya enviada.'});
+  if(o.ticket?.state==='sent')return change(o,o.ticket.kind==='attack'?{status:'awaiting_report',message:'Esperando el reporte de la incursión ya enviada.'}:{status:'planning',message:'Refuerzo ya enviado. Esperando llegada y censo confirmado antes de continuar.'});
   if(o.ticket){const j=jobs().find(j=>j.id===o.ticket.id);if(j&&['sending','uncertain'].includes(j.status))fail('Revisa primero el envío pendiente o incierto.');}
   return change(o,{status:'planning',ticket:null,barrierAt:clock(),message:'Revisando el plan con datos actuales.'});
  }

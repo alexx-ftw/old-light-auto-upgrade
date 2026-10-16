@@ -4336,6 +4336,67 @@
         "Ejecutar ambos parsers con la misma ruta y nombres válidos; demostrar que legacy acepta el formato pero no recibe el reporte gestionado.",
         "Contrastar objetivo activo, terminal, retirado y destino ajeno; datos inválidos no autorizan pedidos ni reabren terminales."
       ]
+    },
+    {
+      "id": "conquest-resume-sent-assembly-transfer",
+      "feedback": "Pausar y reanudar una reunión enviada trataba un Send propio como ataque awaiting_report y la validación bloqueaba recuperación. Reproducido offline sobre versión publicada, no comunicado como incidencia real del usuario.",
+      "beforeFail": {
+        "revision": "0124962bf362e0d40c8a53e1eac641beda591264",
+        "command": "node --test --test-name-pattern='paused sent assembly reinforcement' tests/conquest-core.test.cjs",
+        "observedFailure": "assert.doesNotThrow recibe Datos de conquista no válidos desde resume/change/save/validate; objetivo permanece paused con ticket sent transfer.",
+        "evidence": "docs/1.17.26-conquest-resume-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/conquest-core.test.cjs",
+          "name": "paused sent assembly reinforcement resumes waiting for census without expecting a battle report or repeating transfer"
+        },
+        {
+          "file": "tests/conquest-core.test.cjs",
+          "name": "paused sent attack still resumes only to report waiting and cannot prepare another raid"
+        },
+        {
+          "file": "tests/conquest-core.test.cjs",
+          "name": "resumed sent transfer keeps fresh ownership and capture guards without replaying the transfer"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "paused sent assembly reinforcement resumes waiting for census without expecting a battle report or repeating transfer",
+          "expected": "Esperar evidencia pertinente sin reenviar; los ataques esperan reporte y cambio de dueño/captura revocan o detienen.",
+          "regression": {
+            "file": "tests/conquest-core.test.cjs",
+            "name": "paused sent assembly reinforcement resumes waiting for census without expecting a battle report or repeating transfer"
+          }
+        },
+        {
+          "scenario": "paused sent attack still resumes only to report waiting and cannot prepare another raid",
+          "expected": "Esperar evidencia pertinente sin reenviar; los ataques esperan reporte y cambio de dueño/captura revocan o detienen.",
+          "regression": {
+            "file": "tests/conquest-core.test.cjs",
+            "name": "paused sent attack still resumes only to report waiting and cannot prepare another raid"
+          }
+        },
+        {
+          "scenario": "resumed sent transfer keeps fresh ownership and capture guards without replaying the transfer",
+          "expected": "Esperar evidencia pertinente sin reenviar; los ataques esperan reporte y cambio de dueño/captura revocan o detienen.",
+          "regression": {
+            "file": "tests/conquest-core.test.cjs",
+            "name": "resumed sent transfer keeps fresh ownership and capture guards without replaying the transfer"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Incidencia y pedidos reales",
+          "reason": "No métricas Old Light accesibles ni actuación en partida; aceptación/censo sintéticos."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Derivar propia reproducción de pausa/recarga/reanudar para Send enviado frente a ataque enviado.",
+        "Verificar ticket/cantidades/owner/reservas preservados, sin duplicar envío ni contar llegada por ETA.",
+        "Contrastar llegada/censo legítimos, pérdida/cambio de propietario y captura; revisar UI real y validez del harness."
+      ]
     }
   ]
 }

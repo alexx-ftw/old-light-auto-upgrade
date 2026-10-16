@@ -26,6 +26,9 @@ test('conquest UI and real queue assemble before a single raid reevaluate Victor
   }
   await b.evaluate(`conquestFixture.setConfirmation(true);layoutRoot.querySelector('form').requestSubmit();layoutRoot.querySelector('details').open=false;conquestFixture.run()`);
   let state=await b.evaluate('conquestFixture.state()');assert.equal(state.calls.length,1);assert.equal(state.calls[0].target.missionAction,'send');assert.equal(state.objectives[0].ticket.kind,'transfer');
+  await b.evaluate(`layoutRoot.querySelector('[data-conquest-action="pause"]').click()`);assert.equal((await b.evaluate('conquestFixture.state()')).objectives[0].status,'paused');
+  await b.evaluate(`layoutRoot.querySelector('[data-conquest-action="resume"]').click()`);state=await b.evaluate('conquestFixture.state()');assert.equal(state.objectives[0].status,'planning');assert.equal(state.objectives[0].ticket.state,'sent');assert.equal(state.calls.length,1);assert.match(await b.evaluate("layoutRoot.querySelector('.cq-card').textContent"),/Esperando llegada y censo/);
+  fs.writeFileSync(path.join(b.artifacts,'conquest-resumed-transfer.png'),Buffer.from((await b.command('Page.captureScreenshot',{format:'png',captureBeyondViewport:true})).data,'base64'));
   await b.evaluate('conquestFixture.run()');assert.equal((await b.evaluate('conquestFixture.state()')).calls.length,1,'no attack while reinforcement is in transit');
   await b.evaluate('conquestFixture.arrive();conquestFixture.run()');state=await b.evaluate('conquestFixture.state()');assert.equal(state.calls.length,2);assert.equal(state.calls[1].target.mode,'amounts');assert.equal(state.calls[1].originId,state.calls[0].target.coordinate.q===0?'00000000-0000-4000-8000-000000000002':'');
   await b.evaluate('conquestFixture.run()');assert.equal((await b.evaluate('conquestFixture.state()')).calls.length,2,'one raid before report');
