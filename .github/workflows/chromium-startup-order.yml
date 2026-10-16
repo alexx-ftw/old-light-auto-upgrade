@@ -5,7 +5,12 @@ permissions:
   contents: read
 jobs:
   diagnostic:
+    name: Diagnostic only - ${{ matrix.image_condition }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image_condition: [natural, read-image-control]
     timeout-minutes: 15
     env:
       OVERLAY_BROWSER_REQUIRED: '1'
@@ -27,6 +32,17 @@ jobs:
         run: NODE_USE_ENV_PROXY=1 node tools/native-scene-assets.cjs
       - name: Check diagnostic acceptance controls
         run: node tools/chromium-startup-observation-selfcheck.cjs
+      - name: Explicit experimental image-read control (never release validation)
+        if: matrix.image_condition == 'read-image-control'
+        run: |
+          timeout --signal=TERM --kill-after=5s 60s node - <<'JS'
+          const fs = require('node:fs');
+          const start = process.hrtime.bigint(); let bytes = 0;
+          const input = fs.createReadStream('/usr/bin/chromium');
+          input.on('data', chunk => { bytes += chunk.length; });
+          input.on('end', () => console.log('EXPERIMENTAL_IMAGE_READ_ONLY ' + JSON.stringify({ bytes, elapsedMs: Number(process.hrtime.bigint() - start) / 1e6, releaseValidation: false })));
+          input.on('error', () => { console.error('Experimental image read failed'); process.exitCode = 1; });
+          JS
       - name: Observe complete baseline suite with sticky fifteen second failure
         run: |
           set +e
@@ -49,7 +65,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: chromium-extended-observation
+          name: chromium-extended-observation-${{ matrix.image_condition }}
           path: |
             /tmp/oldlight-startup-observation/*.json
             ${{ runner.temp }}/startup-observation-suite.log
