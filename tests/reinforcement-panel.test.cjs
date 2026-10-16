@@ -708,3 +708,18 @@ test('multiple route markers open their own endpoints and keep rendering below n
  assert.equal(markers.style.zIndex,'0');assert.equal(markers.style.pointerEvents,'none');assert.equal(markers.nextSibling,h.canvas);
  h.app.destroy();
 });
+
+test('floating route control contains keydown and keypress but preserves native key release',()=>{
+ const source=require('node:fs').readFileSync(require('node:path').join(__dirname,'../old-light-auto-upgrade.user.js'),'utf8');
+ const first=source.indexOf('// BEGIN HELPER KEYBOARD BOUNDARY'),last=source.indexOf('// END HELPER KEYBOARD BOUNDARY',first);
+ const context=require('node:vm').createContext({});require('node:vm').runInContext(source.slice(first,last)+';this.install=installHelperKeyboardBoundary;',context);
+ assert.match(source,/onControlRoot: installHelperKeyboardBoundary/);
+ const h=harness({onControlRoot:context.install,projectSystem:s=>({x:150+s.q*20,y:150+s.r*20,visible:true})});create(h);
+ const markers=h.document.querySelector('.oldlight-route-markers'),marker=markers.querySelector('button');
+ let stopped=0;
+ for(const name of ['keydown','keypress'])markers.dispatch(name,{target:marker,key:'g',stopPropagation(){stopped++;}});
+ assert.equal(stopped,2,'focused route control cannot bubble game shortcuts');
+ markers.dispatch('keyup',{target:marker,key:'w',stopPropagation(){stopped++;}});
+ assert.equal(stopped,2,'held native movement keys must still be released');
+ assert.equal(h.calls.length,1);h.app.destroy();
+});

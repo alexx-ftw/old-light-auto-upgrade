@@ -1779,6 +1779,7 @@ return {create};
       Object.assign(gestureNotice.style, { position: 'fixed', bottom: '18px', left: '50%', transform: 'translateX(-50%)', maxWidth: 'min(600px,90vw)', padding: '10px 14px', background: '#101d29', color: '#e5eef6', border: '1px solid #79d7dd', borderRadius: '8px', zIndex: '2147483646', pointerEvents: 'none', font: '13px/1.4 system-ui,sans-serif' });
       (document.body || container).append(gestureNotice);
       markers = el('div'); markers.setAttribute('aria-label', 'Accesos a rutas de refuerzo'); markers.setAttribute('role', 'group');
+      options.onControlRoot?.(markers);
       markers.className = 'oldlight-route-markers'; markers.hidden = true;
       Object.assign(markers.style, { position: 'fixed', inset: '0', pointerEvents: 'none', zIndex: '0' });
       overlay = svg('svg'); overlay.classList?.add('oldlight-route-overlay'); attr(overlay, 'aria-hidden', 'true');
@@ -18738,6 +18739,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       schedule(); return result;
     };
     reinforcementPanel = globalThis.OldLightReinforcementPanel.create({ document, window,
+      onControlRoot: installHelperKeyboardBoundary,
       getScope: () => missionContext().scope,
       getWorld: () => globalThis.OldLightEmpireBridge?.snapshot({ includeOwnership: false }) || null,
       getRoutes: () => reinforcementRoutes.list(),

@@ -3083,6 +3083,50 @@
         "Inspect marker layering/hit area, camera freshness, remount, keyboard activation, repeated opening and draft preservation.",
         "Check timer boundary and interval edit policy against stored route and origin receipt; do not promise guaranteed dispatch."
       ]
+    },
+    {
+      "id": "reinforcement-floating-control-keyboard-boundary",
+      "feedback": "La revisión independiente del candidato no publicado detectó que el nuevo botón de flecha, fuera del host, dejaba escapar G al atajo nativo. Identificar eventos Helper en el adaptador imperial no aísla el teclado.",
+      "beforeFail": {
+        "revision": "6d82fb6b12eebbfd524f145f072532cf4ad881be",
+        "command": "env -u NODE_PATH node --test --test-name-pattern='floating route control contains' tests/reinforcement-panel.test.cjs (new unchanged case against pre-fix modules)",
+        "observedFailure": "Final unchanged regression fails because production onControlRoot: installHelperKeyboardBoundary wiring is absent. Initial direct probe measured zero stopPropagation calls versus two; independent phased probe lets G reach galaxy-map, while actual production boundary prevents it.",
+        "evidence": "docs/1.17.12-route-actions-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "floating route control contains keydown and keypress but preserves native key release"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Focused floating route button receives keydown/keypress G",
+          "expected": "Production boundary stops bubbling to native shortcuts while target/default remains available.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "floating route control contains keydown and keypress but preserves native key release"
+          }
+        },
+        {
+          "scenario": "Native movement key was held before focus entered floating controls",
+          "expected": "keyup remains unconsumed so native movement can release.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "floating route control contains keydown and keypress but preserves native key release"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Real browser key ordering and defaults",
+          "reason": "Only simulated phases and production listeners exercised; earlier capture listeners cannot be undone."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Every external interactive root must register the actual existing keyboard boundary.",
+        "Preserve keyup, native button activation and browser defaults; scope isolation is not a substitute for keyboard isolation."
+      ]
     }
   ]
 }
