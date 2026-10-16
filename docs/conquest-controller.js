@@ -80,10 +80,10 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
    (spec.target.originCoordinate?samePoint(job.target?.originCoordinate,spec.target.originCoordinate):job.target?.originCoordinate===undefined);
  }
  function verifiedWorld(s){return core.worldFor(sync(getWorld()),s,clock());}
- function list(){if(!load())return [];const s=context()?.scope;return copy(config.objectives.filter(o=>o.scope===s));}
- function plans(){if(!load())return [];const c=context(),s=c?.scope;if(!s)return [];const raw=sync(getWorld());
+ function list(){if(!load()||!config.objectives.length)return [];const s=context()?.scope;return copy(config.objectives.filter(o=>o.scope===s));}
+ function plans(){if(!load()||!config.objectives.length)return [];const c=context(),s=c?.scope;if(!s||!config.objectives.some(o=>o.scope===s))return [];const raw=sync(getWorld());
   // A receipt survives queue replacement until a strictly later own census.
-  const pending=jobs(),w=verifiedWorld(s);
+  const pending=jobs(),w=core.worldFor(raw,s,clock());
   for(const r of config.receipts)if(r.scope===s&&(!w||w.observedAt<=r.sentAt)&&!pending.some(j=>j.scope===s&&j.originId===r.originId))pending.push({scope:s,originId:r.originId,status:'sent',sentAt:r.sentAt});
   return core.plan(config.objectives.filter(o=>o.scope===s),raw,pending,s,clock()).map(p=>{const o=config.objectives.find(o=>o.id===p.id);if(o.status==='planning'&&!o.ticket){const proof=ownerProof(o);if(!proof||o.ownerId&&o.ownerId!==proof.ownerId)return {...p,ready:false,origin:null,transfers:[],reservations:[],message:'Propietario del objetivo no verificable, protegido o cambiado. Revisa el mapa y la campaña.'};}return p;});
  }
@@ -191,7 +191,7 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
   change(o,{status,message,fleet:nextFleet,losses,reports:[...o.reports,report.id],latestReport:report,ticket:null});return true;
  }
  function fleetPermission(job){
-  if(!job)return true;
+  if(!job||!config.objectives.length)return true;
   const c=context(),active=config.objectives.filter(o=>o.scope===c?.scope&&['planning','awaiting_report','uncertain'].includes(o.status));
   if(!active.length)return true;
   if(active.some(o=>samePoint(o.target,job.target?.coordinate)&&job.campaignId!=='conquest:'+o.id))return false;
@@ -216,7 +216,7 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
   for(const entry of entries)if(observeReport(entry))managed.push(get(entry.item,'id'));
   return managed;
  }
- function permitJob(job,prepared=false){if(!load()||writeBlocked&&!prepared)return false;const c=context(),o=config.objectives.find(o=>o.scope===c?.scope&&o.id===job?.campaignId?.slice(9));
+ function permitJob(job,prepared=false){if(!load()||!config.objectives.length||writeBlocked&&!prepared)return false;const c=context(),o=config.objectives.find(o=>o.scope===c?.scope&&o.id===job?.campaignId?.slice(9));
   if(!fleetPermission(job)||!o||o.status!=='planning'||!o.ticket||!(prepared?['prepared','queued']:['queued']).includes(o.ticket.state)||!matches(o,o.ticket,job))return false;
   const proof=ownerProof(o);if(!proof||proof.ownerId!==o.ownerId||proof.epoch!==o.ticket.proof.epoch||proof.generation!==o.ticket.proof.generation)return false;
   const w=verifiedWorld(o.scope),t=o.ticket;if(!w||o.barrierAt&&w.observedAt<=o.barrierAt||w.systems.some(x=>samePoint(x,o.target)))return false;
@@ -230,7 +230,7 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
   n.status=t.kind==='attack'&&o.status==='planning'?'awaiting_report':o.status;n.raids+=t.kind==='attack'?1:0;n.message=t.kind==='attack'?'Incursión enviada. Esperando su reporte antes de otra.':'Refuerzo enviado. Esperando llegada y censo confirmado.';
   const r=next.receipts.find(r=>r.scope===o.scope&&r.originId===t.originId);if(r)r.sentAt=Math.max(r.sentAt,sentAt);else next.receipts.push({scope:o.scope,originId:t.originId,sentAt});save(next);
  }
- function tick(){if(destroyed||running||!load())return false;running=true;
+ function tick(){if(destroyed||running||!load()||!config.objectives.length&&!config.receipts.length)return false;running=true;
   try{
    const c=context(),s=c?.scope,w=s?verifiedWorld(s):null;if(!s)return false;
    if(w){const kept=config.receipts.filter(r=>r.scope!==s||w.observedAt<=r.sentAt);if(kept.length!==config.receipts.length){save({...config,receipts:kept});return true;}}
@@ -276,7 +276,7 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
   }catch(e){error='Conquista detenida: '+String(e.message||'revisión necesaria').slice(0,200);return false;}
   finally{running=false;}
  }
- function dueOrigins(){if(!load())return [];const c=context();return config.objectives.filter(o=>o.scope===c?.scope&&o.status==='planning'&&o.ticket?.state==='queued').filter(o=>{const j=jobs().find(x=>x.id===o.ticket.id);return j?.status==='waiting'&&canRunJob(j);}).map(o=>o.ticket.originId);}
+ function dueOrigins(){if(!load()||!config.objectives.length)return [];const c=context();return config.objectives.filter(o=>o.scope===c?.scope&&o.status==='planning'&&o.ticket?.state==='queued').filter(o=>{const j=jobs().find(x=>x.id===o.ticket.id);return j?.status==='waiting'&&canRunJob(j);}).map(o=>o.ticket.originId);}
  return {add,list,plans,tick,observeReport,recoverReports,pause,resume,cancel:cancelObjective,configure,acknowledge,remove,canRunJob,canUseFleet,dueOrigins,
   navigationList:()=>list().map(o=>({...o,originId:o.ticket?.originId,paused:o.status!=='planning'})),
   exportConfig:()=>load()?copy(config):fail(error),validateConfig:validate,

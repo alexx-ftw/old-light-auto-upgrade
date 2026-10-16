@@ -164,3 +164,9 @@ La primera candidata090058a falló en aceptación anterior al tick reconciliador
 Los fallos repetidos1.17.26 refutaron que un timeout genérico bastase para diagnosticar el runner. Un launcher que sale42 se confundía con15s de espera y un wrapper dejaba descendiente/pipe vivos. Exigir código/señal y stderr acotado/sanitizado, grupo propio, cierre confirmado y prueba SIGTERM; contrastar deadline silencioso y endpoint legítimo sin retries/fallbacks. La inyección de launcher demuestra esas fronteras, no causa el fallo remoto ni prueba un renderer. Revisar logs completos/imagen exacta y conservar incertidumbre si no se recogió stderr. [Evidencia](browser-startup-validation.md).
 
 La candidata44851f8 demostró que separar logs del entorno no basta: las reglas simples de redacción omiten JSON, comillas/espacios y Basic. Revisar ejemplos sintéticos contra archivo y mensaje, antes y después de truncar. Conservar la etiqueta antes de redactar para no publicar una cola de valor sin contexto. No afirmar un detector universal de secretos; mantener diagnósticos limitados y sin datos de cuenta.
+
+## Conquista1.17.27: poco DOM no implica poco trabajo
+
+La firma de render se comprobaba después de planificar. Con1objetivo/1000sistemas, candidatos/donantes cuadráticos producen17tareas largas y22frames/6s; sinobjetivos también se clonaba censo. Exigir perfil CPU/rAF/longtask real con0objetivos,flota lista,imposible,reunión viable yvistaoculta, además de equivalencia funcional/destinos/reservas. Diferenciar el coste reproducido del hanging real sin confirmar versión/censo. Un atajo vacío no debe eludir lectura fallida ni autorizar jobs huérfanos, y saltarse preview oculta no autoriza cachear guardas. El peor caso de reunión viable grande permanece explícito.
+
+DiagnósticosUnicode: KiB cuenta bytes, no longitudUTF16. Exigir multibyte después de sanitizar y evitar cortar un carácter; la candidata ce0 excedía16KiB aunque estaba acotada en caracteres.

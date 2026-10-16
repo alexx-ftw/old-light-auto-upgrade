@@ -29,6 +29,11 @@ test('conquest UI and real queue assemble before a single raid reevaluate Victor
   await b.evaluate(`layoutRoot.querySelector('[data-conquest-action="pause"]').click()`);assert.equal((await b.evaluate('conquestFixture.state()')).objectives[0].status,'paused');
   await b.evaluate(`layoutRoot.querySelector('[data-conquest-action="resume"]').click()`);state=await b.evaluate('conquestFixture.state()');assert.equal(state.objectives[0].status,'planning');assert.equal(state.objectives[0].ticket.state,'sent');assert.equal(state.calls.length,1);assert.match(await b.evaluate("layoutRoot.querySelector('.cq-card').textContent"),/Esperando llegada y censo/);
   fs.writeFileSync(path.join(b.artifacts,'conquest-resumed-transfer.png'),Buffer.from((await b.command('Page.captureScreenshot',{format:'png',captureBeyondViewport:true})).data,'base64'));
+  const visibleWorldReads=await b.evaluate('conquestFixture.censusReads()');
+  await b.evaluate(`layoutRoot.querySelector('#campaigns').hidden=true;for(let i=0;i<20;i++)conquestFixture.render()`);
+  assert.equal(await b.evaluate('conquestFixture.censusReads()'),visibleWorldReads,'hidden presentation never reads census or replans');
+  await b.evaluate(`layoutRoot.querySelector('#campaigns').hidden=false;conquestFixture.render()`);
+  assert.ok((await b.evaluate('conquestFixture.censusReads()'))>visibleWorldReads,'visible presentation recovers with fresh census');
   await b.evaluate('conquestFixture.run()');assert.equal((await b.evaluate('conquestFixture.state()')).calls.length,1,'no attack while reinforcement is in transit');
   await b.evaluate('conquestFixture.arrive();conquestFixture.run()');state=await b.evaluate('conquestFixture.state()');assert.equal(state.calls.length,2);assert.equal(state.calls[1].target.mode,'amounts');assert.equal(state.calls[1].originId,state.calls[0].target.coordinate.q===0?'00000000-0000-4000-8000-000000000002':'');
   await b.evaluate('conquestFixture.run()');assert.equal((await b.evaluate('conquestFixture.state()')).calls.length,2,'one raid before report');

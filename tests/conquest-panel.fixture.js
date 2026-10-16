@@ -1,7 +1,7 @@
 'use strict';
 function installConquestFixture(){
  const uuid=n=>'00000000-0000-4000-8000-'+String(n).padStart(12,'0'),scope='galaxy/'+uuid(1);
- let clock=Date.now(),stored,queueStored={},controller,queue,confirmation=false,seq=10;const calls=[],listeners=new Set();
+ let clock=Date.now(),stored,queueStored={},controller,queue,confirmation=false,seq=10,worldReads=0;const calls=[],listeners=new Set();
  const ships=n=>[{type:'marauder',quantity:n}],context={scope,originId:uuid(2),originName:'Assembly',selectionCount:1,active:true,canAct:true,coordinated:true,canNavigate:true};
  const world={scope,selfId:uuid(1),epoch:1,generation:1,revision:0,complete:true,connected:true,observedAt:clock,
   systems:[{id:uuid(2),q:0,r:0,name:'Assembly',fleet:ships(10)},{id:uuid(3),q:5,r:0,name:'Donor',fleet:ships(4)}],transits:[],
@@ -17,7 +17,7 @@ function installConquestFixture(){
    calls.push(clone(job));const source=world.systems.find(s=>s.id===job.originId);source.fleet[0].quantity-=job.quantities.marauder;
    world.transits.push({fromQ:source.q,fromR:source.r,toQ:job.target.coordinate.q,toR:job.target.coordinate.r});
    return {status:'sent',message:'Synthetic native acceptance; no network or game order'};}});
- controller=OldLightConquestController.create({read:()=>stored,write:value=>{stored=clone(value);return true},getContext:()=>context,getWorld:()=>clone(world),getJobs:()=>queue.list(),
+ controller=OldLightConquestController.create({read:()=>stored,write:value=>{stored=clone(value);return true},getContext:()=>context,getWorld:()=>{worldReads++;return clone(world)},getJobs:()=>queue.list(),
   queue:(spec,options)=>queue.queue(spec,options),cancel:id=>queue.cancel(id),cancelPreparing:()=>false,
   getTargetOwner:(scope,target)=>owners.read(scope,target),isTargetAllowed:()=>true,now:()=>clock,newId:()=>uuid(seq++),onChange:()=>{}});
  const panel=OldLightConquestPanel.create({controller,document,confirm:()=>confirmation});panel.mount(layoutRoot.querySelector('#campaigns'));
@@ -33,6 +33,6 @@ function installConquestFixture(){
   changed();return report;
  }
  globalThis.conquestFixture={run,arrive,report,setConfirmation:value=>{confirmation=value},restock:()=>{world.systems[0].fleet=ships(12);changed()},
-  state:()=>({objectives:controller.list(),plans:controller.plans(),jobs:queue.list(),calls:clone(calls),context:clone(context)}),
+  censusReads:()=>worldReads,render:()=>panel.render(),state:()=>({worldReads,objectives:controller.list(),plans:controller.plans(),jobs:queue.list(),calls:clone(calls),context:clone(context)}),
   loseProof:()=>{world.connected=false;changed();controller.tick();panel.render()}};
 }

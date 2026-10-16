@@ -4,7 +4,7 @@ const root=path.join(__dirname,'..'),sourceFile=process.env.QA_NATIVE_BROWSER_SO
 function harness(mode,pidFile){const folders=[],launched=[];
  const fakeFs={...fs,mkdtempSync(prefix){const dir=fs.mkdtempSync(prefix);folders.push(dir);return dir;}};
  const fakeSpawn=(executable,args,options)=>{const child=cp.spawn(process.execPath,[path.join(__dirname,'browser-startup.fixture.cjs'),mode,pidFile||''],options);launched.push(child);return child;};
- function load(file){const module={exports:{}};const localRequire=name=>name==='node:fs'?fakeFs:name==='node:child_process'?{...cp,spawn:fakeSpawn}:name==='./browser-process.cjs'?load(path.join(__dirname,'helpers/browser-process.cjs')):require(name);vm.runInNewContext('(function(require,module,exports){'+fs.readFileSync(file,'utf8')+'\n})',{process,Buffer,WebSocket,setTimeout,clearTimeout})(localRequire,module,module.exports);return module.exports;}
+ function load(file){const module={exports:{}};const localRequire=name=>name==='node:fs'?fakeFs:name==='node:child_process'?{...cp,spawn:fakeSpawn}:name==='./browser-process.cjs'?load(process.env.QA_BROWSER_PROCESS_SOURCE||path.join(__dirname,'helpers/browser-process.cjs')):require(name);vm.runInNewContext('(function(require,module,exports){'+fs.readFileSync(file,'utf8')+'\n})',{process,Buffer,WebSocket,setTimeout,clearTimeout})(localRequire,module,module.exports);return module.exports;}
  return {browser:load(sourceFile),folders,launched,async clean(){for(const child of launched){try{process.kill(-child.pid,'SIGKILL')}catch{}try{child.kill('SIGKILL')}catch{}}for(const dir of folders)fs.rmSync(dir,{recursive:true,force:true});}};
 }
 function running(pid){try{if(process.platform==='linux'){const status=fs.readFileSync('/proc/'+pid+'/stat','utf8');return !/^\d+ \(.*\) Z /.test(status);}return !cp.execFileSync('ps',['-o','stat=','-p',String(pid)],{encoding:'utf8'}).trim().startsWith('Z');}catch{return false;}}
@@ -37,4 +37,7 @@ test('oversized browser credential lines retain their key before redaction rathe
 test('browser endpoint readiness waits for a complete announcement across stderr chunks instead of connecting to a partial URL',async()=>{
  const {launch}=require(process.env.QA_BROWSER_PROCESS_SOURCE||'./helpers/browser-process.cjs'),dir=fs.mkdtempSync(path.join(os.tmpdir(),'oldlight-browser-fragment-proof-')),handle=launch(process.execPath,[path.join(__dirname,'browser-startup.fixture.cjs'),'ready-fragmented'],dir);
  try{assert.equal(await handle.endpoint,'ws://127.0.0.1:9/offline-fixture');assert.doesNotMatch(fs.readFileSync(path.join(dir,'browser-stderr.log'),'utf8'),/ws:\/\//);}finally{await handle.close();fs.rmSync(dir,{recursive:true,force:true});}
+});
+test('browser stderr remains at most sixteen KiB in UTF8 bytes with complete Unicode characters',async()=>{
+ const h=harness('unicode');try{await assert.rejects(h.browser.open(()=>null));const bytes=fs.readFileSync(path.join(h.folders[0],'browser-stderr.log'));assert.ok(bytes.length<=16384,'UTF8 bytes='+bytes.length);assert.doesNotMatch(bytes.toString('utf8'),/\uFFFD/);assert.match(bytes.toString('utf8'),/界/);}finally{await h.clean();}
 });

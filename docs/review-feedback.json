@@ -4597,6 +4597,113 @@
         "Contrastar mensaje no sensible conservado, límite16KiB y código de fallo visibles.",
         "Verificar que redacción no modifique el endpoint privado usado para conexión ni permita aceptar anuncios parciales."
       ]
+    },
+    {
+      "id": "conquest-repeated-quadratic-planning-and-empty-census",
+      "feedback": "Se reproduce trabajo cuadrático repetido al renderizar conquista, incluso con flota lista/imposible y vista oculta; sin objetivos se repetían lecturas de censo. Compatible con tareas largas, sin causa real del hanging confirmada.",
+      "beforeFail": {
+        "revision": "c4475b7e4864a9f4cdfb3dd001dd024bd04ff896",
+        "command": "QA_CONQUEST_CORE_SOURCE=/workspace/oldlight-transfer/hang-investigation/before/conquest-core.js QA_CONQUEST_CONTROLLER_SOURCE=/workspace/oldlight-transfer/hang-investigation/before/conquest-controller.js node --test tests/conquest-performance.test.cjs",
+        "observedFailure": "Tres fallos deterministas:1002ordenaciones en casos listos/imposibles y lecturas nativas/contexto sin objetivos. Chromium real del mismo escenario muestra17tareas largas y22frames/6s; el control sin objetivos no muestra tareas largas en este entorno.",
+        "evidence": "docs/1.17.27-conquest-responsiveness-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/conquest-performance.test.cjs",
+          "name": "conquest ready fleets do not sort every donor list for a thousand already usable origins"
+        },
+        {
+          "file": "tests/conquest-performance.test.cjs",
+          "name": "conquest globally insufficient stock waits without sorting a thousand impossible donor plans"
+        },
+        {
+          "file": "tests/conquest-performance.test.cjs",
+          "name": "an empty conquest configuration never reads a native census or operational context and does not authorize orphan conquest jobs"
+        },
+        {
+          "file": "tests/conquest-performance.test.cjs",
+          "name": "empty configuration shortcuts still deny missions when conquest storage cannot be read"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "conquest ready fleets do not sort every donor list for a thousand already usable origins",
+          "expected": "Evitar trabajo innecesario conservando selección/reservas/defensa y sin conceder permisos por falta de intención o lectura fallida.",
+          "regression": {
+            "file": "tests/conquest-performance.test.cjs",
+            "name": "conquest ready fleets do not sort every donor list for a thousand already usable origins"
+          }
+        },
+        {
+          "scenario": "conquest globally insufficient stock waits without sorting a thousand impossible donor plans",
+          "expected": "Evitar trabajo innecesario conservando selección/reservas/defensa y sin conceder permisos por falta de intención o lectura fallida.",
+          "regression": {
+            "file": "tests/conquest-performance.test.cjs",
+            "name": "conquest globally insufficient stock waits without sorting a thousand impossible donor plans"
+          }
+        },
+        {
+          "scenario": "an empty conquest configuration never reads a native census or operational context and does not authorize orphan conquest jobs",
+          "expected": "Evitar trabajo innecesario conservando selección/reservas/defensa y sin conceder permisos por falta de intención o lectura fallida.",
+          "regression": {
+            "file": "tests/conquest-performance.test.cjs",
+            "name": "an empty conquest configuration never reads a native census or operational context and does not authorize orphan conquest jobs"
+          }
+        },
+        {
+          "scenario": "empty configuration shortcuts still deny missions when conquest storage cannot be read",
+          "expected": "Evitar trabajo innecesario conservando selección/reservas/defensa y sin conceder permisos por falta de intención o lectura fallida.",
+          "regression": {
+            "file": "tests/conquest-performance.test.cjs",
+            "name": "empty configuration shortcuts still deny missions when conquest storage cannot be read"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Hanging real de Eros",
+          "reason": "Versión instalada, censo, objetivos y resultado sin script no confirmados; prueba sintética no identifica causa real."
+        },
+        {
+          "scope": "Reunión viable grande",
+          "reason": "Conserva peor caso cuadrático al necesitar donantes; no se afirma rendimiento exhaustivo."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Derivar propio perfil/volumen con0objetivos,listos,insuficientes yreunión viable, sin confundir cuellos demostrados con incidencia real.",
+        "Comparar outputs completos contra baseline en diversos mundos/compromisos y conservar guardas frescas en frontera nativa.",
+        "Verificar ocultación y recuperación de presentación sin cachear autoridad, ni perder cambios de propietario/captura/pausa."
+      ]
+    },
+    {
+      "id": "browser-diagnostics-utf8-byte-bound",
+      "feedback": "El bound de logs contaba caracteres UTF16 y podía exceder16KiB con Unicode; detectado en candidata de herramientas aún no publicada.",
+      "beforeFail": {
+        "revision": "ce0af099c76caf8e9bc91e431f644a49a27b6201",
+        "command": "QA_BROWSER_PROCESS_SOURCE=/workspace/oldlight-transfer/browser-process-unicode-before.cjs node --test --test-name-pattern='browser stderr remains at most' tests/browser-process.test.cjs",
+        "observedFailure": "FixtureUnicode produce48030bytes y falla límite16384; no contiene credenciales reales.",
+        "evidence": "docs/browser-startup-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/browser-process.test.cjs",
+          "name": "browser stderr remains at most sixteen KiB in UTF8 bytes with complete Unicode characters"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "stderr multibyte sobredimensionado y cierre temprano",
+          "expected": "Máximo16384bytes UTF8, sin cortar un carácter ni perder el código de fallo.",
+          "regression": {
+            "file": "tests/browser-process.test.cjs",
+            "name": "browser stderr remains at most sixteen KiB in UTF8 bytes with complete Unicode characters"
+          }
+        }
+      ],
+      "qaGaps": [],
+      "independentReviewCriteria": [
+        "Verificar límite en bytes después de redacción y fronteras de caracteres multibyte; no relajar tamaño anunciado."
+      ]
     }
   ]
 }

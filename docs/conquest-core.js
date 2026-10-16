@@ -99,6 +99,7 @@ function createOwnerReader({getBridge,now=Date.now}){
  return {read,destroy(){unsubscribe?.();bridge=null;unsubscribe=null;invalidate();}};
 }
 function plan(objectives,world,jobs,s,at){
+ if(Array.isArray(objectives)&&objectives.length===0)return [];
  const verified=worldFor(world,s,at),result=[];
  const blocked=message=>objectives.map(o=>({id:o.id,ready:false,message,origin:null,transfers:[],reservations:[]}));
  if(!verified)return blocked('Esperando censo propio completo y actual.');
@@ -123,12 +124,17 @@ function plan(objectives,world,jobs,s,at){
   if(o.raids>=o.maxRaids||SHIPS.reduce((sum,t)=>sum+o.losses[t],0)>=o.maxLosses){entry.message='Límite de incursiones o pérdidas alcanzado.';continue;}
   if(SHIPS.reduce((sum,t)=>sum+o.fleet[t],0)>o.maxLosses-SHIPS.reduce((sum,t)=>sum+o.losses[t],0)){entry.message='La flota supera el presupuesto de pérdidas restante. Revisa el plan antes de otra incursión.';continue;}
   const usable=verified.systems.filter(x=>!busy.has(x.id)).map(x=>({...x,free:Object.fromEntries(SHIPS.map(t=>[t,Math.max(0,available.get(x.id)[t]-o.defense[t])]))}));
-  const candidates=[];
-  for(const origin of usable){
+  if(SHIPS.some(t=>usable.reduce((sum,x)=>sum+x.free[t],0)<o.fleet[t])){entry.message='Faltan naves libres tras defensas y compromisos; revisa la flota prevista.';continue;}
+  const readyOrigins=usable.filter(x=>SHIPS.every(t=>x.free[t]>=o.fleet[t])),candidates=[];
+  // Any ready origin ranks before every assembly plan. Do not enumerate donors
+  // for a ready fleet or solve dominated assembly candidates.
+  for(const origin of (readyOrigins.length?readyOrigins:usable)){
    const missing=Object.fromEntries(SHIPS.map(t=>[t,Math.max(0,o.fleet[t]-origin.free[t])])),transfers=[];
+   if(SHIPS.every(t=>missing[t]===0)){candidates.push({origin,transfers,score:distance(origin,o.target)});continue;}
    for(const donor of usable.filter(x=>x.id!==origin.id).sort((a,b)=>distance(a,origin)-distance(b,origin)||a.id.localeCompare(b.id))){
     const amounts=Object.fromEntries(SHIPS.map(t=>[t,Math.min(donor.free[t],missing[t])]));
     if(SHIPS.some(t=>amounts[t])){transfers.push({originId:donor.id,destinationId:origin.id,originName:donor.name,destinationName:origin.name,from:{q:donor.q,r:donor.r},to:{q:origin.q,r:origin.r},quantities:amounts});for(const t of SHIPS)missing[t]-=amounts[t];}
+    if(SHIPS.every(t=>missing[t]===0))break;
    }
    if(SHIPS.some(t=>missing[t]))continue;
    const assemblyCost=transfers.reduce((sum,x)=>sum+distance(x.from,origin)*SHIPS.reduce((n,t)=>n+x.quantities[t],0),0);

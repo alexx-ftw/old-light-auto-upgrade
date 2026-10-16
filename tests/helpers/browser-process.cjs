@@ -3,12 +3,13 @@
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),{spawn}=require('node:child_process');
 function sanitize(value){return String(value).replace(/\b(?:https?|wss?):\/\/[^\s]+/gi,'<url>').replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|ph[ctx]_[A-Za-z0-9_-]+)\b/g,'<redacted>').replace(/\bBearer\s+[^\s]+/gi,'Bearer <redacted>').replace(/(["']?\b(?:token|authorization|password|secret|api[_-]?key)\b["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\r\n]*)/gi,'$1<redacted>');}
 
+function byteBound(value,max){const bytes=Buffer.from(value,'utf8');if(bytes.length<=max)return value;let end=max;while(end>0&&(bytes[end]&192)===128)end--;return bytes.subarray(0,end).toString('utf8');}
 function launch(executable,args,artifacts){
  let realpath=null;try{realpath=fs.realpathSync(executable);}catch{}
  const started=Date.now(),child=spawn(executable,args,{detached:true,stdio:['ignore','ignore','pipe']});
  let stderr='',endpointWindow='',stderrTruncated=false,closed=false,stopping=null,done=false,timer,exitCode=null,exitSignal=null;
  const metadata={executable,realpath,node:process.version,platform:process.platform,release:os.release(),pid:child.pid??null,status:'starting'};
- function stderrText(){return (sanitize(stderr)+(stderrTruncated?'\n[stderr truncated at 16 KiB]\n':'')).slice(0,16384);}
+ function stderrText(){return byteBound(sanitize(stderr)+(stderrTruncated?'\n[stderr truncated]\n':''),16384);}
  function persist(){try{fs.writeFileSync(path.join(artifacts,'browser-stderr.log'),stderrText());fs.writeFileSync(path.join(artifacts,'browser-startup.json'),JSON.stringify({...metadata,elapsedMs:Date.now()-started,exitCode,exitSignal},null,2));}catch{/* Never replace the original browser failure. */}}
  function signal(value){if(!child.pid)return;try{process.kill(-child.pid,value);}catch(e){if(e.code!=='ESRCH')throw e;}}
  const onExit=()=>{try{signal('SIGKILL');}catch{}};

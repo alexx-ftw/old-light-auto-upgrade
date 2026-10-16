@@ -27,7 +27,7 @@ function create({controller,document:doc,onChange=()=>{},confirm=message=>doc.de
  function attempt(fn){try{fn();error='';onChange();render();}catch(e){error=String(e.message||'No se pudo actualizar conquista.');if(status){status.textContent=error;status.focus();}}}
  function button(parent,text,action,fn){const node=el('button',text);node.type='button';node.dataset.conquestAction=action;node.addEventListener('click',()=>attempt(fn));parent.append(node);return node;}
  function render(){if(!root)return;
-  let objectives=[],plans=[];try{objectives=controller.list();plans=controller.plans();}catch(e){error=String(e.message);}
+  let objectives=[],plans=[];try{objectives=controller.list();plans=doc.hidden||root.closest('[hidden]')?[]:controller.plans();}catch(e){error=String(e.message);}
   status.textContent=error||controller.diagnostics().error||'Campañas locales a esta cuenta y galaxia. El Helper debe estar activo para preparar misiones.';
   const signature=JSON.stringify([objectives,plans]);if(signature===key)return;
   // Do not replace the authoring form or a paused plan draft during passive refresh.

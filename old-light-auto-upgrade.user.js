@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.26
+// @version      1.17.27
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -2105,6 +2105,7 @@ function createOwnerReader({getBridge,now=Date.now}){
  return {read,destroy(){unsubscribe?.();bridge=null;unsubscribe=null;invalidate();}};
 }
 function plan(objectives,world,jobs,s,at){
+ if(Array.isArray(objectives)&&objectives.length===0)return [];
  const verified=worldFor(world,s,at),result=[];
  const blocked=message=>objectives.map(o=>({id:o.id,ready:false,message,origin:null,transfers:[],reservations:[]}));
  if(!verified)return blocked('Esperando censo propio completo y actual.');
@@ -2129,12 +2130,17 @@ function plan(objectives,world,jobs,s,at){
   if(o.raids>=o.maxRaids||SHIPS.reduce((sum,t)=>sum+o.losses[t],0)>=o.maxLosses){entry.message='Límite de incursiones o pérdidas alcanzado.';continue;}
   if(SHIPS.reduce((sum,t)=>sum+o.fleet[t],0)>o.maxLosses-SHIPS.reduce((sum,t)=>sum+o.losses[t],0)){entry.message='La flota supera el presupuesto de pérdidas restante. Revisa el plan antes de otra incursión.';continue;}
   const usable=verified.systems.filter(x=>!busy.has(x.id)).map(x=>({...x,free:Object.fromEntries(SHIPS.map(t=>[t,Math.max(0,available.get(x.id)[t]-o.defense[t])]))}));
-  const candidates=[];
-  for(const origin of usable){
+  if(SHIPS.some(t=>usable.reduce((sum,x)=>sum+x.free[t],0)<o.fleet[t])){entry.message='Faltan naves libres tras defensas y compromisos; revisa la flota prevista.';continue;}
+  const readyOrigins=usable.filter(x=>SHIPS.every(t=>x.free[t]>=o.fleet[t])),candidates=[];
+  // Any ready origin ranks before every assembly plan. Do not enumerate donors
+  // for a ready fleet or solve dominated assembly candidates.
+  for(const origin of (readyOrigins.length?readyOrigins:usable)){
    const missing=Object.fromEntries(SHIPS.map(t=>[t,Math.max(0,o.fleet[t]-origin.free[t])])),transfers=[];
+   if(SHIPS.every(t=>missing[t]===0)){candidates.push({origin,transfers,score:distance(origin,o.target)});continue;}
    for(const donor of usable.filter(x=>x.id!==origin.id).sort((a,b)=>distance(a,origin)-distance(b,origin)||a.id.localeCompare(b.id))){
     const amounts=Object.fromEntries(SHIPS.map(t=>[t,Math.min(donor.free[t],missing[t])]));
     if(SHIPS.some(t=>amounts[t])){transfers.push({originId:donor.id,destinationId:origin.id,originName:donor.name,destinationName:origin.name,from:{q:donor.q,r:donor.r},to:{q:origin.q,r:origin.r},quantities:amounts});for(const t of SHIPS)missing[t]-=amounts[t];}
+    if(SHIPS.every(t=>missing[t]===0))break;
    }
    if(SHIPS.some(t=>missing[t]))continue;
    const assemblyCost=transfers.reduce((sum,x)=>sum+distance(x.from,origin)*SHIPS.reduce((n,t)=>n+x.quantities[t],0),0);
@@ -2239,10 +2245,10 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
    (spec.target.originCoordinate?samePoint(job.target?.originCoordinate,spec.target.originCoordinate):job.target?.originCoordinate===undefined);
  }
  function verifiedWorld(s){return core.worldFor(sync(getWorld()),s,clock());}
- function list(){if(!load())return [];const s=context()?.scope;return copy(config.objectives.filter(o=>o.scope===s));}
- function plans(){if(!load())return [];const c=context(),s=c?.scope;if(!s)return [];const raw=sync(getWorld());
+ function list(){if(!load()||!config.objectives.length)return [];const s=context()?.scope;return copy(config.objectives.filter(o=>o.scope===s));}
+ function plans(){if(!load()||!config.objectives.length)return [];const c=context(),s=c?.scope;if(!s||!config.objectives.some(o=>o.scope===s))return [];const raw=sync(getWorld());
   // A receipt survives queue replacement until a strictly later own census.
-  const pending=jobs(),w=verifiedWorld(s);
+  const pending=jobs(),w=core.worldFor(raw,s,clock());
   for(const r of config.receipts)if(r.scope===s&&(!w||w.observedAt<=r.sentAt)&&!pending.some(j=>j.scope===s&&j.originId===r.originId))pending.push({scope:s,originId:r.originId,status:'sent',sentAt:r.sentAt});
   return core.plan(config.objectives.filter(o=>o.scope===s),raw,pending,s,clock()).map(p=>{const o=config.objectives.find(o=>o.id===p.id);if(o.status==='planning'&&!o.ticket){const proof=ownerProof(o);if(!proof||o.ownerId&&o.ownerId!==proof.ownerId)return {...p,ready:false,origin:null,transfers:[],reservations:[],message:'Propietario del objetivo no verificable, protegido o cambiado. Revisa el mapa y la campaña.'};}return p;});
  }
@@ -2350,7 +2356,7 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
   change(o,{status,message,fleet:nextFleet,losses,reports:[...o.reports,report.id],latestReport:report,ticket:null});return true;
  }
  function fleetPermission(job){
-  if(!job)return true;
+  if(!job||!config.objectives.length)return true;
   const c=context(),active=config.objectives.filter(o=>o.scope===c?.scope&&['planning','awaiting_report','uncertain'].includes(o.status));
   if(!active.length)return true;
   if(active.some(o=>samePoint(o.target,job.target?.coordinate)&&job.campaignId!=='conquest:'+o.id))return false;
@@ -2375,7 +2381,7 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
   for(const entry of entries)if(observeReport(entry))managed.push(get(entry.item,'id'));
   return managed;
  }
- function permitJob(job,prepared=false){if(!load()||writeBlocked&&!prepared)return false;const c=context(),o=config.objectives.find(o=>o.scope===c?.scope&&o.id===job?.campaignId?.slice(9));
+ function permitJob(job,prepared=false){if(!load()||!config.objectives.length||writeBlocked&&!prepared)return false;const c=context(),o=config.objectives.find(o=>o.scope===c?.scope&&o.id===job?.campaignId?.slice(9));
   if(!fleetPermission(job)||!o||o.status!=='planning'||!o.ticket||!(prepared?['prepared','queued']:['queued']).includes(o.ticket.state)||!matches(o,o.ticket,job))return false;
   const proof=ownerProof(o);if(!proof||proof.ownerId!==o.ownerId||proof.epoch!==o.ticket.proof.epoch||proof.generation!==o.ticket.proof.generation)return false;
   const w=verifiedWorld(o.scope),t=o.ticket;if(!w||o.barrierAt&&w.observedAt<=o.barrierAt||w.systems.some(x=>samePoint(x,o.target)))return false;
@@ -2389,7 +2395,7 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
   n.status=t.kind==='attack'&&o.status==='planning'?'awaiting_report':o.status;n.raids+=t.kind==='attack'?1:0;n.message=t.kind==='attack'?'Incursión enviada. Esperando su reporte antes de otra.':'Refuerzo enviado. Esperando llegada y censo confirmado.';
   const r=next.receipts.find(r=>r.scope===o.scope&&r.originId===t.originId);if(r)r.sentAt=Math.max(r.sentAt,sentAt);else next.receipts.push({scope:o.scope,originId:t.originId,sentAt});save(next);
  }
- function tick(){if(destroyed||running||!load())return false;running=true;
+ function tick(){if(destroyed||running||!load()||!config.objectives.length&&!config.receipts.length)return false;running=true;
   try{
    const c=context(),s=c?.scope,w=s?verifiedWorld(s):null;if(!s)return false;
    if(w){const kept=config.receipts.filter(r=>r.scope!==s||w.observedAt<=r.sentAt);if(kept.length!==config.receipts.length){save({...config,receipts:kept});return true;}}
@@ -2435,7 +2441,7 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
   }catch(e){error='Conquista detenida: '+String(e.message||'revisión necesaria').slice(0,200);return false;}
   finally{running=false;}
  }
- function dueOrigins(){if(!load())return [];const c=context();return config.objectives.filter(o=>o.scope===c?.scope&&o.status==='planning'&&o.ticket?.state==='queued').filter(o=>{const j=jobs().find(x=>x.id===o.ticket.id);return j?.status==='waiting'&&canRunJob(j);}).map(o=>o.ticket.originId);}
+ function dueOrigins(){if(!load()||!config.objectives.length)return [];const c=context();return config.objectives.filter(o=>o.scope===c?.scope&&o.status==='planning'&&o.ticket?.state==='queued').filter(o=>{const j=jobs().find(x=>x.id===o.ticket.id);return j?.status==='waiting'&&canRunJob(j);}).map(o=>o.ticket.originId);}
  return {add,list,plans,tick,observeReport,recoverReports,pause,resume,cancel:cancelObjective,configure,acknowledge,remove,canRunJob,canUseFleet,dueOrigins,
   navigationList:()=>list().map(o=>({...o,originId:o.ticket?.originId,paused:o.status!=='planning'})),
   exportConfig:()=>load()?copy(config):fail(error),validateConfig:validate,
@@ -2475,7 +2481,7 @@ function create({controller,document:doc,onChange=()=>{},confirm=message=>doc.de
  function attempt(fn){try{fn();error='';onChange();render();}catch(e){error=String(e.message||'No se pudo actualizar conquista.');if(status){status.textContent=error;status.focus();}}}
  function button(parent,text,action,fn){const node=el('button',text);node.type='button';node.dataset.conquestAction=action;node.addEventListener('click',()=>attempt(fn));parent.append(node);return node;}
  function render(){if(!root)return;
-  let objectives=[],plans=[];try{objectives=controller.list();plans=controller.plans();}catch(e){error=String(e.message);}
+  let objectives=[],plans=[];try{objectives=controller.list();plans=doc.hidden||root.closest('[hidden]')?[]:controller.plans();}catch(e){error=String(e.message);}
   status.textContent=error||controller.diagnostics().error||'Campañas locales a esta cuenta y galaxia. El Helper debe estar activo para preparar misiones.';
   const signature=JSON.stringify([objectives,plans]);if(signature===key)return;
   // Do not replace the authoring form or a paused plan draft during passive refresh.
@@ -6242,7 +6248,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.26';
+  const SCRIPT_VERSION = '1.17.27';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -7949,6 +7955,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.27', title: 'Conquista con menos trabajo repetido al actualizar la ventana', changes: [
+        'Sin objetivos no se lee ni valida el censo para conquista. La vista oculta no calcula planes; la autoridad de envío conserva sus verificaciones frescas.',
+        'Una flota ya reunida o globalmente insuficiente evita recorrer todos los donantes para cada origen. Conserva selección, defensas y reservas.',
+        'Reduce tareas largas reproducidas offline con censos grandes; la causa del bloqueo real comunicado sigue pendiente de confirmación.',
+      ] },
       { version: '1.17.26', title: 'Reanudar la reunión de conquista ya enviada', changes: [
         'Reanudar un refuerzo de reunión enviado conserva su misión y espera llegada y censo; no exige un reporte de combate ni repite el envío.',
         'Reanudar reconcilia primero las aceptaciones confirmadas en la cola; no borra un ataque pendiente de reporte ni lo duplica.',
