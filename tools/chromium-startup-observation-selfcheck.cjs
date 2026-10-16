@@ -45,6 +45,11 @@ const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),asse
  const result=summarize(d,new Set(['public case']));
  assert.deepEqual(result.failures,[{name:'public case',kind:'browser-startup-timeout'},{name:'unlisted-test-name',kind:'assertion'}]);
  assert.equal(JSON.stringify(result).includes('synthetic-private'),false);
+ for(const value of ['synthetic-private-number',NaN,Infinity,-1]){
+  const malformed=summarize({...d,stages:{tests:{...d.stages.tests,fileCount:value,durationMs:value,progress:{elapsedMs:value,completedFiles:'synthetic-private-completed',remainingFiles:'synthetic-private-remaining'}}}},new Set());
+  assert.equal(malformed.files,null);assert.equal(malformed.elapsedMs,null);assert.equal(malformed.completedFiles,null);assert.equal(malformed.remainingFiles,null);assert.equal(JSON.stringify(malformed).includes('synthetic-private'),false);
+ }
+
  assert.throws(()=>summarize({...d,releaseValidation:true},new Set()));
  assert.throws(()=>summarize({...d,scope:'offline-validation-only'},new Set()));
  const folder=fs.mkdtempSync(path.join(os.tmpdir(),'oldlight-diagnostic-summary-'));
