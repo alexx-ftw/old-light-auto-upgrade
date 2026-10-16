@@ -42,3 +42,29 @@ test('stale form scope cannot add protection to a different account',()=>{const 
 test('empty protection carries a scope token without requiring a route or census',()=>{const h=harness();h.world=null;const first=h.guard.check(null);assert.equal(first.allowed,true);assert.equal(first.token.scope,scope);assert.equal(h.guard.check(null,first.token).allowed,true);h.scope='beta/'+SELF;assert.equal(h.guard.check(null,first.token).code,'scope');});
 test('removing a list does not discard the earlier account boundary',()=>{const h=harness();h.protect();const previous=h.guard.check(job).token;h.data.clear();assert.equal(h.guard.check(job,previous).allowed,true);h.scope='beta/'+SELF;assert.equal(h.guard.check(job,previous).allowed,false);});
 test('adding a list after an unconfigured preflight requires a fresh preparation',()=>{const h=harness();const previous=h.guard.check(null).token;h.protect();assert.equal(h.guard.check(job,previous).code,'owner-changed');assert.equal(h.guard.check(job).allowed,true);});
+
+test('unresolved unrelated aliases allow only a route custom send to the fresh verified self owner',()=>{
+ const h=harness();h.guard.add({name:'Pending unrelated friend'});
+ const own={...job,id:'route:north:1',target:{mode:'custom',missionAction:'send',coordinate:{q:0,r:0}}};
+ const first=h.guard.check(own);assert.equal(first.allowed,true);assert.equal(first.enabled,true);assert.equal(first.token.ownerId,SELF);
+ for(const patch of [{id:'ordinary'},{id:'retry:campaign:1'},{id:'Route:north:1'},
+  {target:{...own.target,missionAction:'attack'}},{target:{...own.target,mode:'amounts'}},
+  {target:{...own.target,coordinate:{q:2,r:3}}}]){
+  assert.equal(h.guard.check({...own,...patch}).code,'unresolved-alias');
+ }
+ h.world.revision++;assert.equal(h.guard.check(own,first.token).allowed,true);
+ h.world.generation++;assert.equal(h.guard.check(own,first.token).code,'owner-changed');
+ assert.equal(JSON.parse([...h.data.values()][0]).players[0].id,'','no alias resolution or setting mutation');
+});
+for(const [name,change,code] of [
+ ['missing census',h=>h.world=null,'ownership'],['stale census',h=>h.clock=130001,'ownership'],
+ ['unknown owner',h=>h.world.ownership.players[0].owned=[],'unknown-owner'],
+ ['protected self-name match',h=>h.guard.add({name:'Self'}),'protected'],
+ ['conflicting ownership',h=>h.world.ownership.players[1].owned.push({q:0,r:0}),'ownership'],
+ ['storage error',h=>h.failRead=true,'storage'],
+ ['protected destination',h=>{h.world.ownership.players[0].owned=[];h.world.ownership.players[1].owned.push({q:0,r:0});h.protect();},'protected'],
+])test('own reinforcement still denies '+name+' with unresolved ally',()=>{
+ const h=harness();h.guard.add({name:'Pending unrelated friend'});change(h);
+ const own={...job,id:'route:north:1',target:{mode:'custom',missionAction:'send',coordinate:{q:0,r:0}}};
+ assert.equal(h.guard.check(own).code,code);
+});

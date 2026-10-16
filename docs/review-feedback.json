@@ -3127,6 +3127,138 @@
         "Every external interactive root must register the actual existing keyboard boundary.",
         "Preserve keyup, native button activation and browser defaults; scope isolation is not a substitute for keyboard isolation."
       ]
+    },
+    {
+      "id": "reinforcement-own-send-unrelated-alias-review-loop",
+      "feedback": "Una ruta propia vuelve a revisión tras reconocer y reanudar, con cola107Marauder y aviso de aliado sin ID. El veto global unresolved-alias para ataques también alcanzaba al Send propio; reconocer no elimina esa condición persistente.",
+      "beforeFail": {
+        "revision": "52462c72aac1ff68e9e5dd2d5ba06495a733c007",
+        "command": "env -u NODE_PATH QA_REINFORCEMENT_ADAPTER_SOURCE=<unchanged baseline userscript> node --test --test-name-pattern='own reinforcement with unrelated|review acknowledgement and resume do not recur' tests/reinforcement-approval-review.test.cjs",
+        "observedFailure": "Direct own Send returns paused with unresolved-alias; real route/queue acknowledgement+resume+fresh census after15min recreates needsReview=true instead of one confirmed simulated send. Both regressions fail against baseline source.",
+        "evidence": "docs/1.17.13-own-reinforcement-review-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-approval-review.test.cjs",
+          "name": "review acknowledgement and resume do not recur for own 107 Marauder route with unresolved ally"
+        },
+        {
+          "file": "tests/ally-protection.test.cjs",
+          "name": "unresolved unrelated aliases allow only a route custom send to the fresh verified self owner"
+        },
+        {
+          "file": "tests/reinforcement-approval-review.test.cjs",
+          "name": "own send with unresolved friend still pauses on owner loss at click"
+        },
+        {
+          "file": "tests/reinforcement-approval-review.test.cjs",
+          "name": "own target exception cannot bypass the outer native mission permission"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Unchanged unrelated alias while own107Marauder route is acknowledged, explicitly resumed and retried after cooldown with fresh data",
+          "expected": "No recurring review from that alias; acknowledgement itself retains pause and cooldown, new permitted sends still use final native guard.",
+          "regression": {
+            "file": "tests/reinforcement-approval-review.test.cjs",
+            "name": "review acknowledgement and resume do not recur for own 107 Marauder route with unresolved ally"
+          }
+        },
+        {
+          "scenario": "Ordinary/retry/attack/foreign destination or stale/ambiguous owner under unresolved ally",
+          "expected": "No broad alias bypass; only freshly verified route custom Send to self owner is eligible.",
+          "regression": {
+            "file": "tests/ally-protection.test.cjs",
+            "name": "unresolved unrelated aliases allow only a route custom send to the fresh verified self owner"
+          }
+        },
+        {
+          "scenario": "Ownership changes immediately before native confirmation",
+          "expected": "Zero sends; persisted approval cannot change owner or session silently.",
+          "regression": {
+            "file": "tests/reinforcement-approval-review.test.cjs",
+            "name": "own send with unresolved friend still pauses on owner loss at click"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Exact reported live-session cause and outcome",
+          "reason": "Screenshot shows matching unresolved-alias path but no complete runtime/store trace; all actions are simulated. Existing review is deliberately preserved."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Own exception must require route identity, custom Send action and fresh verified self owner, while protected matches/storage/scope/token checks remain unchanged.",
+        "Use production queue and native adapter to verify acknowledge and resume, not just guard unit output; keep cooldown, census barrier and no silent resume.",
+        "Retain attack/foreign/unknown/stale/protected cases and zero effects on owner/session change at every native phase.",
+        "Do not attribute recurrence to Drive or state restoration without evidence, or infer actual sends from conservative acknowledgement timestamps."
+      ]
+    },
+    {
+      "id": "reinforcement-arrow-census-publication-gap",
+      "feedback": "Reporte de parpadeo: bridge+panel productivos reproducen ocultar y recrear flecha/marcador si render cae en el hueco pending entre censos idénticos. El contador estable no reproduce; se preserva revocación autoritativa.",
+      "beforeFail": {
+        "revision": "52462c72aac1ff68e9e5dd2d5ba06495a733c007",
+        "command": "env -u NODE_PATH QA_REINFORCEMENT_PANEL_SOURCE=<baseline reinforcement-panel.js> node --test --test-name-pattern='bounded visual census gap' tests/reinforcement-panel.test.cjs",
+        "observedFailure": "During bounded same-session census publication gap the baseline clears the existing SVG line, rather than retain the same decorative node with marker disabled. Independent actual bridge/panel probe reproduces five hide/reappear cycles.",
+        "evidence": "docs/1.17.13-own-reinforcement-review-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "bounded visual census gap preserves unchanged arrow but disables marker and all authority reads stay unavailable"
+        },
+        {
+          "file": "tests/empire-bridge.test.cjs",
+          "name": "visual pending signal never returns action data and rejects changed session or disconnect"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "visual gap drops cached decoration on camera unavailable"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "hovering floating route control does not clear arrow or marker on native canvas leave"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Same-session pending snapshot gap with identical verified geometry for80ms",
+          "expected": "Retain only already painted decoration; disable marker and leave authority unavailable.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "bounded visual census gap preserves unchanged arrow but disables marker and all authority reads stay unavailable"
+          }
+        },
+        {
+          "scenario": "Pending lasts101ms or camera projection changes",
+          "expected": "Hide decoration; no indefinite cache and no suppressed geometry invalidation.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "bounded visual census gap preserves unchanged arrow but disables marker and all authority reads stay unavailable"
+          }
+        },
+        {
+          "scenario": "Pending belongs to another session, scope or disconnect",
+          "expected": "No visual signal; authoritative snapshot remains null.",
+          "regression": {
+            "file": "tests/empire-bridge.test.cjs",
+            "name": "visual pending signal never returns action data and rejects changed session or disconnect"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Exact live flicker cause and real browser painting/hit testing",
+          "reason": "Conditional gap is reproduced in simulation, but no recorded rendering trace from the actual session or browser validation is available."
+        }
+      ],
+      "independentReviewCriteria": [
+        "The new signal must remain presentation-only and contain no cached action snapshot; snapshot must continue revoking on pending.",
+        "Verify100ms absolute bound, same scope/session, exact projection/canvas and paused route state; no retained interactive marker authority.",
+        "On authoritative delivery of lost ownership hide/update the arrow; genuine camera changes must not be masked.",
+        "Do not infer emitter/session/version or absence of bugs from aggregated telemetry."
+      ]
     }
   ]
 }

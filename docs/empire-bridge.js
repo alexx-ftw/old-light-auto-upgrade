@@ -8,6 +8,19 @@ function create({realm=globalThis,document=realm.document,observer,observerSourc
   const pendingAttribute='data-oldlight-empire-pending';
   const stamp=value=>JSON.stringify([value.generation,value.epoch,value.revision,value.connected,value.observedAt]);
   function settled(){try{return !!current&&container?.getAttribute(pendingAttribute)===stamp(current);}catch{return false;}}
+  // Presentation-only signal. Never returns a snapshot or an action permit.
+  function visualPending(scope,session=null){try{
+    if(stopped||failed||!installed||!current||settled()||current.scope!==scope||!current.connected||!current.complete
+      ||current.galaxy!==/^\/game\/galaxy\/([A-Za-z0-9_-]{1,64})(?:\/|$)/.exec(realm.location.pathname)?.[1])return false;
+    if(session!==null&&session!==JSON.stringify([current.generation,current.epoch]))return false;
+    const raw=container?.getAttribute(pendingAttribute);
+    if(typeof raw!=='string'||raw.length>200)return false;
+    const value=JSON.parse(raw),at=now();
+    return Array.isArray(value)&&value.length===5&&value[0]===current.generation&&value[1]===current.epoch
+      &&Number.isSafeInteger(value[2])&&value[2]>current.revision&&value[3]===true
+      &&Number.isSafeInteger(value[4])&&value[4]>=current.observedAt&&value[4]<=at+1000
+      &&current.observedAt<=at&&at-current.observedAt<=120000;
+  }catch{return false;}}
   const notify=()=>{for(const fn of subscribers){try{fn();}catch{}}try{onChange();}catch{}};
   function invalidate(message){current=null;reason=message;notify();}
   function cleanupBootstrap(){
@@ -53,6 +66,7 @@ function create({realm=globalThis,document=realm.document,observer,observerSourc
   }
   return Object.freeze({
     snapshot({includeOwnership=true}={}){return settled()?JSON.parse(JSON.stringify(includeOwnership?current:{...current,ownership:null})):null;},
+    visualPending,
     subscribe(fn){if(typeof fn!=='function')return()=>{};subscribers.add(fn);return()=>subscribers.delete(fn);},
     status:()=>({installed,reason,observed:!!current,connected:settled()&&current.connected===true,
       connectionObserved:!!current&&current.generation>0,complete:settled()&&current.complete===true}),

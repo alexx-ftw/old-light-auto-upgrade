@@ -723,3 +723,54 @@ test('floating route control contains keydown and keypress but preserves native 
  assert.equal(stopped,2,'held native movement keys must still be released');
  assert.equal(h.calls.length,1);h.app.destroy();
 });
+
+test('hovering floating route control does not clear arrow or marker on native canvas leave',()=>{
+ let shift=0;
+ const h=harness({projectSystem:s=>({x:150+s.q*20+shift,y:150+s.r*20,visible:true})});create(h);
+ const overlay=h.document.querySelector('.oldlight-route-overlay'),line=overlay.querySelector('line');
+ const layer=h.document.querySelector('.oldlight-route-markers'),marker=layer.querySelector('button');assert.ok(marker);assert.ok(line);
+ for(let i=0;i<20;i++){
+  h.window.dispatch('pointerleave',{target:h.canvas,relatedTarget:marker});
+  assert.equal(overlay.querySelector('line'),line,'entering marker cannot delete the arrow and trigger hit-test oscillation');
+  assert.equal(marker.parentNode,layer);assert.equal(layer.hidden,false);
+  h.advance(500);h.world.observedAt+=500;h.app.render();
+  assert.equal(overlay.querySelector('line'),line);assert.equal(layer.querySelector('button'),marker);
+ }
+ const before=line.getAttribute('x1');shift=40;h.app.render();assert.notEqual(overlay.querySelector('line').getAttribute('x1'),before,'actual camera movement still reprojects');
+ h.app.destroy();
+});
+
+test('bounded visual census gap preserves unchanged arrow but disables marker and all authority reads stay unavailable',()=>{
+ let pending=false,shift=0,opens=0;
+ const h=harness({isCensusPending:()=>pending,onOpen:()=>opens++,projectSystem:s=>({x:150+s.q*20+shift,y:150+s.r*20,visible:true})});create(h);
+ const world=h.world,overlay=h.document.querySelector('.oldlight-route-overlay'),line=overlay.querySelector('line');
+ const marker=h.document.querySelector('.oldlight-route-markers').querySelector('button');
+ pending=true;h.world=null;h.app.render();
+ assert.equal(overlay.querySelector('line'),line);assert.notEqual(overlay.style.display,'none');assert.equal(marker.disabled,true);
+ assert.equal(overlay.getAttribute('data-census-pending'),'true');marker.dispatch('click');assert.equal(opens,1,'only initial create opened editor');
+ h.advance(80);h.app.render();assert.equal(overlay.querySelector('line'),line);
+ pending=false;world.observedAt+=80;h.world=world;h.app.render();assert.equal(overlay.querySelector('line'),line);assert.equal(marker.disabled,false);
+ pending=true;h.world=null;h.app.render();h.advance(101);h.app.render();assert.equal(overlay.style.display,'none','unsettled gap cannot retain visual indefinitely');
+ pending=false;world.observedAt+=101;h.world=world;h.app.render();assert.notEqual(overlay.style.display,'none');
+ pending=true;h.world=null;shift=10;h.app.render();assert.equal(overlay.style.display,'none','camera changes cannot retain old geometry');
+ h.app.destroy();
+});
+for(const change of ['scope','pause','viewport','camera unavailable'])test('visual gap drops cached decoration on '+change,()=>{
+ let pending=false,available=true;
+ const h=harness({isCensusPending:()=>pending,projectSystem:s=>available?{x:150+s.q*20,y:150+s.r*20,visible:true}:null});create(h);
+ pending=true;h.world=null;
+ if(change==='scope')h.scope='other/self';if(change==='pause')h.routes[0].paused=true;
+ if(change==='viewport')h.canvas.rect={left:0,top:0,width:700,height:600,right:700,bottom:600};
+ if(change==='camera unavailable')available=false;
+ h.app.render();assert.equal(h.document.querySelector('.oldlight-route-overlay').style.display,'none');h.app.destroy();
+});
+
+test('authoritative loss of route endpoint after visual gap immediately removes decoration',()=>{
+ let pending=false;
+ const h=harness({isCensusPending:()=>pending,projectSystem:s=>({x:150+s.q*20,y:150+s.r*20,visible:true})});create(h);
+ const world=h.world;pending=true;h.world=null;h.app.render();
+ assert.notEqual(h.document.querySelector('.oldlight-route-overlay').style.display,'none');
+ pending=false;world.systems=world.systems.filter(s=>s.id!==B);h.world=world;h.app.render();
+ assert.equal(h.document.querySelector('.oldlight-route-overlay').style.display,'none');
+ assert.equal(h.document.querySelector('.oldlight-route-markers').hidden,true);h.app.destroy();
+});

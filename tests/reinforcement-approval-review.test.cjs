@@ -60,7 +60,7 @@ function harness(options = {}) {
     close() { this.removeAttribute('open'); this.dispatchEvent(new Event('close')); }
   }
   class Input extends Element {
-    constructor(type) { super(); this.type = 'number'; this.min = '0'; this.max = '100'; this.value = '0'; this.disabled = false; this.setAttribute('aria-label', 'Number of ' + type + ' to send'); }
+    constructor(type) { super(); this.type = 'number'; this.min = '0'; this.max = String(options.parked ?? 100); this.value = '0'; this.disabled = false; this.setAttribute('aria-label', 'Number of ' + type + ' to send'); }
     matches(selector) { return selector === ':disabled' && this.disabled; }
   }
   const h = { at: 1000000, scope: SCOPE, prepares: 0, resolves: 0, sends: 0, guardCalls: [], store: new Map(), storageFailure: false, canAct: () => true };
@@ -110,7 +110,7 @@ function harness(options = {}) {
     + '\nthis.guardFactory=createAllyProtection;this.adapterFactory=createNativeMissionAdapter;this.queueFactory=createFleetWaitQueue;', h.realm);
   h.guard = h.realm.guardFactory({ getContext: h.context, getWorld: () => h.world, storage, now: () => h.at });
   h.guard.add({ id: ALLY, name: 'Protected' });
-  h.adapter = h.realm.adapterFactory({ getContext: h.context, getFleet: () => ({ parked: 100, away: 0, building: 0 }),
+  h.adapter = h.realm.adapterFactory({ getContext: h.context, getFleet: () => ({ parked: options.parked ?? 100, away: 0, building: 0 }),
     canAct: job => h.canAct(job), resolveTarget: async () => { h.resolves++; options.resolve?.(h); return { inspector, cleanup() {} }; },
     checkTarget: (job, previous) => { h.guardCalls.push(previous && clone(previous)); return options.check ? options.check(h, job, previous) : h.guard.check(job, previous); } });
   h.job = { id: 'route:north:1', scope: SCOPE, originId: ORIGIN, originName: 'Origin',
@@ -151,7 +151,7 @@ for (const [name, mutate] of [
   ['protected', h => h.changeOwner(ALLY)],
   ['storage', h => { h.storageFailure = true; }],
   ['wrong scope', h => { h.job.scope = 'beta/' + SELF; }],
-  ['unresolved alias', h => { h.guard.add({ name: 'Unresolved friend' }); }],
+  ['unresolved alias', h => { h.guard.add({ name: 'Unresolved friend' }); h.changeOwner(RIVAL); }],
 ]) test('independent route review: material ' + name + ' failure still pauses', async () => {
   const h = harness();
   try { mutate(h); assert.equal((await h.adapter.dispatch(h.job)).status, 'paused'); assert.equal(h.resolves, 0); assert.equal(h.sends, 0); }
@@ -224,4 +224,58 @@ test('independent route review: real route, queue, and adapter keep one waiting 
     assert.equal(engine.list()[0].nextRunAt, h.at + 60000);
     await queue.tick(); engine.tick(); assert.equal(h.sends, 1, 'no immediate replay after recovery');
   } finally { h.destroy(); queue.destroy(); }
+});
+
+
+test('own reinforcement with unrelated unresolved ally passes only verified send guards', async () => {
+ const h=harness();
+ try {
+  h.guard.add({name:'Pending unrelated friend'});
+  const outcome=await h.adapter.dispatch(h.job);
+  assert.equal(outcome.status,'sent',JSON.stringify(outcome));assert.equal(h.sends,1);
+  assert.ok(h.guardCalls.length>1);assert.ok(h.guardCalls.slice(1).every(token=>token?.ownerId===SELF));
+ } finally {h.destroy();}
+});
+
+test('review acknowledgement and resume do not recur for own 107 Marauder route with unresolved ally', async () => {
+ const h=harness({parked:107});let queueStore={},routeStore;
+ const world={scope:SCOPE,galaxy:'alpha',selfId:SELF,connected:true,complete:true,observedAt:h.at,
+  systems:[{id:ORIGIN,q:0,r:0,name:'Origin',fleet:[{type:'marauder',quantity:107}]},
+   {id:DESTINATION,q:2,r:3,name:'Destination',fleet:[]}],transits:[]};
+ const queue=h.realm.queueFactory({load:()=>clone(queueStore),save:v=>queueStore=clone(v),now:()=>h.at,
+  getContext:h.context,getRouteState:job=>engine.jobState(job),
+  getFleet:()=>new Map(core.SHIPS.map(type=>[type,{parked:type==='marauder'?107:0,away:0,building:0}])),dispatch:job=>h.adapter.dispatch(job)});
+ const engine=core.create({read:()=>routeStore,write:(_,v)=>routeStore=clone(v),now:()=>h.at,getContext:h.context,
+  getWorld:()=>world,getJobs:()=>queue.list(),queue:(spec,opts)=>queue.queue(spec,opts),cancel:id=>queue.cancel(id)});
+ h.canAct=job=>engine.canRunJob(job);
+ try {
+  h.guard.add({name:'Pending unrelated friend'});
+  engine.save({id:'north',originId:ORIGIN,destinationId:DESTINATION,intervalMinutes:15,
+   ships:{marauder:{mode:'excess',reserve:0}},paused:false});
+  engine.tick();queue.pause(queue.list()[0].id);engine.tick();
+  assert.equal(engine.list()[0].needsReview,true,'simulate a persisted legacy paused job without clearing its guard');
+  engine.acknowledgeRoute('north');assert.equal(queue.list().length,0);assert.equal(engine.list()[0].paused,true);
+  assert.equal(engine.list()[0].needsReview,false);assert.equal(engine.list()[0].ticket,null);
+  engine.resume('north');engine.tick();assert.equal(queue.list().length,0,'acknowledgement cooldown remains');
+  for(let i=0;i<2;i++){
+   h.at+=900001;world.observedAt=h.at;h.world.observedAt=h.at;
+   assert.equal(engine.tick().queued.length,1);assert.equal(queue.list()[0].quantities.marauder,107);
+   await queue.tick();engine.tick();
+   assert.equal(engine.list()[0].needsReview,false,'unchanged unrelated alias must not recreate review');
+   assert.equal(engine.list()[0].paused,false);assert.equal(engine.list()[0].ticket,null);
+   assert.equal(queue.list()[0].status,'sent');assert.equal(h.sends,i+1);
+   assert.equal(JSON.parse([...h.store.values()][0]).players.some(p=>p.id===''&&p.alias==='pending unrelated friend'),true,'protected list unchanged');
+  }
+ }finally{h.destroy();queue.destroy();}
+});
+
+for(const phase of ['resolve','prepare','input','click'])test('own send with unresolved friend still pauses on owner loss at '+phase,async()=>{
+ const h=harness({[phase]:fixture=>fixture.changeOwner(RIVAL)});
+ try{h.guard.add({name:'Pending unrelated friend'});const outcome=await h.adapter.dispatch(h.job);assert.equal(outcome.status,'paused');assert.equal(h.sends,0);}
+ finally{h.destroy();}
+});
+test('own target exception cannot bypass the outer native mission permission',async()=>{
+ const h=harness();
+ try{h.guard.add({name:'Pending unrelated friend'});h.canAct=()=>false;const outcome=await h.adapter.dispatch(h.job);assert.notEqual(outcome.status,'sent');assert.equal(h.sends,0);}
+ finally{h.destroy();}
 });

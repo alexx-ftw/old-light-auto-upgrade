@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.12
+// @version      1.17.13
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -1223,6 +1223,7 @@ return {create};
     let listSignature = '', selectSignature = '', overlaySignature = '', miniSignature = '', frame = null, lastFrame = 0, viewIdentity = '';
     let explicitEndpoints = false;
     let sourceError = '', mapCache = null;
+    let lastPaint = null, visualGapAt = null, paintSession = null;
     const readError = () => { try { return clean(options.getError?.() || ''); } catch (_) { return 'No se puede leer el estado de las rutas.'; } };
     const fields = new Map(), listeners = [], diagnosticNodes = new Map(), markerNodes = new Map();
     const helperContains = node => root?.contains?.(node) || markers?.contains?.(node);
@@ -1239,6 +1240,7 @@ return {create};
     };
     const systems = () => {
       const world = getWorld();
+      paintSession = world ? JSON.stringify([world.generation, world.epoch]) : null;
       const identity = `${getScope()}|${world?.epoch ?? ''}|${window.location?.pathname || ''}|${window.location?.search || ''}|${document.querySelector?.('[data-field="nameplate-name"]')?.textContent || ''}`;
       if (identity !== viewIdentity) { viewIdentity = identity; cancelGesture(); invalidateMap(); }
       return ownSystems(world, getScope(), now());
@@ -1261,6 +1263,7 @@ return {create};
       return true;
     }
     function invalidateMap() {
+      lastPaint = null; visualGapAt = null;
       anchors.clear(); hoverSample = null; pointerSample = null; overlaySignature = '';
       if (overlay) { overlay.replaceChildren(); hideSVG(overlay, true); }
       if (markers) { markers.hidden = true; markers.replaceChildren(); markerNodes.clear(); }
@@ -1371,6 +1374,7 @@ return {create};
     function drawOverlay() {
       if (!overlay || destroyed) return;
       observeScope(getScope());
+      if (holdVisualGap()) return;
       const canvas = stage(), rect = canvas?.getBoundingClientRect?.();
       if ((!current() && !gesture) || blocked() || !rect || rect.width <= 0 || rect.height <= 0 || canvas.hidden || !placeOverlay(canvas)) { hideSVG(overlay, true); if (markers) markers.hidden = true; return; }
       const at = now();
@@ -1392,11 +1396,43 @@ return {create};
         segments.map(s => [s.route.id, s.route.paused, s.from, s.to, !!s.preview])]);
       hideSVG(overlay, !segments.length);
       drawMarkers(segments.filter(segment => !segment.preview), rect);
+      if (segments.length && !gesture) lastPaint = { scope, session: paintSession, path: window.location?.pathname || '', canvas,
+        rect: JSON.stringify([rect.left, rect.top, rect.width, rect.height]),
+        routes: JSON.stringify(items.map(route => [route.id, route.originId, route.destinationId, route.paused])),
+        rows, geometry: JSON.stringify(segments.map(segment => [segment.route.id, segment.from, segment.to])) };
+      else lastPaint = null;
+      visualGapAt = null; attr(overlay, 'data-census-pending', 'false');
       if (signature === overlaySignature) return;
       overlaySignature = signature; overlay.replaceChildren();
       Object.assign(overlay.style, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
       attr(overlay, 'viewBox', `0 0 ${rect.width} ${rect.height}`); makeMarker(overlay, markerId);
       for (const segment of segments) addLine(overlay, segment.from, segment.to, segment.route, markerId, segment.preview);
+    }
+    function holdVisualGap() {
+      let pending = false;
+      try { pending = options.isCensusPending?.(scope, lastPaint?.session ?? null) === true; } catch (_) { /* No presentation fallback. */ }
+      if (!pending) { visualGapAt = null; return false; }
+      const deny = () => { invalidateMap(); mapCache = null; return false; };
+      // A maximum 100 ms of unchanged decorative geometry may bridge one native
+      // publication gap. No cached world is exposed to gestures, editor or Send.
+      const at = now();
+      if (!Number.isSafeInteger(at) || at < 0) return deny();
+      if (visualGapAt === null) visualGapAt = at;
+      if (!lastPaint || gesture || !current() || blocked() || at < visualGapAt || at - visualGapAt > 100
+        || lastPaint.scope !== scope || lastPaint.path !== (window.location?.pathname || '')
+        || typeof options.projectSystem !== 'function') return deny();
+      const canvas = stage(), rect = canvas?.getBoundingClientRect?.();
+      if (canvas !== lastPaint.canvas || canvas?.isConnected === false || canvas?.hidden || !rect
+        || JSON.stringify([rect.left, rect.top, rect.width, rect.height]) !== lastPaint.rect || !placeOverlay(canvas)) return deny();
+      const items = routes();
+      if (JSON.stringify(items.map(route => [route.id, route.originId, route.destinationId, route.paused])) !== lastPaint.routes) return deny();
+      const byId = new Map(lastPaint.rows.map(system => [system.id, system]));
+      const geometry = items.map(route => ({ route, from: projected(byId.get(route.originId), rect), to: projected(byId.get(route.destinationId), rect) }))
+        .filter(segment => pointValid(segment.from) && pointValid(segment.to));
+      if (JSON.stringify(geometry.map(segment => [segment.route.id, segment.from, segment.to])) !== lastPaint.geometry) return deny();
+      for (const node of markerNodes.values()) node.disabled = true;
+      attr(overlay, 'data-census-pending', 'true');
+      return true;
     }
     function openRoute(id) {
       observeScope(getScope()); if (!current() || busy) return;
@@ -1423,7 +1459,7 @@ return {create};
         let node = markerNodes.get(id);
         if (!node) {
           const epoch = scopeEpoch;
-          node = button('Ruta', event => { if (trusted(event) && current() && epoch === scopeEpoch) openRoute(id); });
+          node = button('Ruta', event => { if (!node.disabled && trusted(event) && current() && epoch === scopeEpoch) openRoute(id); });
           node.dataset.routeMarker = id;
           Object.assign(node.style, { position: 'fixed', pointerEvents: 'auto', transform: 'translate(-50%,-50%)', minHeight: '32px', padding: '4px 8px', border: '1px solid #79d7dd', borderRadius: '8px', background: '#101d29', color: '#e5eef6', font: '12px system-ui,sans-serif', cursor: 'pointer' });
           markers.append(node); markerNodes.set(id, node);
@@ -1431,6 +1467,7 @@ return {create};
         const name = clean(segment.route.name) || `Ruta ${index + 1}`;
         node.setAttribute('aria-label', `Abrir resumen y configuración: ${name}`);
         node.title = `Abrir resumen y configuración: ${name}. No envía naves.`;
+        node.disabled = false;
         node.style.left = `${x}px`; node.style.top = `${y}px`;
       }
       for (const [id, node] of markerNodes) if (!keep.has(id)) { node.remove(); markerNodes.delete(id); }
@@ -1529,7 +1566,8 @@ return {create};
         ? capability?.cameraAvailable === false ? `Flechas del mapa principal ocultas: ${capability.cameraReason === 'native-viewport-size-mismatch' ? 'el tamaño de la cámara no coincide con el lienzo' : 'cámara no disponible'}${capability.cameraReason ? ' (' + clean(capability.cameraReason) + ')' : ''}.${geometryHint} El esquema de arriba sigue disponible. Puedes crear o editar rutas con los selectores, o iniciar Ctrl + arrastre sobre la ficha de un sistema propio.` : 'Las flechas del mapa principal siguen la cámara y el zoom con posiciones verificadas. El esquema de arriba es independiente de la cámara.'
         : 'Esquema por coordenadas. Las flechas sobre el mapa principal aparecen con posiciones verificadas; se ocultan al mover o ampliar la vista.');
       write(availability, capability?.coordinated === false ? 'Envíos bloqueados: este navegador no ofrece Web Locks para coordinar las pestañas.' : 'Los envíos necesitan datos recientes y coordinación Web Locks entre pestañas.');
-      const rows = systems(), items = routes(), byId = new Map(rows.map(s => [s.id, s]));
+      const holding = holdVisualGap();
+      const rows = holding ? lastPaint.rows : systems(), items = routes(), byId = new Map(rows.map(s => [s.id, s]));
       mapCache = { scope, at: now(), rows, items };
       populateSelects(rows); drawMini(rows, items);
       const signature = JSON.stringify([scope, sourceError, rows.map(s => [s.id, s.name, s.q, s.r]), items]);
@@ -3843,6 +3881,19 @@ function create({realm=globalThis,document=realm.document,observer,observerSourc
   const pendingAttribute='data-oldlight-empire-pending';
   const stamp=value=>JSON.stringify([value.generation,value.epoch,value.revision,value.connected,value.observedAt]);
   function settled(){try{return !!current&&container?.getAttribute(pendingAttribute)===stamp(current);}catch{return false;}}
+  // Presentation-only signal. Never returns a snapshot or an action permit.
+  function visualPending(scope,session=null){try{
+    if(stopped||failed||!installed||!current||settled()||current.scope!==scope||!current.connected||!current.complete
+      ||current.galaxy!==/^\/game\/galaxy\/([A-Za-z0-9_-]{1,64})(?:\/|$)/.exec(realm.location.pathname)?.[1])return false;
+    if(session!==null&&session!==JSON.stringify([current.generation,current.epoch]))return false;
+    const raw=container?.getAttribute(pendingAttribute);
+    if(typeof raw!=='string'||raw.length>200)return false;
+    const value=JSON.parse(raw),at=now();
+    return Array.isArray(value)&&value.length===5&&value[0]===current.generation&&value[1]===current.epoch
+      &&Number.isSafeInteger(value[2])&&value[2]>current.revision&&value[3]===true
+      &&Number.isSafeInteger(value[4])&&value[4]>=current.observedAt&&value[4]<=at+1000
+      &&current.observedAt<=at&&at-current.observedAt<=120000;
+  }catch{return false;}}
   const notify=()=>{for(const fn of subscribers){try{fn();}catch{}}try{onChange();}catch{}};
   function invalidate(message){current=null;reason=message;notify();}
   function cleanupBootstrap(){
@@ -3888,6 +3939,7 @@ function create({realm=globalThis,document=realm.document,observer,observerSourc
   }
   return Object.freeze({
     snapshot({includeOwnership=true}={}){return settled()?JSON.parse(JSON.stringify(includeOwnership?current:{...current,ownership:null})):null;},
+    visualPending,
     subscribe(fn){if(typeof fn!=='function')return()=>{};subscribers.add(fn);return()=>subscribers.delete(fn);},
     status:()=>({installed,reason,observed:!!current,connected:settled()&&current.connected===true,
       connectionObserved:!!current&&current.generation>0,complete:settled()&&current.complete===true}),
@@ -5499,7 +5551,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.12';
+  const SCRIPT_VERSION = '1.17.13';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -7088,6 +7140,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.13', title: 'Refuerzos propios y aliados pendientes', changes: [
+        'Un aliado sin ID ya no provoca revisión repetida en rutas Send a destino propio verificado; las revisiones existentes conservan pausa y plazo.',
+        'Se mantienen el bloqueo de destinos protegidos, ataques y envíos ajenos, los datos recientes y la revalidación de propietario y sesión.',
+        'La flecha evita el hueco visual breve entre censos de la misma sesión, sin autorizar acciones con datos pendientes.',
+      ] },
       { version: '1.17.12', title: 'Rutas con cuenta atrás y envío inmediato', changes: [
         'Cuenta atrás hasta la siguiente comprobación de cada ruta, con bloqueos y confirmaciones separados.',
         'El acceso Ruta sobre cada flecha abre su resumen y configuración sin enviar naves.',
@@ -9672,9 +9729,13 @@ return Object.freeze({ encode });
         if (config.players.some(p => p.id === owner.id || (p.alias && p.alias === alias(owner.name)))) {
           return blocked('protected', 'Destino protegido: el helper no enviará esta flota.');
         }
-        // An unresolved name cannot establish enduring identity, e.g. after a
-        // rename. Pause other attacks too until the user binds a verified ID.
-        if (config.players.some(p => !p.id)) return blocked('unresolved-alias', 'Hay un aliado pendiente de identificar por ID. Los envíos esperan para evitar atacarlo tras un cambio de nombre.');
+        // An unrelated unresolved friend must still veto attacks/foreign sends.
+        // A route's explicit Send to a freshly verified self-owned destination
+        // cannot attack that friend. Keep storage, owner, protected matches and
+        // the previous owner/session token checks on this narrow path too.
+        const ownReinforcement = typeof job?.id === 'string' && job.id.startsWith('route:')
+          && spec.target?.mode === 'custom' && spec.target.missionAction === 'send' && owner.id === w.selfId;
+        if (config.players.some(p => !p.id) && !ownReinforcement) return blocked('unresolved-alias', 'Hay un aliado pendiente de identificar por ID. Los ataques y envíos a destinos ajenos esperan para evitar atacarlo tras un cambio de nombre.');
         const token = { scope: s, q: point.q, r: point.r, ownerId: owner.id, epoch: w.epoch, generation: w.generation };
         if (previous && (previous.scope !== s || previous.q !== point.q || previous.r !== point.r
           || previous.ownerId !== owner.id || previous.epoch !== w.epoch || previous.generation !== w.generation)) {
@@ -9741,7 +9802,7 @@ return Object.freeze({ encode });
       if (config) {
         details.append(el('p', `Galaxia ${config.scope.split('/')[0]} · Cuenta ${config.scope.split('/')[1]}`));
         config.players.forEach((p, i) => {
-          const row = el('p', `${p.alias || 'Jugador'} · ${p.id || 'ID pendiente: envíos pausados'}`), button = el('button', 'Quitar protección'); button.type = 'button';
+          const row = el('p', `${p.alias || 'Jugador'} · ${p.id || 'ID pendiente: ataques y envíos ajenos pausados'}`), button = el('button', 'Quitar protección'); button.type = 'button';
           button.addEventListener('click', () => { try { remove(i, config.scope, JSON.stringify(p)); } catch (e) { feedback = e.message; feedbackScope = scope(); renderKey = ''; render(); } });
           row.append(button); details.append(row);
         });
@@ -9753,7 +9814,7 @@ return Object.freeze({ encode });
         submit.type = 'submit'; form.append(name, id, submit);
         form.addEventListener('submit', event => { event.preventDefault(); try { add({ id: id.value.trim(), name: name.value, expectedScope: config.scope }); feedback = 'Protección guardada. Los envíos existentes también la comprobarán.'; } catch(e) { feedback = e.message; } feedbackScope = scope(); renderKey = ''; render(); });
         details.append(form);
-        const hints = el('p', 'Un nombre sin ID bloquea los envíos. El ID debe verificarse con el juego antes de reanudarlos.'); details.append(hints);
+        const hints = el('p', 'Un nombre sin ID bloquea ataques y envíos a destinos ajenos. Una ruta Send a un destino propio verificado conserva las demás comprobaciones. El ID debe verificarse con el juego para identificar al aliado.'); details.append(hints);
       }
       if (feedback) details.append(el('p', feedback));
       const open = mounted.querySelector('details')?.open; details.open = Boolean(open);
@@ -18742,6 +18803,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       onControlRoot: installHelperKeyboardBoundary,
       getScope: () => missionContext().scope,
       getWorld: () => globalThis.OldLightEmpireBridge?.snapshot({ includeOwnership: false }) || null,
+      isCensusPending: (scope, session) => globalThis.OldLightEmpireBridge?.visualPending(scope, session) === true,
       getRoutes: () => reinforcementRoutes.list(),
       getDiagnostics: () => reinforcementRoutes.diagnostics(reinforcementDispatchBlock()),
       getError: () => reinforcementRoutes.state().error,

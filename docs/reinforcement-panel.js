@@ -55,6 +55,7 @@
     let listSignature = '', selectSignature = '', overlaySignature = '', miniSignature = '', frame = null, lastFrame = 0, viewIdentity = '';
     let explicitEndpoints = false;
     let sourceError = '', mapCache = null;
+    let lastPaint = null, visualGapAt = null, paintSession = null;
     const readError = () => { try { return clean(options.getError?.() || ''); } catch (_) { return 'No se puede leer el estado de las rutas.'; } };
     const fields = new Map(), listeners = [], diagnosticNodes = new Map(), markerNodes = new Map();
     const helperContains = node => root?.contains?.(node) || markers?.contains?.(node);
@@ -71,6 +72,7 @@
     };
     const systems = () => {
       const world = getWorld();
+      paintSession = world ? JSON.stringify([world.generation, world.epoch]) : null;
       const identity = `${getScope()}|${world?.epoch ?? ''}|${window.location?.pathname || ''}|${window.location?.search || ''}|${document.querySelector?.('[data-field="nameplate-name"]')?.textContent || ''}`;
       if (identity !== viewIdentity) { viewIdentity = identity; cancelGesture(); invalidateMap(); }
       return ownSystems(world, getScope(), now());
@@ -93,6 +95,7 @@
       return true;
     }
     function invalidateMap() {
+      lastPaint = null; visualGapAt = null;
       anchors.clear(); hoverSample = null; pointerSample = null; overlaySignature = '';
       if (overlay) { overlay.replaceChildren(); hideSVG(overlay, true); }
       if (markers) { markers.hidden = true; markers.replaceChildren(); markerNodes.clear(); }
@@ -203,6 +206,7 @@
     function drawOverlay() {
       if (!overlay || destroyed) return;
       observeScope(getScope());
+      if (holdVisualGap()) return;
       const canvas = stage(), rect = canvas?.getBoundingClientRect?.();
       if ((!current() && !gesture) || blocked() || !rect || rect.width <= 0 || rect.height <= 0 || canvas.hidden || !placeOverlay(canvas)) { hideSVG(overlay, true); if (markers) markers.hidden = true; return; }
       const at = now();
@@ -224,11 +228,43 @@
         segments.map(s => [s.route.id, s.route.paused, s.from, s.to, !!s.preview])]);
       hideSVG(overlay, !segments.length);
       drawMarkers(segments.filter(segment => !segment.preview), rect);
+      if (segments.length && !gesture) lastPaint = { scope, session: paintSession, path: window.location?.pathname || '', canvas,
+        rect: JSON.stringify([rect.left, rect.top, rect.width, rect.height]),
+        routes: JSON.stringify(items.map(route => [route.id, route.originId, route.destinationId, route.paused])),
+        rows, geometry: JSON.stringify(segments.map(segment => [segment.route.id, segment.from, segment.to])) };
+      else lastPaint = null;
+      visualGapAt = null; attr(overlay, 'data-census-pending', 'false');
       if (signature === overlaySignature) return;
       overlaySignature = signature; overlay.replaceChildren();
       Object.assign(overlay.style, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
       attr(overlay, 'viewBox', `0 0 ${rect.width} ${rect.height}`); makeMarker(overlay, markerId);
       for (const segment of segments) addLine(overlay, segment.from, segment.to, segment.route, markerId, segment.preview);
+    }
+    function holdVisualGap() {
+      let pending = false;
+      try { pending = options.isCensusPending?.(scope, lastPaint?.session ?? null) === true; } catch (_) { /* No presentation fallback. */ }
+      if (!pending) { visualGapAt = null; return false; }
+      const deny = () => { invalidateMap(); mapCache = null; return false; };
+      // A maximum 100 ms of unchanged decorative geometry may bridge one native
+      // publication gap. No cached world is exposed to gestures, editor or Send.
+      const at = now();
+      if (!Number.isSafeInteger(at) || at < 0) return deny();
+      if (visualGapAt === null) visualGapAt = at;
+      if (!lastPaint || gesture || !current() || blocked() || at < visualGapAt || at - visualGapAt > 100
+        || lastPaint.scope !== scope || lastPaint.path !== (window.location?.pathname || '')
+        || typeof options.projectSystem !== 'function') return deny();
+      const canvas = stage(), rect = canvas?.getBoundingClientRect?.();
+      if (canvas !== lastPaint.canvas || canvas?.isConnected === false || canvas?.hidden || !rect
+        || JSON.stringify([rect.left, rect.top, rect.width, rect.height]) !== lastPaint.rect || !placeOverlay(canvas)) return deny();
+      const items = routes();
+      if (JSON.stringify(items.map(route => [route.id, route.originId, route.destinationId, route.paused])) !== lastPaint.routes) return deny();
+      const byId = new Map(lastPaint.rows.map(system => [system.id, system]));
+      const geometry = items.map(route => ({ route, from: projected(byId.get(route.originId), rect), to: projected(byId.get(route.destinationId), rect) }))
+        .filter(segment => pointValid(segment.from) && pointValid(segment.to));
+      if (JSON.stringify(geometry.map(segment => [segment.route.id, segment.from, segment.to])) !== lastPaint.geometry) return deny();
+      for (const node of markerNodes.values()) node.disabled = true;
+      attr(overlay, 'data-census-pending', 'true');
+      return true;
     }
     function openRoute(id) {
       observeScope(getScope()); if (!current() || busy) return;
@@ -255,7 +291,7 @@
         let node = markerNodes.get(id);
         if (!node) {
           const epoch = scopeEpoch;
-          node = button('Ruta', event => { if (trusted(event) && current() && epoch === scopeEpoch) openRoute(id); });
+          node = button('Ruta', event => { if (!node.disabled && trusted(event) && current() && epoch === scopeEpoch) openRoute(id); });
           node.dataset.routeMarker = id;
           Object.assign(node.style, { position: 'fixed', pointerEvents: 'auto', transform: 'translate(-50%,-50%)', minHeight: '32px', padding: '4px 8px', border: '1px solid #79d7dd', borderRadius: '8px', background: '#101d29', color: '#e5eef6', font: '12px system-ui,sans-serif', cursor: 'pointer' });
           markers.append(node); markerNodes.set(id, node);
@@ -263,6 +299,7 @@
         const name = clean(segment.route.name) || `Ruta ${index + 1}`;
         node.setAttribute('aria-label', `Abrir resumen y configuración: ${name}`);
         node.title = `Abrir resumen y configuración: ${name}. No envía naves.`;
+        node.disabled = false;
         node.style.left = `${x}px`; node.style.top = `${y}px`;
       }
       for (const [id, node] of markerNodes) if (!keep.has(id)) { node.remove(); markerNodes.delete(id); }
@@ -361,7 +398,8 @@
         ? capability?.cameraAvailable === false ? `Flechas del mapa principal ocultas: ${capability.cameraReason === 'native-viewport-size-mismatch' ? 'el tamaño de la cámara no coincide con el lienzo' : 'cámara no disponible'}${capability.cameraReason ? ' (' + clean(capability.cameraReason) + ')' : ''}.${geometryHint} El esquema de arriba sigue disponible. Puedes crear o editar rutas con los selectores, o iniciar Ctrl + arrastre sobre la ficha de un sistema propio.` : 'Las flechas del mapa principal siguen la cámara y el zoom con posiciones verificadas. El esquema de arriba es independiente de la cámara.'
         : 'Esquema por coordenadas. Las flechas sobre el mapa principal aparecen con posiciones verificadas; se ocultan al mover o ampliar la vista.');
       write(availability, capability?.coordinated === false ? 'Envíos bloqueados: este navegador no ofrece Web Locks para coordinar las pestañas.' : 'Los envíos necesitan datos recientes y coordinación Web Locks entre pestañas.');
-      const rows = systems(), items = routes(), byId = new Map(rows.map(s => [s.id, s]));
+      const holding = holdVisualGap();
+      const rows = holding ? lastPaint.rows : systems(), items = routes(), byId = new Map(rows.map(s => [s.id, s]));
       mapCache = { scope, at: now(), rows, items };
       populateSelects(rows); drawMini(rows, items);
       const signature = JSON.stringify([scope, sourceError, rows.map(s => [s.id, s.name, s.q, s.r]), items]);

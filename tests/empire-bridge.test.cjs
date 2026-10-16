@@ -202,3 +202,26 @@ test('missing or malformed pending marker cannot expose a cached or freshly deli
   h.scriptNodes[0].removeAttribute('data-oldlight-empire-pending');assert.equal(h.app.snapshot(),null);
   h.scriptNodes[0].setAttribute('data-oldlight-empire-pending','bad');assert.equal(h.app.snapshot(),null);
 });
+
+test('visual pending signal never returns action data and rejects changed session or disconnect',()=>{
+ const h=harness(),value=validSnapshot();h.send(value);
+ assert.equal(h.app.visualPending(value.scope),false);
+ const next={...value,revision:value.revision+1};h.pending(next);
+ assert.equal(h.app.snapshot(),null);assert.equal(h.app.visualPending(value.scope),true);
+ assert.equal(h.app.visualPending(value.scope,JSON.stringify([value.generation,value.epoch])),true);
+ assert.equal(h.app.visualPending(value.scope,JSON.stringify([value.generation,value.epoch+1])),false);
+ assert.equal(h.app.visualPending('other/self'),false);
+ for(const patch of [{generation:value.generation+1},{epoch:value.epoch+1},{connected:false},{revision:value.revision-1},{observedAt:NOW+1001}]){
+  h.pending({...next,...patch});assert.equal(h.app.visualPending(value.scope),false);assert.equal(h.app.snapshot(),null);
+ }
+ h.pending(next);assert.equal(h.app.visualPending(value.scope),true);h.deliver(next);
+ assert.equal(h.app.visualPending(value.scope),false);assert.equal(h.app.snapshot().revision,next.revision);
+ h.pending({...next,revision:next.revision+1});h.app.stop();assert.equal(h.app.visualPending(value.scope),false);assert.equal(h.app.snapshot(),null);
+});
+
+test('visual publication signal is wired only to panel while action readers keep authoritative snapshot',()=>{
+ const source=require('node:fs').readFileSync(require('node:path').join(__dirname,'../old-light-auto-upgrade.user.js'),'utf8');
+ assert.match(source,/isCensusPending: \(scope, session\) => globalThis\.OldLightEmpireBridge\?\.visualPending\(scope, session\) === true/);
+ assert.equal((source.match(/isCensusPending:/g)||[]).length,1);
+ assert.match(source,/getWorld: \(\) => globalThis\.OldLightEmpireBridge\?\.snapshot\(\{ includeOwnership: false \}\) \|\| null/);
+});
