@@ -4704,6 +4704,53 @@
       "independentReviewCriteria": [
         "Verificar límite en bytes después de redacción y fronteras de caracteres multibyte; no relajar tamaño anunciado."
       ]
+    },
+    {
+      "id": "gate-timeout-partial-progress",
+      "feedback": "El timeout global remoto descarta resúmenes parciales y últimos casos aprobados, impidiendo localizar el corte sin descargar artefactos.",
+      "beforeFail": {
+        "revision": "79ae088af98769d71e2ac1735b6fd1aaa1229ba1",
+        "command": "node --test --test-name-pattern='CLI validates a recursive' /workspace/oldlight-transfer/gate-progress-before/tests/release-validation.test.cjs",
+        "observedFailure": "La misma fixture falla leyendo progress.completedFiles ausente; CI38923441731 solo conserva timeout300000ms sin failureEvents.",
+        "evidence": "docs/gate-progress-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/release-validation.test.cjs",
+          "name": "CLI validates a recursive committed fixture and records all offline evidence"
+        },
+        {
+          "file": "tests/release-validation.test.cjs",
+          "name": "runtime omissions, focused sources, zero tests and premature successful exit cannot pass"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Finalización correcta de fixture real del CLI",
+          "expected": "Conserva archivo/resumen y último caso; sigue exigiendo resumen global.",
+          "regression": {
+            "file": "tests/release-validation.test.cjs",
+            "name": "CLI validates a recursive committed fixture and records all offline evidence"
+          }
+        },
+        {
+          "scenario": "Fallo de una prueba tras otra aprobada, omisiones y salida prematura",
+          "expected": "Conserva progreso parcial pero el gate rechaza la ejecución incompleta/fallida.",
+          "regression": {
+            "file": "tests/release-validation.test.cjs",
+            "name": "runtime omissions, focused sources, zero tests and premature successful exit cannot pass"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Timeout remoto300s",
+          "reason": "El reporte histórico no contiene progreso parcial. La nueva instrumentación permite diagnosticar otro corte, pero no identifica retroactivamente el punto ni su causa."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Verificar que solo conserva eventos del runner existente, sin aceptar progreso parcial como éxito ni ampliar plazos, filtrar pruebas o reintentar."
+      ]
     }
   ]
 }

@@ -399,6 +399,7 @@ async function main() {
     });
     await stage('tests', async () => {
       assert(testFiles.length > 0, 'No tracked *.test.cjs files were found.');
+      const testStarted = performance.now();
       const result = await nodeChild(['--test', '--test-concurrency=1', '--test-timeout=120000',
         `--test-reporter=${path.join(snapshot, path.basename(__filename))}`, ...testFiles.map(name => path.join(snapshot, name))], snapshot, env, 300000);
       report.stages.tests = { status: 'running', command: 'node --test --test-concurrency=1 --test-timeout=120000 --test-reporter=<snapshot validator> <all tracked *.test.cjs>',
@@ -406,6 +407,26 @@ async function main() {
       try {
         const events = result.stdout.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
         report.stages.tests.failureEvents = events.filter(event => event.type === 'test:fail').slice(0, 20);
+        // Keep authenticated runner events when a global deadline prevents the final summary.
+        // This is diagnostic only: parseTests still requires every file and the global summary.
+        const inventoryPath = file => {
+          if (typeof file !== 'string') return null;
+          const relative = path.relative(snapshot, file).split(path.sep).join('/');
+          return testFiles.includes(relative) ? relative : null;
+        };
+        const completed = events.filter(event => event.type === 'test:summary' && inventoryPath(event.data.file));
+        report.stages.tests.progress = {
+          elapsedMs: performance.now() - testStarted, timeoutMs: 300000,
+          remainingFiles: testFiles.filter(file => !completed.some(event => inventoryPath(event.data.file) === file)),
+          completedFiles: completed.map(({ data }) => ({
+            path: inventoryPath(data.file),
+            counts: data.counts, durationMs: data.duration_ms, success: data.success,
+          })),
+          lastPasses: events.filter(event => event.type === 'test:pass').slice(-10).map(({ data }) => ({
+            name: data.name, file: inventoryPath(data.file),
+            durationMs: data.details?.duration_ms,
+          })),
+        };
       } catch { report.stages.tests.reporterOutputTail = result.stdout.slice(-4000); }
       unchanged();
       requireSuccess(result, 'Complete test suite');

@@ -170,3 +170,7 @@ La candidata44851f8 demostró que separar logs del entorno no basta: las reglas 
 La firma de render se comprobaba después de planificar. Con1objetivo/1000sistemas, candidatos/donantes cuadráticos producen17tareas largas y22frames/6s; sinobjetivos también se clonaba censo. Exigir perfil CPU/rAF/longtask real con0objetivos,flota lista,imposible,reunión viable yvistaoculta, además de equivalencia funcional/destinos/reservas. Diferenciar el coste reproducido del hanging real sin confirmar versión/censo. Un atajo vacío no debe eludir lectura fallida ni autorizar jobs huérfanos, y saltarse preview oculta no autoriza cachear guardas. El peor caso de reunión viable grande permanece explícito.
 
 DiagnósticosUnicode: KiB cuenta bytes, no longitudUTF16. Exigir multibyte después de sanitizar y evitar cortar un carácter; la candidata ce0 excedía16KiB aunque estaba acotada en caracteres.
+
+## Timeout global sin progreso parcial
+
+La CI38923441731 de1.17.27 agotó300s sin failureEvents; el reporte descartaba resúmenes y pasos aprobados ya recibidos. Exigir conservar progreso parcial como diagnóstico, manteniendo la exigencia del resumen global completo para aprobar. No atribuir el corte a Chromium sin evidencia ni aumentar un plazo por intuición. Contrastar el último archivo completado y el siguiente inventariado antes de corregir costes o bloqueos. Ver [reproducción y límites](gate-progress-validation.md).

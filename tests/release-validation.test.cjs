@@ -91,6 +91,8 @@ test('CLI validates a recursive committed fixture and records all offline eviden
   assert.ok(report.input.files.every(file => /^[a-f0-9]{64}$/.test(file.sha256)));
   assert.deepEqual(report.stages.tests.files.map(file => file.path), ['tests/nested/sample.test.cjs']);
   assert.equal(report.stages.tests.counts.tests, 1);
+  assert.deepEqual(report.stages.tests.progress.completedFiles.map(file => file.path), ['tests/nested/sample.test.cjs']);
+  assert.equal(report.stages.tests.progress.lastPasses.at(-1).name, 'fixture passes');
   assert.equal(report.stages.feedbackManifest.scope, 'schema-and-tracked-links-only');
   assert.equal(report.stages.feedbackManifest.independentReview, 'required-separately');
   assert.deepEqual(report.stages.tests.regressionPasses, [{ file: 'tests/nested/sample.test.cjs', name: 'fixture passes', status: 'passed' }]);
@@ -159,7 +161,7 @@ test('runtime omissions, focused sources, zero tests and premature successful ex
     ["const t=require('node:test'); t.only('focused',()=>{}); t('ordinary',()=>{});", /Focused/],
     ["const t=require('node:test'); t('focused',{only:true},()=>{});", /Focused/],
     ["const t=require('node:test'); t('unfinished',{timeout:20},()=>new Promise(()=>{}));", /Complete test suite failed/],
-    ["const t=require('node:test'); t('failure',()=>{throw Error('fixture');});", /Complete test suite failed/],
+    ["const t=require('node:test'); t('completed before failure',()=>{}); t('failure',()=>{throw Error('fixture');});", /Complete test suite failed/],
     ["const t=require('node:test'); t.describe('empty',()=>{});", /zero tests/],
     ['// no tests', /Incomplete test report/],
     ['process.exit(0);', /Incomplete test report/],
@@ -168,7 +170,11 @@ test('runtime omissions, focused sources, zero tests and premature successful ex
   for (const [source, expected] of cases) {
     const { root } = fixture(t, { 'tests/nested/sample.test.cjs': source });
     const report = fails(root, expected);
-    if (source.includes("throw Error('fixture')")) assert.ok(report.stages.tests.failureEvents.length > 0);
+    if (source.includes("throw Error('fixture')")) {
+      assert.ok(report.stages.tests.failureEvents.length > 0);
+      assert.equal(report.stages.tests.progress.lastPasses.at(-1).name, 'completed before failure');
+      assert.deepEqual(report.stages.tests.progress.completedFiles.map(file => file.path), ['tests/nested/sample.test.cjs']);
+    }
   }
 });
 
