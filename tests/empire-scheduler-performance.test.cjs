@@ -18,7 +18,7 @@ function scheduler({ imperial = true, execute = () => {}, extras = {}, actualSte
   let clock = 1000, offset = 0, nextId = 0, timers = [], microtasks = [];
   const steps = [], errors = [], state = { imperial };
   const globals = {
-    reinforcementPanel: null, reinforcementRoutes: null, reinforcementNavigation: null, isReinforcementAllowed: () => true,
+    conquest: null, conquestPanel: null, conquestNavigation: null, isConquestAllowed: () => true, reinforcementPanel: null, reinforcementRoutes: null, reinforcementNavigation: null, isReinforcementAllowed: () => true,
     Date: { now: () => clock + offset }, Math,
     settings: { enabled: true }, document: { hidden: false },
     queueMicrotask: fn => microtasks.push(fn),
@@ -132,7 +132,7 @@ function missionHarness() {
     shipMinimums: Object.fromEntries(SHIPS.map(([id]) => [id, 5])), countAway: true };
   const panel = {};
   const globals = {
-    reinforcementPanel: null, reinforcementRoutes: null, reinforcementNavigation: null, isReinforcementAllowed: () => true,
+    conquest: null, conquestPanel: null, conquestNavigation: null, isConquestAllowed: () => true, reinforcementPanel: null, reinforcementRoutes: null, reinforcementNavigation: null, isReinforcementAllowed: () => true,
     Date, Math, Map, Boolean, settings, SHIPS, PANEL: '#structures', FLEET_PANEL: '#fleet', nextClickAt: 0,
     leader: true, importingBackup: false, pending: null,
     systemId: () => A,

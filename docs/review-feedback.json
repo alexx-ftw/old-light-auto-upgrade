@@ -4166,6 +4166,140 @@
         "Revisar especificidad CSS, fila de autoguardado y separación responsive real.",
         "Derivar un caso propio de ayuda larga, reordenado o zoom y comprobar toggle legítimo/rollback."
       ]
+    },
+    {
+      "id": "conquest-durable-intent-and-delayed-reports",
+      "feedback": "La revisión del borrador no publicado de conquista detectó pérdida de intención durable y posibilidad de revivir una orden o reintento ante cierre/reporte tardío. Véase evidencia para distinguir los dos borradores locales de main.",
+      "beforeFail": {
+        "revision": "f4ebdb12b79f86b0b8c7edc8f6de61f30dc41d66",
+        "command": "Consultar comandos exactos de sustitución de controller en docs/1.17.25-conquest-validation.md; son experimentos históricos, no gate.",
+        "observedFailure": "Tres casos fallan con el módulo del borrador anterior y pasan con el mismo harness actual; Missing expected exception, estado planning en vez de uncertain o reporte devuelto false según el caso.",
+        "evidence": "docs/1.17.25-conquest-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/conquest-core.test.cjs",
+          "name": "conquest storage false cannot acknowledge an unsaved objective"
+        },
+        {
+          "file": "tests/conquest-core.test.cjs",
+          "name": "conquest storage noop cannot acknowledge an unsaved objective"
+        },
+        {
+          "file": "tests/conquest-core.test.cjs",
+          "name": "cancelled sent raid cannot be removed before its delayed report is consumed"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "conquest storage false cannot acknowledge an unsaved objective",
+          "expected": "Conservar intención y evidencia; impedir envío duplicado o fallback legado; mantener recuperación explícita legítima.",
+          "regression": {
+            "file": "tests/conquest-core.test.cjs",
+            "name": "conquest storage false cannot acknowledge an unsaved objective"
+          }
+        },
+        {
+          "scenario": "conquest storage noop cannot acknowledge an unsaved objective",
+          "expected": "Conservar intención y evidencia; impedir envío duplicado o fallback legado; mantener recuperación explícita legítima.",
+          "regression": {
+            "file": "tests/conquest-core.test.cjs",
+            "name": "conquest storage noop cannot acknowledge an unsaved objective"
+          }
+        },
+        {
+          "scenario": "cancelled sent raid cannot be removed before its delayed report is consumed",
+          "expected": "Conservar intención y evidencia; impedir envío duplicado o fallback legado; mantener recuperación explícita legítima.",
+          "regression": {
+            "file": "tests/conquest-core.test.cjs",
+            "name": "cancelled sent raid cannot be removed before its delayed report is consumed"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Pedidos y reportes reales",
+          "reason": "Pruebas offline con aceptación nativa sintética, sin acceder a partida."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Contrastar identidad de borradores parciales y antes/después con el mismo harness, sin atribuirlos a main.",
+        "Ejercer guardar→encolar→sending→sent→cancelar/cerrar→retirar→reporte tardío y reemplazar cola antes de reconciliación.",
+        "Comprobar recuperación legítima, reservas/defensa/propiedad/aliados y que la UI no eluda las guardas."
+      ]
+    },
+    {
+      "id": "conquest-manual-close-and-disappeared-queue",
+      "feedback": "La revisión del borrador no publicado de conquista detectó pérdida de intención durable y posibilidad de revivir una orden o reintento ante cierre/reporte tardío. Véase evidencia para distinguir los dos borradores locales de main.",
+      "beforeFail": {
+        "revision": "3d1036033b82cdbe25ba0e0c061628c18eda3a66",
+        "command": "Consultar comandos exactos de sustitución de controller en docs/1.17.25-conquest-validation.md; son experimentos históricos, no gate.",
+        "observedFailure": "Tres casos fallan con el módulo del borrador anterior y pasan con el mismo harness actual; Missing expected exception, estado planning en vez de uncertain o reporte devuelto false según el caso.",
+        "evidence": "docs/1.17.25-conquest-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/conquest-core.test.cjs",
+          "name": "manual closure cannot erase a confirmed sent raid before its delayed report"
+        },
+        {
+          "file": "tests/conquest-core.test.cjs",
+          "name": "disappeared queued claim becomes uncertain and never requeues a possibly accepted native send"
+        },
+        {
+          "file": "tests/conquest-core.test.cjs",
+          "name": "removed manually resolved uncertain objective suppresses future delayed reports from legacy retries"
+        },
+        {
+          "file": "tests/conquest-queue-integration.test.cjs",
+          "name": "importing an empty production queue after acceptance before reconciliation never dispatches the same conquest claim twice"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "manual closure cannot erase a confirmed sent raid before its delayed report",
+          "expected": "Conservar intención y evidencia; impedir envío duplicado o fallback legado; mantener recuperación explícita legítima.",
+          "regression": {
+            "file": "tests/conquest-core.test.cjs",
+            "name": "manual closure cannot erase a confirmed sent raid before its delayed report"
+          }
+        },
+        {
+          "scenario": "disappeared queued claim becomes uncertain and never requeues a possibly accepted native send",
+          "expected": "Conservar intención y evidencia; impedir envío duplicado o fallback legado; mantener recuperación explícita legítima.",
+          "regression": {
+            "file": "tests/conquest-core.test.cjs",
+            "name": "disappeared queued claim becomes uncertain and never requeues a possibly accepted native send"
+          }
+        },
+        {
+          "scenario": "removed manually resolved uncertain objective suppresses future delayed reports from legacy retries",
+          "expected": "Conservar intención y evidencia; impedir envío duplicado o fallback legado; mantener recuperación explícita legítima.",
+          "regression": {
+            "file": "tests/conquest-core.test.cjs",
+            "name": "removed manually resolved uncertain objective suppresses future delayed reports from legacy retries"
+          }
+        },
+        {
+          "scenario": "Cola productiva acepta envío, importConfig vacía antes de reconciliar controller, después tick y dispatch.",
+          "expected": "Una aceptación total; objetivo uncertain sin nuevo pedido. Importación de preferencias Drive no sustituye esta cola.",
+          "regression": {
+            "file": "tests/conquest-queue-integration.test.cjs",
+            "name": "importing an empty production queue after acceptance before reconciliation never dispatches the same conquest claim twice"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Pedidos y reportes reales",
+          "reason": "Pruebas offline con aceptación nativa sintética, sin acceder a partida."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Contrastar identidad de borradores parciales y antes/después con el mismo harness, sin atribuirlos a main.",
+        "Ejercer guardar→encolar→sending→sent→cancelar/cerrar→retirar→reporte tardío y reemplazar cola antes de reconciliación.",
+        "Comprobar recuperación legítima, reservas/defensa/propiedad/aliados y que la UI no eluda las guardas."
+      ]
     }
   ]
 }

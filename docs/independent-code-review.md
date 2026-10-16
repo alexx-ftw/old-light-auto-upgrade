@@ -146,3 +146,7 @@ La escena pública nativa con mundos aislados y GPU detectó marcador visible/ac
 ## Tarjetas de flota y protección de créditos1.17.24
 
 La hipótesis de que gridColumn1/-1 crea una fila nueva falló: grid-row1 heredado de label permite solapamiento. Revisar geometría de todos los controles con CSS y ShadowRoot reales, cardinalidad, ayuda larga y fila de estado, más allá de comprobar texto o lógica de créditos. Ver docs/1.17.24-credit-layout-validation.md; la confirmación instalada sigue pendiente.
+
+## Conquista1.17.25: cerrar intención no equivale a resolver envío
+
+La revisión adversarial de los borradores no publicados refutó que impedir Retirar bastase: Cerrar tras revisión manual podía borrar un ataque confirmado, y sustituir una cola permitía recrear un claim ya aceptado. Exigir recorrer las acciones UI alternativas y persistencia entre GM/cola, reportes tardíos, incertidumbre y fallback legado. Una lectura válida no confirma una escritura false/no-op. La comparación del target debe ser semántica después de normalización productiva. Ver [reproducciones y límites](1.17.25-conquest-validation.md); los árboles parciales históricos no son revisiones publicadas. La propiedad positiva actual no inventa dueño histórico ni prueba fabricación.

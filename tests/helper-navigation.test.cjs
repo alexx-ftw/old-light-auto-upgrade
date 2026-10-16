@@ -55,7 +55,7 @@ function harness(activeTab = 'fleet') {
     tabs, pages, conditionsDetails: el('details'), panelWidth, driveContainer, driveShortcut: el('button'), eta: el('div'), contextLabel: el('span'), pageScroll: new Map() };
   const settings = { activeTab, enabled: false, conditionsExpanded: true, shipMinimums: { probe: 7 } };
   const storage = new Map();
-  const context = vm.createContext({ document, ui, settings, localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => { storage.set(key, value); writes.push([key, value]); } },
+  const context = vm.createContext({ conquestPanel: null, document, ui, settings, localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => { storage.set(key, value); writes.push([key, value]); } },
     MutationObserver: class { observe() {} }, driveBackup: { getStatus: () => ({ code: 'disconnected' }) },
     presentationFailure: message => { throw Error(message); }, text: node => node?.textContent || '',
     setText: (node, value) => { if (node.textContent !== value) node.textContent = value; },
@@ -112,7 +112,7 @@ test('navigation CSS uses normal flow and container-aware narrow controls', () =
 test('the runtime forwards its current identity before rendering even when the dashboard is hidden', () => {
   const calls = [], context = { scope: 'beta/other-player' };
   const updateSource = part('  function updateEmpireState()', '  function installEmpirePanel(');
-  const sandbox = vm.createContext({ missionContext: () => context, leader: true, canNavigateEmpire: () => true,
+  const sandbox = vm.createContext({ conquestPanel: null, missionContext: () => context, leader: true, canNavigateEmpire: () => true,
     settings: { enabled: false }, document: { hidden: true },
     empireController: { update: input => calls.push(['update', input.scope, input.enabled]) },
     empirePanel: { observeScope: scope => calls.push(['scope', scope]), render: () => calls.push(['render']) } });

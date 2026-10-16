@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.24
+// @version      1.17.25
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -2002,6 +2002,524 @@ return {create};
     return Object.freeze({ mount, render, observeScope, open: showEditor, openRoute, containsControl: node => markers?.contains?.(node) === true, getVisualDiagnostics, cancelGesture, invalidateMap, destroy });
   }
   return Object.freeze({ create, ownSystems, SHIPS: Object.freeze(SHIPS.slice()) });
+});
+
+/* Conquest planning is local intent. Only the native mission adapter may execute an order. */
+(function(root,factory){const api=factory();if(typeof module==='object'&&module.exports)module.exports=api;
+ if(root)Object.defineProperty(root,'OldLightConquestCore',{configurable:true,value:api});})(globalThis,function(){
+'use strict';
+const SHIPS=Object.freeze(['probe','marauder','sentinel','vanguard']);
+const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SCOPE=/^[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{1,96}$/;
+const MAX_AGE=120000,MAX_FLEET=50000,MAX_OBJECTIVES=16,MAX_OBSERVED=1000000;
+const fail=message=>{throw Error(message||'Datos de conquista no válidos.');};
+const plain=x=>!!x&&typeof x==='object'&&!Array.isArray(x)&&[Object.prototype,null].includes(Object.getPrototypeOf(x));
+const get=(x,k)=>{const d=x&&Object.getOwnPropertyDescriptor(x,k);return d&&Object.hasOwn(d,'value')?d.value:undefined;};
+const object=(x,keys)=>plain(x)&&Object.keys(x).every(k=>keys.includes(k)&&Object.hasOwn(Object.getOwnPropertyDescriptor(x,k),'value'))?x:fail();
+const integer=(x,max=Number.MAX_SAFE_INTEGER,min=0)=>Number.isSafeInteger(x)&&x>=min&&x<=max?x:fail();
+const string=(x,max=200)=>typeof x==='string'&&x.length<=max&&!/[\u0000-\u001f\u007f]/.test(x)?x:fail();
+const id=x=>typeof x==='string'&&UUID.test(x)?x.toLowerCase():fail();
+const scope=x=>typeof x==='string'&&SCOPE.test(x)?x:fail('Selecciona una cuenta y galaxia verificadas.');
+const copy=x=>JSON.parse(JSON.stringify(x));
+const zeros=()=>Object.fromEntries(SHIPS.map(t=>[t,0]));
+const samePoint=(a,b)=>a&&b&&a.q===b.q&&a.r===b.r;
+const distance=(a,b)=>(Math.abs(a.q-b.q)+Math.abs(a.r-b.r)+Math.abs(a.q+a.r-b.q-b.r))/2;
+const point=x=>{object(x,['q','r']);return {q:integer(get(x,'q'),10000000,-10000000),r:integer(get(x,'r'),10000000,-10000000)};};
+function fleet(x,combat=false,max=MAX_FLEET){object(x,SHIPS);const out=Object.fromEntries(SHIPS.map(t=>[t,integer(get(x,t)??0,max)]));
+ if(combat&&!out.marauder&&!out.sentinel)fail('Indica al menos un Marauder o Sentinel para la incursión.');return out;}
+function exactShips(rows){
+ if(!Array.isArray(rows)||rows.length>SHIPS.length)return null;
+ const out=zeros(),seen=new Set();
+ for(const row of rows){const type=get(row,'type'),n=get(row,'quantity');
+  if(!SHIPS.includes(type)||seen.has(type)||get(row,'approximate')===true||(get(row,'kind')!==undefined&&get(row,'kind')!=='exact')||!Number.isSafeInteger(n)||n<0||n>MAX_OBSERVED)return null;
+  seen.add(type);out[type]=n;
+ }
+ return out;
+}
+function parseReport(value,at){
+ try{
+  const s=scope(get(value,'scope')),item=get(value,'item'),detail=get(value,'detail');
+  const reportId=id(get(item,'id'));if(reportId!==id(get(detail,'id')))return null;
+  const raw=get(item,'takenAt')??get(detail,'createdAt'),takenAt=integer(typeof raw==='string'?Date.parse(raw):raw);
+  if(takenAt>at)return null;
+  const route=get(detail,'route'),from=get(route,'from'),to=get(route,'to'),sections=get(detail,'sections'),battle=get(sections,'battle');
+  if(get(from,'ownerKind')!=='owned'||!['human','npc','dormant'].includes(get(to,'ownerKind'))||!plain(battle)||get(sections,'incoming')!=null||get(sections,'probe')!=null||get(battle,'targetOwnerKind')==='owned')return null;
+  const origin=point({q:get(from,'q'),r:get(from,'r')}),target=point({q:get(to,'q'),r:get(to,'r')});if(samePoint(origin,target))return null;
+  const loyalty=get(battle,'loyaltyChange'),captured=get(loyalty,'captured')===true||get(get(detail,'variant'),'kind')==='capture_success';
+  const verdict=captured?'Captured':get(item,'verdict');if(!['Victory','Defeat','Draw','Captured'].includes(verdict))return null;
+  const defenderBefore=exactShips(get(battle,'defenderShips')),defenderLost=exactShips(get(battle,'defenderLost'));
+  let defenderRemaining=null;
+  if(defenderBefore&&defenderLost&&SHIPS.every(t=>defenderLost[t]<=defenderBefore[t]))defenderRemaining=Object.fromEntries(SHIPS.map(t=>[t,defenderBefore[t]-defenderLost[t]]));
+  const number=x=>typeof x==='number'&&Number.isFinite(x)?x:null;
+  return {replenishmentEvidence:'unavailable',scope:s,id:reportId,takenAt,origin,target,verdict,captured,attackerShips:exactShips(get(battle,'attackerShips')),
+   attackerLost:exactShips(get(battle,'attackerLost')),defenderBefore,defenderLost,defenderRemaining,
+   loyalty:{before:number(get(loyalty,'before')),after:number(get(loyalty,'after')),damage:number(get(loyalty,'damageDealt'))},
+   combatDeficit:typeof get(battle,'combatDeficit')==='boolean'?get(battle,'combatDeficit'):null,
+   defenderSectorBonusPct:number(get(battle,'defenderSectorBonusPct')),
+   ownerName:typeof get(to,'ownerName')==='string'?string(get(to,'ownerName')):null,
+   owner:typeof get(to,'ownerId')==='string'&&UUID.test(get(to,'ownerId'))?id(get(to,'ownerId')):null};
+ }catch{return null;}
+}
+function worldFor(value,s,at){
+ try{
+  if(get(value,'scope')!==s||get(value,'connected')!==true||get(value,'complete')!==true)return null;
+  const observedAt=integer(get(value,'observedAt'));if(observedAt>at||at-observedAt>MAX_AGE)return null;
+  const rows=get(value,'systems'),transits=get(value,'transits');if(!Array.isArray(rows)||!Array.isArray(transits)||rows.length>10000||transits.length>20000)return null;
+  const seen=new Set(),coordinates=new Set(),systems=[];
+  for(const raw of rows){const systemId=id(get(raw,'id')),coordinate=point({q:get(raw,'q'),r:get(raw,'r')}),key=coordinate.q+','+coordinate.r;
+   if(seen.has(systemId)||coordinates.has(key)||get(raw,'owned')===false)return null;
+   seen.add(systemId);coordinates.add(key);const ships=exactShips(get(raw,'fleet'));if(!ships)return null;
+   systems.push({id:systemId,...coordinate,name:string(get(raw,'name')??systemId),fleet:ships});
+  }
+  return {observedAt,systems,transits:transits.map(t=>({to:point({q:get(t,'toQ'),r:get(t,'toR')})}))};
+ }catch{return null;}
+}
+function ownerFor(value,s,target,at){
+ try{
+  if(!worldFor(value,s,at)||get(value,'selfId')!==s.split('/')[1])return null;
+  const epoch=integer(get(value,'epoch'),Number.MAX_SAFE_INTEGER,1),generation=integer(get(value,'generation'),Number.MAX_SAFE_INTEGER,1);
+  const ownership=get(value,'ownership'),players=get(ownership,'players');
+  if(get(ownership,'version')!==1||!Array.isArray(players)||players.length>10000)return null;
+  const ids=new Set(),cells=new Set();let found=null,total=0;
+  for(const player of players){const ownerId=id(get(player,'id')),owned=get(player,'owned');if(ids.has(ownerId)||!Array.isArray(owned)||owned.length>10000)return null;ids.add(ownerId);
+   for(const raw of owned){if(++total>10000)return null;const cell=point({q:get(raw,'q'),r:get(raw,'r')}),key=cell.q+','+cell.r;if(cells.has(key))return null;cells.add(key);
+    if(samePoint(cell,target))found={scope:s,ownerId,ownerName:typeof get(player,'name')==='string'?string(get(player,'name')):'',epoch,generation,observedAt:get(value,'observedAt')};
+   }
+  }
+  return found;
+ }catch{return null;}
+}
+function createOwnerReader({getBridge,now=Date.now}){
+ let bridge=null,unsubscribe=null,revision=0,snapshot=null;const cache=new Map();
+ const invalidate=()=>{revision++;snapshot=null;cache.clear();};
+ function read(s,target){try{
+  const current=getBridge();if(current!==bridge){unsubscribe?.();bridge=current;invalidate();unsubscribe=bridge?.subscribe(invalidate)||null;}
+  const status=bridge?.status?.();if(!status?.connected||!status.complete)return null;
+  const at=now(),key=JSON.stringify([s,target.q,target.r]);
+  if(cache.has(key)){const value=cache.get(key);return value&&value.observedAt<=at&&at-value.observedAt<=MAX_AGE?copy(value):null;}
+  const generation=revision;if(snapshot===null)snapshot=bridge.snapshot();
+  const value=ownerFor(snapshot,s,target,at),after=bridge.status();
+  if(revision!==generation||!after?.connected||!after.complete){invalidate();return null;}
+  cache.set(key,value);return value?copy(value):null;
+ }catch{return null;}}
+ return {read,destroy(){unsubscribe?.();bridge=null;unsubscribe=null;invalidate();}};
+}
+function plan(objectives,world,jobs,s,at){
+ const verified=worldFor(world,s,at),result=[];
+ const blocked=message=>objectives.map(o=>({id:o.id,ready:false,message,origin:null,transfers:[],reservations:[]}));
+ if(!verified)return blocked('Esperando censo propio completo y actual.');
+ if(!Array.isArray(jobs)||jobs.length>32)return blocked('Esperando una cola de misiones verificable.');
+ const available=new Map(verified.systems.map(system=>[system.id,copy(system.fleet)])),busy=new Set();
+ try{for(const job of jobs){if(get(job,'scope')!==s)continue;const origin=id(get(job,'originId')),status=get(job,'status');
+  if(!['waiting','paused','sending','sent','uncertain'].includes(status))return blocked('La cola contiene una misión sin estado verificable.');
+  if(status==='sent'){const sentAt=integer(get(job,'sentAt'));if(verified.observedAt<=sentAt)busy.add(origin);}
+  else{fleet(get(job,'quantities'));busy.add(origin);}
+ }}catch{return blocked('No se pueden verificar los compromisos de flota.');}
+ // Frozen plans reserve both staging ships and future donor transfers while a ticket settles.
+ for(const o of objectives)if(o.ticket&&['planning','awaiting_report','uncertain'].includes(o.status)){
+  for(const reservation of o.ticket.reservations||[]){const stock=available.get(reservation.originId);if(stock)for(const t of SHIPS)stock[t]=Math.max(0,stock[t]-reservation.quantities[t]);}
+  busy.add(o.ticket.originId);
+ }
+ for(const o of [...objectives].sort((a,b)=>a.createdAt-b.createdAt||a.id.localeCompare(b.id))){
+  const entry={id:o.id,ready:false,message:'',origin:null,transfers:[],reservations:[]};result.push(entry);
+  if(o.status!=='planning'||o.ticket){entry.message=o.message||'Objetivo detenido o misión pendiente.';continue;}
+  if(o.barrierAt&&verified.observedAt<=o.barrierAt){entry.message='Esperando censo posterior a la pausa o edición del plan.';continue;}
+  if(verified.transits.some(x=>samePoint(x.to,o.target))){entry.message='Ya existe una flota en tránsito al objetivo. Esperando su resultado.';continue;}
+  if(verified.systems.some(x=>samePoint(x,o.target))){entry.message='El censo actual confirma propiedad propia.';continue;}
+  if(o.raids>=o.maxRaids||SHIPS.reduce((sum,t)=>sum+o.losses[t],0)>=o.maxLosses){entry.message='Límite de incursiones o pérdidas alcanzado.';continue;}
+  if(SHIPS.reduce((sum,t)=>sum+o.fleet[t],0)>o.maxLosses-SHIPS.reduce((sum,t)=>sum+o.losses[t],0)){entry.message='La flota supera el presupuesto de pérdidas restante. Revisa el plan antes de otra incursión.';continue;}
+  const usable=verified.systems.filter(x=>!busy.has(x.id)).map(x=>({...x,free:Object.fromEntries(SHIPS.map(t=>[t,Math.max(0,available.get(x.id)[t]-o.defense[t])]))}));
+  const candidates=[];
+  for(const origin of usable){
+   const missing=Object.fromEntries(SHIPS.map(t=>[t,Math.max(0,o.fleet[t]-origin.free[t])])),transfers=[];
+   for(const donor of usable.filter(x=>x.id!==origin.id).sort((a,b)=>distance(a,origin)-distance(b,origin)||a.id.localeCompare(b.id))){
+    const amounts=Object.fromEntries(SHIPS.map(t=>[t,Math.min(donor.free[t],missing[t])]));
+    if(SHIPS.some(t=>amounts[t])){transfers.push({originId:donor.id,destinationId:origin.id,originName:donor.name,destinationName:origin.name,from:{q:donor.q,r:donor.r},to:{q:origin.q,r:origin.r},quantities:amounts});for(const t of SHIPS)missing[t]-=amounts[t];}
+   }
+   if(SHIPS.some(t=>missing[t]))continue;
+   const assemblyCost=transfers.reduce((sum,x)=>sum+distance(x.from,origin)*SHIPS.reduce((n,t)=>n+x.quantities[t],0),0);
+   candidates.push({origin,transfers,score:distance(origin,o.target)+assemblyCost});
+  }
+  candidates.sort((a,b)=>Number(a.transfers.length>0)-Number(b.transfers.length>0)||a.score-b.score||a.origin.id.localeCompare(b.origin.id));
+  const chosen=candidates[0];if(!chosen){entry.message='Faltan naves libres tras defensas y compromisos; revisa la flota prevista.';continue;}
+  entry.origin={id:chosen.origin.id,name:chosen.origin.name,q:chosen.origin.q,r:chosen.origin.r};entry.transfers=chosen.transfers;
+  const originAmounts=Object.fromEntries(SHIPS.map(t=>[t,Math.min(o.fleet[t],chosen.origin.free[t])]));
+  entry.reservations=[{originId:chosen.origin.id,quantities:originAmounts},...chosen.transfers.map(t=>({originId:t.originId,quantities:t.quantities}))];
+  for(const reservation of entry.reservations)for(const t of SHIPS)available.get(reservation.originId)[t]-=reservation.quantities[t];
+  const incoming=verified.transits.some(t=>samePoint(t.to,chosen.origin));
+  entry.ready=!chosen.transfers.length&&!incoming;
+  entry.message=incoming?'Esperando llegada confirmada por censo; no se suman naves en tránsito.':chosen.transfers.length?'Reunir refuerzos primero; después una incursión desde el origen elegido.':'Flota reunida y defensa preservada. Una incursión; reevaluar su reporte.';
+ }
+ return result;
+}
+return {SHIPS,MAX_AGE,MAX_FLEET,MAX_OBJECTIVES,MAX_OBSERVED,parseReport,worldFor,ownerFor,createOwnerReader,plan,
+ // Shared bounded primitives keep controller storage and pure planning on one contract.
+ primitives:{fail,plain,get,object,integer,string,id,scope,copy,zeros,samePoint,point,fleet}};
+});
+
+/* Durable conquest objectives. Queueing intent never bypasses native mission confirmation. */
+(function(root,factory){const api=factory(root.OldLightConquestCore||(typeof module==='object'&&module.exports?require('./conquest-core.js'):null));
+ if(typeof module==='object'&&module.exports)module.exports=api;
+ if(root)Object.defineProperty(root,'OldLightConquestController',{configurable:true,value:api});})(globalThis,function(core){
+'use strict';
+const {SHIPS}=core,{fail,get,object,integer,string,id,scope,copy,zeros,samePoint,point,fleet}=core.primitives;
+const STATES=['planning','paused','awaiting_report','captured','uncertain','limit','cancelled'];
+const sync=value=>{if(value&&typeof value.then==='function'){Promise.resolve(value).catch(()=>{});fail('El almacenamiento de conquista debe ser síncrono.');}return value;};
+const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+function evidence(raw){
+ if(raw===null)return null;
+ object(raw,['scope','id','takenAt','origin','target','verdict','captured','attackerShips','attackerLost','defenderBefore','defenderLost','defenderRemaining','loyalty','combatDeficit','defenderSectorBonusPct','owner','ownerName','netReplenishment','replenishmentEvidence']);
+ const value={scope:scope(get(raw,'scope')),id:id(get(raw,'id')),takenAt:integer(get(raw,'takenAt')),origin:point(get(raw,'origin')),target:point(get(raw,'target')),
+  verdict:get(raw,'verdict'),captured:get(raw,'captured')};
+ if(!['Victory','Defeat','Draw','Captured'].includes(value.verdict)||typeof value.captured!=='boolean')fail();
+ for(const k of ['attackerShips','attackerLost','defenderBefore','defenderLost','defenderRemaining'])value[k]=get(raw,k)===null?null:fleet(get(raw,k),false,core.MAX_OBSERVED);
+ const loyalty=get(raw,'loyalty');object(loyalty,['before','after','damage']);value.loyalty={};
+ for(const k of ['before','after','damage']){const n=get(loyalty,k);if(n!==null&&(typeof n!=='number'||!Number.isFinite(n)))fail();value.loyalty[k]=n;}
+ value.combatDeficit=get(raw,'combatDeficit');if(value.combatDeficit!==null&&typeof value.combatDeficit!=='boolean')fail();
+ value.defenderSectorBonusPct=get(raw,'defenderSectorBonusPct');if(value.defenderSectorBonusPct!==null&&(typeof value.defenderSectorBonusPct!=='number'||!Number.isFinite(value.defenderSectorBonusPct)))fail();
+ value.owner=get(raw,'owner')===null?null:id(get(raw,'owner'));value.ownerName=get(raw,'ownerName')===null?null:string(get(raw,'ownerName'));value.replenishmentEvidence=get(raw,'replenishmentEvidence');if(!['unavailable','comparable-reports','owner-uncertain','owner-changed'].includes(value.replenishmentEvidence))fail();
+ const net=get(raw,'netReplenishment');if(net===null)value.netReplenishment=null;else{object(net,SHIPS);value.netReplenishment=Object.fromEntries(SHIPS.map(t=>[t,integer(get(net,t),core.MAX_OBSERVED,-core.MAX_OBSERVED)]));}
+ return value;
+}
+function ticket(raw,objective){
+ if(raw===null)return null;
+ object(raw,['id','sequence','kind','originId','originName','origin','destinationId','target','quantities','createdAt','sentAt','state','reservations','proof']);
+ const value={id:string(get(raw,'id'),96),sequence:integer(get(raw,'sequence'),1000,1),kind:get(raw,'kind'),originId:id(get(raw,'originId')),
+  originName:string(get(raw,'originName'),200),origin:point(get(raw,'origin')),destinationId:get(raw,'destinationId')===null?null:id(get(raw,'destinationId')),
+  target:point(get(raw,'target')),quantities:fleet(get(raw,'quantities')),createdAt:integer(get(raw,'createdAt')),sentAt:get(raw,'sentAt')===null?null:integer(get(raw,'sentAt')),state:get(raw,'state')};
+ const proof=get(raw,'proof');object(proof,['scope','ownerId','ownerName','epoch','generation','observedAt']);
+ value.proof={scope:scope(get(proof,'scope')),ownerId:id(get(proof,'ownerId')),ownerName:string(get(proof,'ownerName')),epoch:integer(get(proof,'epoch')),generation:integer(get(proof,'generation')),observedAt:integer(get(proof,'observedAt'))};if(value.proof.scope!==objective.scope||value.proof.ownerId!==objective.ownerId)fail();
+ const reservations=get(raw,'reservations');if(!Array.isArray(reservations)||reservations.length>10000)fail();
+ const seen=new Set();value.reservations=reservations.map(r=>{object(r,['originId','quantities']);const originId=id(get(r,'originId'));if(seen.has(originId))fail();seen.add(originId);return {originId,quantities:fleet(get(r,'quantities'))};});
+ if(!value.reservations.some(r=>r.originId===value.originId&&SHIPS.every(t=>r.quantities[t]>=value.quantities[t])))fail();
+ if(!['attack','transfer'].includes(value.kind)||!['prepared','queued','sent','uncertain'].includes(value.state)||!SHIPS.some(t=>value.quantities[t])||samePoint(value.origin,value.target)||value.id!==`conquest:${objective.id}:${value.sequence}`||value.sequence!==objective.sequence||value.createdAt<objective.createdAt||value.createdAt>objective.updatedAt||value.sentAt!==null&&(value.sentAt<value.createdAt||value.sentAt>objective.updatedAt))fail();
+ if(value.kind==='attack'&&(!samePoint(value.target,objective.target)||value.destinationId!==null)||value.kind==='transfer'&&value.destinationId===null)fail();
+ return value;
+}
+function validate(raw){
+ object(raw,['schemaVersion','objectives','receipts','tombstones']);if(get(raw,'schemaVersion')!==1)fail('Versión de objetivos de conquista no compatible.');
+ const rows=get(raw,'objectives'),receipts=get(raw,'receipts');if(!Array.isArray(rows)||rows.length>core.MAX_OBJECTIVES||!Array.isArray(receipts)||receipts.length>128)fail();
+ const ids=new Set(),targets=new Set();
+ const objectives=rows.map(raw=>{
+  object(raw,['id','scope','target','status','createdAt','updatedAt','fleet','defense','maxRaids','maxLosses','raids','losses','reports','latestReport','sequence','ticket','message','barrierAt','ownerId']);
+  const target=get(raw,'target');object(target,['q','r','name']);const value={id:id(get(raw,'id')),scope:scope(get(raw,'scope')),
+   target:{...point({q:get(target,'q'),r:get(target,'r')}),name:string(get(target,'name'),200)},status:get(raw,'status'),createdAt:integer(get(raw,'createdAt')),updatedAt:integer(get(raw,'updatedAt')),
+   fleet:fleet(get(raw,'fleet'),true),defense:fleet(get(raw,'defense')),maxRaids:integer(get(raw,'maxRaids'),100,1),maxLosses:integer(get(raw,'maxLosses'),200000,1),
+   raids:integer(get(raw,'raids'),100),losses:Object.fromEntries(SHIPS.map(t=>[t,integer(get(get(raw,'losses'),t),200000)])),reports:[],latestReport:evidence(get(raw,'latestReport')),sequence:integer(get(raw,'sequence'),1000),message:string(get(raw,'message'),500),barrierAt:integer(get(raw,'barrierAt')??0),ownerId:get(raw,'ownerId')===null?null:id(get(raw,'ownerId'))};
+  const key=value.scope+'/'+value.target.q+','+value.target.r;
+  if(ids.has(value.id)||targets.has(key)||!STATES.includes(value.status)||value.updatedAt<value.createdAt)fail();ids.add(value.id);targets.add(key);
+  const reports=get(raw,'reports');if(!Array.isArray(reports)||reports.length>128)fail();value.reports=reports.map(id);if(new Set(value.reports).size!==value.reports.length)fail();
+  if(value.latestReport&&(value.latestReport.scope!==value.scope||!samePoint(value.latestReport.target,value.target)||!value.reports.includes(value.latestReport.id)||value.latestReport.takenAt<value.createdAt||value.latestReport.takenAt>value.updatedAt))fail();
+  value.ticket=ticket(get(raw,'ticket'),value);if(value.status==='awaiting_report'&&(!value.ticket||value.ticket.kind!=='attack'||value.ticket.state!=='sent'))fail();
+  return value;
+ });
+ const receiptKeys=new Set();const tombstones=get(raw,'tombstones')??[];if(!Array.isArray(tombstones)||tombstones.length>128)fail();
+ const targetsSeen=new Set(),history=tombstones.map(raw=>{object(raw,['scope','target','throughAt']);const value={scope:scope(get(raw,'scope')),target:point(get(raw,'target')),throughAt:integer(get(raw,'throughAt'))};const key=value.scope+'/'+value.target.q+','+value.target.r;if(targetsSeen.has(key))fail();targetsSeen.add(key);return value;});
+ return {schemaVersion:1,objectives,tombstones:history,receipts:receipts.map(raw=>{object(raw,['scope','originId','sentAt']);const r={scope:scope(get(raw,'scope')),originId:id(get(raw,'originId')),sentAt:integer(get(raw,'sentAt'))},key=r.scope+'/'+r.originId;if(receiptKeys.has(key))fail();receiptKeys.add(key);return r;})};
+}
+function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPreparing,onChange=()=>{},now=Date.now,newId=()=>crypto.randomUUID(),legacyTargets=()=>[],getTargetOwner,isTargetAllowed}={}){
+ if(![read,write,getContext,getWorld,getJobs,queue,cancel,cancelPreparing,onChange,now,newId,legacyTargets,getTargetOwner,isTargetAllowed].every(x=>typeof x==='function'))fail('Faltan adaptadores de conquista.');
+ let config={schemaVersion:1,objectives:[],receipts:[]},error='',writeBlocked=false,destroyed=false,running=false;
+ const clock=()=>integer(now());
+ function load(){if(destroyed)return false;try{const raw=sync(read());config=raw===undefined?{schemaVersion:1,objectives:[],receipts:[]}:validate(raw);if(!writeBlocked&&error.startsWith('No se pueden leer'))error='';return true;}catch{error='No se pueden leer los objetivos de conquista. No se prepararán misiones.';return false;}}
+ function save(next){const clean=validate(next);if(JSON.stringify(clean).length>400000)fail('Demasiados datos de conquista.');try{const accepted=sync(write(copy(clean)));if(accepted===false)throw Error('storage rejected write');const observed=validate(sync(read()));if(!equal(observed,clean))throw Error('storage verification failed');config=clean;error='';writeBlocked=false;}catch{writeBlocked=true;error='No se pudo guardar conquista. No se prepararán misiones.';throw Error(error);}onChange();}
+ const context=()=>sync(getContext());
+ function current(idValue){const s=context()?.scope;return config.objectives.find(o=>o.id===idValue&&o.scope===s);}
+ function change(objective,patch){if(Object.keys(patch).every(k=>equal(objective[k],patch[k])))return copy(objective);const at=clock(),next=copy(config);const i=next.objectives.findIndex(o=>o.id===objective.id);if(i<0)fail();next.objectives[i]={...next.objectives[i],...patch,updatedAt:Math.max(at,objective.updatedAt)};save(next);return copy(next.objectives[i]);}
+ function jobs(){const value=sync(getJobs());if(!Array.isArray(value)||value.length>32)fail('No se puede verificar la cola actual.');return value;}
+ function ownerProof(o){try{const value=sync(getTargetOwner(o.scope,{q:o.target.q,r:o.target.r}));if(!value||value.scope!==o.scope||!value.ownerId||value.ownerId===o.scope.split('/')[1]||clock()-value.observedAt>core.MAX_AGE||value.observedAt>clock()||sync(isTargetAllowed(o))!==true)return null;return copy(value);}catch{return null;}}
+ function specFor(o,t){return {scope:o.scope,originId:t.originId,originName:t.originName,
+  target:t.kind==='attack'?{mode:'amounts',routeKey:'',presetKey:'',label:o.target.name,coordinate:copy(t.target),originCoordinate:copy(t.origin)}:
+   {mode:'custom',missionAction:'send',routeKey:'',presetKey:'conquest-transfer',label:'Reunión de conquista',coordinate:copy(t.target)},
+  quantities:copy(t.quantities),produce:false,autoSend:true};}
+ function matches(o,t,job){if(!job||job.id!==t.id||job.campaignId!=='conquest:'+o.id)return false;
+  const spec=specFor(o,t);
+  return ['scope','originId','originName','produce','autoSend'].every(k=>job[k]===spec[k])&&SHIPS.every(type=>job.quantities?.[type]===spec.quantities[type])&&
+   ['mode','routeKey','presetKey','label','missionAction'].every(k=>job.target?.[k]===spec.target[k])&&samePoint(job.target?.coordinate,spec.target.coordinate)&&
+   (spec.target.originCoordinate?samePoint(job.target?.originCoordinate,spec.target.originCoordinate):job.target?.originCoordinate===undefined);
+ }
+ function verifiedWorld(s){return core.worldFor(sync(getWorld()),s,clock());}
+ function list(){if(!load())return [];const s=context()?.scope;return copy(config.objectives.filter(o=>o.scope===s));}
+ function plans(){if(!load())return [];const c=context(),s=c?.scope;if(!s)return [];const raw=sync(getWorld());
+  // A receipt survives queue replacement until a strictly later own census.
+  const pending=jobs(),w=verifiedWorld(s);
+  for(const r of config.receipts)if(r.scope===s&&(!w||w.observedAt<=r.sentAt)&&!pending.some(j=>j.scope===s&&j.originId===r.originId))pending.push({scope:s,originId:r.originId,status:'sent',sentAt:r.sentAt});
+  return core.plan(config.objectives.filter(o=>o.scope===s),raw,pending,s,clock()).map(p=>{const o=config.objectives.find(o=>o.id===p.id);if(o.status==='planning'&&!o.ticket){const proof=ownerProof(o);if(!proof||o.ownerId&&o.ownerId!==proof.ownerId)return {...p,ready:false,origin:null,transfers:[],reservations:[],message:'Propietario del objetivo no verificable, protegido o cambiado. Revisa el mapa y la campaña.'};}return p;});
+ }
+ function add(input){if(!load())fail(error);const c=context(),s=scope(c?.scope);object(input,['target','fleet','defense','maxRaids','maxLosses']);
+  const t=get(input,'target');object(t,['q','r','name']);const target={...point({q:get(t,'q'),r:get(t,'r')}),name:string(get(t,'name'),200)};if(!target.name.trim())fail('Indica el nombre del objetivo.');
+  if(jobs().some(j=>j.scope===s&&j.status!=='sent'&&samePoint(j.target?.coordinate,target)))fail('Ya existe una misión pendiente para ese objetivo. Revísala antes de crear una campaña.');
+  if(config.objectives.some(o=>o.scope===s&&samePoint(o.target,target)))fail('Ya existe un objetivo para esas coordenadas, incluso si está detenido.');
+  if(sync(legacyTargets()).some(o=>o.scope===s&&samePoint(o.targetCoordinate,target)&&!['completed','cancelled','limit'].includes(o.status)))fail('Cancela primero la campaña de reintentos existente para ese destino.');
+  const w=verifiedWorld(s);if(w?.systems.some(x=>samePoint(x,target)))fail('El objetivo ya es propio.');
+  const at=clock(),o={id:id(newId()),scope:s,target,status:'planning',createdAt:at,updatedAt:at,fleet:fleet(get(input,'fleet'),true),defense:fleet(get(input,'defense')),
+   maxRaids:integer(get(input,'maxRaids'),100,1),maxLosses:integer(get(input,'maxLosses'),200000,1),raids:0,losses:zeros(),reports:[],latestReport:null,sequence:0,ticket:null,barrierAt:0,ownerId:null,message:'Objetivo creado. Revisando disponibilidad y reunión previa.'};
+  save({...config,objectives:[...config.objectives,o]});return copy(o);
+ }
+ function stop(idValue,status,message){if(!load())fail(error);const o=current(idValue);if(!o)fail('No se encuentra el objetivo en esta cuenta.');
+  const next=change(o,{status,message,barrierAt:clock()});if(next.ticket&&next.ticket.state!=='sent'){sync(cancelPreparing(next.ticket.id,message));const j=jobs().find(x=>x.id===next.ticket.id);if(matches(next,next.ticket,j)&&['waiting','paused'].includes(j.status)){sync(cancel(j.id));return change(next,{ticket:null});}if(!j&&next.ticket.state==='prepared')return change(next,{ticket:null});}return next;
+ }
+ const pause=idValue=>stop(idValue,'paused','Conquista pausada. No se retiran flotas ya enviadas.');
+ const cancelObjective=idValue=>stop(idValue,'cancelled','Conquista cancelada. No se retiran flotas ya enviadas.');
+ function resume(idValue){if(!load())fail(error);const o=current(idValue);if(!o||!['paused','limit'].includes(o.status))fail('Este objetivo no se puede reanudar.');
+  if(o.ticket?.state==='sent')return change(o,{status:'awaiting_report',message:'Esperando el reporte de la incursión ya enviada.'});
+  if(o.ticket){const j=jobs().find(j=>j.id===o.ticket.id);if(j&&['sending','uncertain'].includes(j.status))fail('Revisa primero el envío pendiente o incierto.');}
+  return change(o,{status:'planning',ticket:null,barrierAt:clock(),message:'Revisando el plan con datos actuales.'});
+ }
+ function configure(idValue,patch){
+  if(!load())fail(error);const o=current(idValue);if(!o||!['paused','limit'].includes(o.status))fail('Pausa primero el objetivo para editar su plan.');
+  if(o.ticket?.state==='sent'||jobs().some(j=>j.id===o.ticket?.id&&['sending','uncertain'].includes(j.status)))fail('Espera al resultado de la misión antes de modificar el plan.');
+  object(patch,['fleet','defense','maxRaids','maxLosses']);
+  return change(o,{fleet:fleet(get(patch,'fleet'),true),defense:fleet(get(patch,'defense')),maxRaids:integer(get(patch,'maxRaids'),100,1),maxLosses:integer(get(patch,'maxLosses'),200000,1),ticket:null,barrierAt:clock(),message:'Plan modificado. Reanuda para revisarlo con datos actuales.'});
+ }
+ function acknowledge(idValue){
+  if(!load())fail(error);const o=current(idValue);if(!o||!['uncertain','cancelled'].includes(o.status)||!o.ticket)fail('No hay un envío incierto pendiente de revisión.');
+  const j=jobs().find(j=>j.id===o.ticket.id);if(o.ticket.kind==='attack'&&(o.ticket.state==='sent'||j?.status==='sent'))fail('Espera el reporte de la incursión enviada antes de cerrar su registro.');if(j?.status==='sending')fail('Espera a que termine la preparación nativa.');
+  if(!verifiedWorld(o.scope))fail('Espera un censo propio fresco antes de cerrar la revisión.');
+  stop(o.id,'cancelled','Cierre solicitado tras revisión manual. No se reenviará.');
+  if(j){if(!matches(o,o.ticket,j))fail('La misión ya no coincide con el objetivo.');sync(cancelPreparing(j.id,'Cierre manual tras revisión.'));sync(cancel(j.id));}
+  if(!load())fail(error);const next=copy(config),n=next.objectives.find(x=>x.id===o.id);n.ticket=null;n.updatedAt=clock();
+  const r=next.receipts.find(r=>r.scope===o.scope&&r.originId===o.ticket.originId);if(r)r.sentAt=Math.max(r.sentAt,clock());else next.receipts.push({scope:o.scope,originId:o.ticket.originId,sentAt:clock()});
+  save(next);return copy(n);
+ }
+ function remove(idValue){if(!load())fail(error);const o=current(idValue);if(!o||!['cancelled','captured'].includes(o.status)||o.ticket?.state==='uncertain')fail('Cancela o confirma la captura antes de retirar el objetivo.');
+  if(o.ticket?.kind==='attack'&&(o.ticket.state==='sent'||jobs().some(j=>j.id===o.ticket.id&&j.status==='sent')))fail('Espera el reporte de la incursión enviada antes de retirar su registro.');
+  if(o.ticket&&jobs().some(j=>j.id===o.ticket.id&&['waiting','paused','sending','uncertain'].includes(j.status)))fail('La misión aún necesita revisión.');const tombstones=copy(config.tombstones||[]),old=tombstones.find(t=>t.scope===o.scope&&samePoint(t.target,o.target));if(old)old.throughAt=clock();else tombstones.push({scope:o.scope,target:{q:o.target.q,r:o.target.r},throughAt:clock()});save({...config,tombstones,objectives:config.objectives.filter(x=>x.id!==o.id)});
+ }
+ function observeReport(value){if(!load())return true;const at=clock(),report=core.parseReport(value,at);
+  if(!report){
+   const target=get(get(get(value,'detail'),'route'),'to'),s=get(value,'scope');
+   const known=s===context()?.scope&&config.objectives.find(o=>o.scope===s&&samePoint(o.target,target));
+   if(known){const raw=get(get(value,'item'),'takenAt')??get(get(value,'detail'),'createdAt'),date=typeof raw==='string'?Date.parse(raw):raw;if(Number.isSafeInteger(date)&&date<known.createdAt)return true;}
+   if(known&&!['captured','cancelled'].includes(known.status)){stop(known.id,'paused','Un reporte del objetivo no se puede verificar. Revisión necesaria.');return true;}
+   return false;
+  }
+  if(report.scope!==context()?.scope)return false;
+  let o=config.objectives.find(o=>o.scope===report.scope&&samePoint(o.target,report.target));if(!o)return (config.tombstones||[]).some(t=>t.scope===report.scope&&samePoint(t.target,report.target));
+  if(o.ticket&&o.ticket.state!=='sent'){
+   const queued=jobs().find(j=>j.id===o.ticket.id);
+   if(matches(o,o.ticket,queued)&&queued.status==='sent'&&Number.isSafeInteger(queued.sentAt)&&queued.sentAt>=o.ticket.createdAt&&queued.sentAt<=at){recordSent(o,o.ticket,queued.sentAt);o=config.objectives.find(x=>x.id===o.id);}
+   else if(queued&&['sending','uncertain'].includes(queued.status)){stop(o.id,'uncertain','Hay un combate nuevo durante un envío sin confirmar. Revisión necesaria.');return true;}
+  }
+  // Managed targets never seed a second legacy retry, even while paused.
+  if(o.reports.includes(report.id)||report.takenAt<o.createdAt)return true;
+  if(o.latestReport&&report.takenAt<=o.latestReport.takenAt){stop(o.id,'paused','Informe nuevo fuera de orden o ambiguo. Revisión necesaria.');return true;}
+  if(report.captured){
+   report.netReplenishment=null;
+   const losses=copy(o.losses);if(o.ticket?.kind==='attack'&&o.ticket.state==='sent'&&samePoint(o.ticket.origin,report.origin)&&report.attackerShips&&equal(report.attackerShips,o.ticket.quantities)&&report.attackerLost&&SHIPS.every(t=>report.attackerLost[t]<=report.attackerShips[t]))for(const t of SHIPS)losses[t]=integer(losses[t]+report.attackerLost[t],200000);
+   const captured=change(o,{losses,latestReport:report,reports:[...o.reports,report.id],message:'Captura explícita confirmada. Campaña terminada.'});
+   const ended=stop(captured.id,'captured','Captura explícita confirmada. Campaña terminada.');if(ended.ticket?.kind==='attack'&&ended.ticket.state==='sent'&&samePoint(ended.ticket.origin,report.origin)&&report.takenAt>=ended.ticket.sentAt)change(ended,{ticket:null});return true;
+  }
+  if(o.status==='captured'){if(!report.captured&&report.takenAt>(o.latestReport?.takenAt??o.updatedAt))stop(o.id,'paused','Un reporte posterior contradice la captura. Revisa la propiedad.');return true;}
+  if(!o.ticket||o.ticket.kind!=='attack'||o.ticket.state!=='sent'||report.takenAt<o.ticket.sentAt||!samePoint(report.origin,o.ticket.origin)){
+   if(['planning','awaiting_report'].includes(o.status)&&report.takenAt>=(o.latestReport?.takenAt??o.createdAt))stop(o.id,'paused','Otro combate del objetivo invalida el plan. Revisa sus pérdidas y propietario.');return true;
+  }
+  if(!report.attackerShips||!equal(report.attackerShips,o.ticket.quantities)||report.attackerLost&&SHIPS.some(t=>report.attackerLost[t]>report.attackerShips[t])){stop(o.id,'paused','La flota del reporte no coincide con la incursión pendiente. Revisión necesaria.');return true;}
+
+  if(o.latestReport&&report.takenAt<=o.latestReport.takenAt){stop(o.id,'paused','Informe fuera de orden. Revisa pérdidas y propiedad antes de continuar.');return true;}
+  if(o.reports.length>=128){stop(o.id,'paused','El historial de evidencia está lleno. Revisión necesaria.');return true;}
+  const losses=copy(o.losses);if(!report.attackerLost&&!report.captured){stop(o.id,'paused','El reporte no contiene pérdidas exactas. No se estiman para autorizar otra incursión.');return true;}
+  if(report.attackerLost)for(const t of SHIPS)losses[t]=integer(losses[t]+report.attackerLost[t],200000);
+  if(!report.defenderRemaining){stop(o.id,'paused','El reporte no permite verificar defensores remanentes. Revisión necesaria antes de otra incursión.');return true;}
+  const previous=o.latestReport;
+  const differentOwners=previous?.owner&&report.owner&&previous.owner!==report.owner;
+  report.netReplenishment=previous?.defenderRemaining&&report.defenderBefore&&!differentOwners?
+   Object.fromEntries(SHIPS.map(t=>[t,report.defenderBefore[t]-previous.defenderRemaining[t]])):null;
+  report.replenishmentEvidence=differentOwners?'owner-changed':report.netReplenishment?
+   previous.owner&&report.owner&&previous.owner===report.owner?'comparable-reports':'owner-uncertain':'unavailable';
+  let status=report.captured?'captured':['paused','cancelled','uncertain'].includes(o.status)?o.status:'planning';
+  let message=report.captured?'Captura explícita confirmada. Campaña terminada.':report.verdict==='Victory'?'Victoria sin captura: el objetivo sigue abierto. Reevaluando otra incursión.':'Combate observado. Reevaluando una sola incursión.';
+  const nextFleet=copy(o.fleet);
+  // A bounded sizing heuristic, never a claim about the server's combat formula.
+  for(const t of ['marauder','sentinel'])nextFleet[t]=Math.max(nextFleet[t],Math.min(core.MAX_FLEET,report.defenderRemaining[t]+Math.max(0,report.netReplenishment?.[t]||0)));
+  if(report.verdict==='Defeat')nextFleet.marauder=Math.min(core.MAX_FLEET,nextFleet.marauder+1);
+  const remainingBudget=o.maxLosses-SHIPS.reduce((sum,t)=>sum+losses[t],0);
+  const ownerChanged=report.owner&&o.ownerId&&report.owner!==o.ownerId||previous?.owner&&report.owner&&previous.owner!==report.owner||!report.owner&&report.ownerName&&o.ticket.proof.ownerName&&report.ownerName.normalize('NFKC').trim()!==o.ticket.proof.ownerName.normalize('NFKC').trim();
+
+  if(status==='planning'&&(o.raids>=o.maxRaids||SHIPS.reduce((sum,t)=>sum+nextFleet[t],0)>remainingBudget||ownerChanged||report.combatDeficit===true)){
+   status=report.combatDeficit||ownerChanged?'paused':'limit';message=ownerChanged?'El dueño del objetivo cambió entre reportes. Revisión necesaria.':report.combatDeficit?'El combate indica déficit de créditos. Revisión necesaria.':'La siguiente flota supera el presupuesto de pérdidas o el límite de incursiones.';
+  }
+  change(o,{status,message,fleet:nextFleet,losses,reports:[...o.reports,report.id],latestReport:report,ticket:null});return true;
+ }
+ function fleetPermission(job){
+  if(!job)return true;
+  const c=context(),active=config.objectives.filter(o=>o.scope===c?.scope&&['planning','awaiting_report','uncertain'].includes(o.status));
+  if(!active.length)return true;
+  if(active.some(o=>samePoint(o.target,job.target?.coordinate)&&job.campaignId!=='conquest:'+o.id))return false;
+  if(job.scope!==c.scope)return false;
+  const w=verifiedWorld(c.scope),origin=w?.systems.find(s=>s.id===job.originId);if(!origin)return false;
+  let requested;try{requested=fleet(job.quantities);}catch{return false;}
+  const reserved=zeros(),defense=zeros();
+  for(const o of active){for(const t of SHIPS)defense[t]=Math.max(defense[t],o.defense[t]);
+   if(job.campaignId==='conquest:'+o.id)continue;
+   for(const r of o.ticket?.reservations||[])if(r.originId===origin.id)for(const t of SHIPS)reserved[t]+=r.quantities[t];
+  }
+  if(config.receipts.some(r=>r.scope===c.scope&&r.originId===origin.id&&w.observedAt<=r.sentAt))return false;
+  return SHIPS.every(t=>origin.fleet[t]>=requested[t]+reserved[t]+defense[t]);
+ }
+ function canUseFleet(job){return load()&&!writeBlocked&&fleetPermission(job);}
+ function recoverReports(batch){
+  object(batch,['scope','reports']);const s=scope(get(batch,'scope')),rows=get(batch,'reports');
+  if(!Array.isArray(rows)||rows.length>20||s!==context()?.scope)fail('Recuperación de conquista no válida.');
+  const managed=[];
+  const entries=rows.map(entry=>({scope:s,item:get(entry,'item'),detail:get(entry,'detail')}));
+  entries.sort((a,b)=>(core.parseReport(a,clock())?.takenAt??0)-(core.parseReport(b,clock())?.takenAt??0));
+  for(const entry of entries)if(observeReport(entry))managed.push(get(entry.item,'id'));
+  return managed;
+ }
+ function permitJob(job,prepared=false){if(!load()||writeBlocked&&!prepared)return false;const c=context(),o=config.objectives.find(o=>o.scope===c?.scope&&o.id===job?.campaignId?.slice(9));
+  if(!fleetPermission(job)||!o||o.status!=='planning'||!o.ticket||!(prepared?['prepared','queued']:['queued']).includes(o.ticket.state)||!matches(o,o.ticket,job))return false;
+  const proof=ownerProof(o);if(!proof||proof.ownerId!==o.ownerId||proof.epoch!==o.ticket.proof.epoch||proof.generation!==o.ticket.proof.generation)return false;
+  const w=verifiedWorld(o.scope),t=o.ticket;if(!w||o.barrierAt&&w.observedAt<=o.barrierAt||w.systems.some(x=>samePoint(x,o.target)))return false;
+  const origin=w.systems.find(x=>x.id===t.originId);if(!origin||!samePoint(origin,t.origin)||SHIPS.some(type=>origin.fleet[type]-o.defense[type]<t.quantities[type]))return false;
+  if(t.kind==='transfer'&&!w.systems.some(x=>x.id===t.destinationId&&samePoint(x,t.target)))return false;
+  if(t.kind==='attack'&&(SHIPS.reduce((sum,type)=>sum+t.quantities[type],0)>o.maxLosses-SHIPS.reduce((sum,type)=>sum+o.losses[type],0)||o.raids>=o.maxRaids||SHIPS.reduce((sum,type)=>sum+o.losses[type],0)>=o.maxLosses||w.transits.some(x=>samePoint(x.to,origin)||samePoint(x.to,o.target))))return false;
+  return true;
+ }
+ function canRunJob(job){return permitJob(job);}
+ function recordSent(o,t,sentAt){const next=copy(config),n=next.objectives.find(x=>x.id===o.id);n.updatedAt=clock();n.ticket={...t,state:'sent',sentAt};
+  n.status=t.kind==='attack'&&o.status==='planning'?'awaiting_report':o.status;n.raids+=t.kind==='attack'?1:0;n.message=t.kind==='attack'?'Incursión enviada. Esperando su reporte antes de otra.':'Refuerzo enviado. Esperando llegada y censo confirmado.';
+  const r=next.receipts.find(r=>r.scope===o.scope&&r.originId===t.originId);if(r)r.sentAt=Math.max(r.sentAt,sentAt);else next.receipts.push({scope:o.scope,originId:t.originId,sentAt});save(next);
+ }
+ function tick(){if(destroyed||running||!load())return false;running=true;
+  try{
+   const c=context(),s=c?.scope,w=s?verifiedWorld(s):null;if(!s)return false;
+   if(w){const kept=config.receipts.filter(r=>r.scope!==s||w.observedAt<=r.sentAt);if(kept.length!==config.receipts.length){save({...config,receipts:kept});return true;}}
+   for(const o of config.objectives.filter(x=>x.scope===s)){
+    if(o.status==='captured'&&w&&w.observedAt>o.updatedAt&&!w.systems.some(x=>samePoint(x,o.target))){stop(o.id,'paused','El censo posterior no confirma la propiedad capturada. Revisión necesaria.');return true;}
+    if(w?.systems.some(x=>samePoint(x,o.target))&&!['captured','cancelled'].includes(o.status)){stop(o.id,'captured','El censo propio fresco confirma la captura.');return true;}
+    if(['planning','awaiting_report'].includes(o.status)&&o.ownerId){const proof=ownerProof(o);if(!proof||proof.ownerId!==o.ownerId||o.ticket&&['prepared','queued'].includes(o.ticket.state)&&(proof.epoch!==o.ticket.proof.epoch||proof.generation!==o.ticket.proof.generation)){stop(o.id,'paused','Propiedad, protección o sesión del objetivo cambiadas o sin verificar. Revisión necesaria.');return true;}}
+    const t=o.ticket;if(!t)continue;
+    const job=jobs().find(x=>x.id===t.id);
+    if(job&&!matches(o,t,job)){stop(o.id,'uncertain','La misión no coincide con el claim guardado. Revisión necesaria.');return true;}
+    if(job?.status==='uncertain'||job?.needsReview){if(o.status==='uncertain')continue;stop(o.id,'uncertain','Envío incierto: comprueba las misiones. No se repetirá automáticamente.');return true;}
+    if(job?.status==='sending')return false;
+    if(job?.status==='paused'&&o.status==='planning'){stop(o.id,'paused','La misión se ha pausado. Revisa la campaña antes de reanudar.');return true;}
+    if(job?.status==='sent'&&t.state!=='sent'){
+     if(!Number.isSafeInteger(job.sentAt)||job.sentAt<t.createdAt||job.sentAt>clock()){stop(o.id,'uncertain','La fecha de envío no se puede verificar.');return true;}
+     recordSent(o,t,job.sentAt);return true;
+    }
+    if(t.state==='sent'){
+     if(t.kind==='transfer'&&w&&w.observedAt>t.sentAt&&!w.transits.some(x=>samePoint(x.to,t.target))){change(o,{ticket:null,message:'Tránsito finalizado; recalculando solo con flota estacionada observada.'});return true;}
+     continue;
+    }
+    if(o.status!=='planning'){if(job&&['waiting','paused'].includes(job.status)){sync(cancelPreparing(job.id,o.message));sync(cancel(job.id));}continue;}
+    if(!c.canAct)continue;
+    if(job&&t.state==='prepared'&&permitJob(job,true)){change(o,{ticket:{...t,state:'queued'}});return true;}
+    if(!job&&t.state==='queued'){stop(o.id,'uncertain','La misión guardada desapareció de la cola. Comprueba los envíos antes de cerrar la revisión; no se repetirá.');return true;}
+    if(!job){if(!permitJob({id:t.id,campaignId:'conquest:'+o.id,...specFor(o,t)},true))continue;sync(queue(specFor(o,t),{id:t.id,campaignId:'conquest:'+o.id}));change(o,{ticket:{...t,state:'queued'}});return true;}
+   }
+   if(!c.canAct)return false;
+   const options=plans();
+   for(const o of config.objectives.filter(x=>x.scope===s&&x.status==='planning'&&!x.ticket)){
+    const p=options.find(x=>x.id===o.id);if(!p?.origin)continue;
+    if(w?.transits.some(x=>samePoint(x.to,p.origin)))continue;
+    const transfer=p.transfers[0];if(!p.ready&&!transfer)continue;
+    const proof=ownerProof(o);if(!proof)continue;
+    const sequence=o.sequence+1,source=transfer?{id:transfer.originId,name:transfer.originName,...transfer.from}:p.origin;
+    const ticket={id:`conquest:${o.id}:${sequence}`,sequence,kind:transfer?'transfer':'attack',originId:source.id,originName:source.name,
+     origin:{q:source.q,r:source.r},destinationId:transfer?transfer.destinationId:null,target:transfer?copy(transfer.to):{q:o.target.q,r:o.target.r},
+     quantities:transfer?copy(transfer.quantities):copy(o.fleet),reservations:copy(p.reservations),proof,createdAt:clock(),sentAt:null,state:'prepared'};
+    change(o,{sequence,ticket,ownerId:proof.ownerId,message:transfer?'Reunión previa preparada.':'Una incursión preparada; requiere guardas nativas vigentes.'});
+    return true;
+   }
+   return false;
+  }catch(e){error='Conquista detenida: '+String(e.message||'revisión necesaria').slice(0,200);return false;}
+  finally{running=false;}
+ }
+ function dueOrigins(){if(!load())return [];const c=context();return config.objectives.filter(o=>o.scope===c?.scope&&o.status==='planning'&&o.ticket?.state==='queued').filter(o=>{const j=jobs().find(x=>x.id===o.ticket.id);return j?.status==='waiting'&&canRunJob(j);}).map(o=>o.ticket.originId);}
+ return {add,list,plans,tick,observeReport,recoverReports,pause,resume,cancel:cancelObjective,configure,acknowledge,remove,canRunJob,canUseFleet,dueOrigins,
+  navigationList:()=>list().map(o=>({...o,originId:o.ticket?.originId,paused:o.status!=='planning'})),
+  exportConfig:()=>load()?copy(config):fail(error),validateConfig:validate,
+  observationSince:()=>list().filter(o=>!['captured','cancelled'].includes(o.status)).reduce((n,o)=>n===null?o.createdAt:Math.min(n,o.createdAt),null),
+  hasObjectives:()=>list().some(o=>['planning','awaiting_report'].includes(o.status)),isBusy:()=>running,
+  diagnostics:()=>({error,running,writeBlocked}),destroy:()=>{destroyed=true;}};
+}
+return {create,validate};
+});
+
+/* Local conquest UI; never calls game APIs or the mission adapter. */
+(function(root,factory){const api=factory();if(typeof module==='object'&&module.exports)module.exports=api;
+ if(root)Object.defineProperty(root,'OldLightConquestPanel',{configurable:true,value:api});})(globalThis,function(){
+'use strict';
+const SHIPS=['probe','marauder','sentinel','vanguard'];
+const LABELS={probe:'Probe',marauder:'Marauder',sentinel:'Sentinel',vanguard:'Vanguard'};
+function create({controller,document:doc,onChange=()=>{},confirm=message=>doc.defaultView.confirm(message)}={}){
+ let root,form,cards,status,key='',error='',fields,authorized;
+ const el=(tag,text,cls)=>{const node=doc.createElement(tag);if(text!==undefined)node.textContent=text;if(cls)node.className=cls;return node;};
+ const counts=value=>SHIPS.filter(t=>value?.[t]).map(t=>`${value[t]} ${LABELS[t]}`).join(' · ')||'0';
+ function field(parent,caption,value,{min=0,max=50000,type='number',name}={}){
+  const label=el('label',undefined,'cq-field'),input=el('input');input.type=type;input.value=String(value);input.name=name||caption;
+  if(type==='number'){input.min=String(min);input.max=String(max);input.step='1';input.inputMode='numeric';}
+  else input.maxLength=200;
+  label.append(el('span',caption),input);parent.append(label);return input;
+ }
+ function fleetFields(parent,title,initial){const fs=el('fieldset'),legend=el('legend',title),grid=el('div',undefined,'cq-grid'),inputs={};fs.append(legend,grid);parent.append(fs);
+  for(const t of SHIPS)inputs[t]=field(grid,LABELS[t],initial[t]||0,{name:title+' '+t});return inputs;}
+ function integer(input,min,max){if(!/^-?\d{1,9}$/.test(input.value)||!Number.isSafeInteger(Number(input.value))||Number(input.value)<min||Number(input.value)>max)throw Error('Revisa '+input.name+': escribe un entero entre '+min+' y '+max+'.');return Number(input.value);}
+ const values=inputs=>Object.fromEntries(SHIPS.map(t=>[t,integer(inputs[t],0,50000)]));
+ function settings(parent,o={}){
+  const initial=o.fleet||{marauder:6},defense=o.defense||{marauder:2};
+  const fleet=fleetFields(parent,'Flota por incursión',initial),reserve=fleetFields(parent,'Defensa mínima por sistema propio',defense),limits=el('div',undefined,'cq-grid');parent.append(limits);
+  const raids=field(limits,'Máximo de incursiones',o.maxRaids||3,{min:1,max:100}),losses=field(limits,'Máximo de naves perdidas',o.maxLosses||20,{min:1,max:200000});
+  return ()=>({fleet:values(fleet),defense:values(reserve),maxRaids:integer(raids,1,100),maxLosses:integer(losses,1,200000)});
+ }
+ function attempt(fn){try{fn();error='';onChange();render();}catch(e){error=String(e.message||'No se pudo actualizar conquista.');if(status){status.textContent=error;status.focus();}}}
+ function button(parent,text,action,fn){const node=el('button',text);node.type='button';node.dataset.conquestAction=action;node.addEventListener('click',()=>attempt(fn));parent.append(node);return node;}
+ function render(){if(!root)return;
+  let objectives=[],plans=[];try{objectives=controller.list();plans=controller.plans();}catch(e){error=String(e.message);}
+  status.textContent=error||controller.diagnostics().error||'Campañas locales a esta cuenta y galaxia. El Helper debe estar activo para preparar misiones.';
+  const signature=JSON.stringify([objectives,plans]);if(signature===key)return;
+  // Do not replace the authoring form or a paused plan draft during passive refresh.
+  if(cards.contains(root.getRootNode().activeElement)&&root.getRootNode().activeElement?.matches('input'))return;key=signature;
+  const focused=root.getRootNode().activeElement,focusedId=focused?.closest('[data-conquest-objective]')?.dataset.conquestObjective,action=focused?.dataset.conquestAction;
+  cards.replaceChildren();
+  for(const o of objectives){
+   const card=el('article',undefined,'cq-card');card.dataset.conquestObjective=o.id;
+   card.dataset.operationStatus={planning:'waiting',awaiting_report:'waiting',captured:'completed',cancelled:'cancelled',limit:'paused',uncertain:'uncertain',paused:'paused'}[o.status];
+   card.dataset.operationAttention=String(['paused','uncertain','limit'].includes(o.status));
+   const heading=el('h4',`${o.target.name} (${o.target.q}, ${o.target.r})`);heading.tabIndex=-1;card.append(heading);
+   const plan=plans.find(p=>p.id===o.id);card.append(el('p',o.message||plan?.message),el('p',`Incursiones ${o.raids}/${o.maxRaids} · Pérdidas ${SHIPS.reduce((n,t)=>n+o.losses[t],0)}/${o.maxLosses}`));
+   card.append(el('p','Flota prevista: '+counts(o.fleet)),el('p','Defensa por sistema: '+counts(o.defense)));
+   if(plan?.origin){card.append(el('p','Origen propuesto: '+plan.origin.name+' · '+plan.message));for(const t of plan.transfers)card.append(el('p',`Reunión: ${t.originName} → ${t.destinationName}: ${counts(t.quantities)}`));}
+   else if(o.status==='planning'&&plan)card.append(el('p',plan.message));
+   if(o.ticket){card.append(el('p',o.ticket.kind==='attack'?'Una incursión pendiente; no se prepara otra hasta su reporte.':'Un refuerzo pendiente; se espera llegada y censo antes de atacar.'));
+    card.append(el('p','Reservas de esta reunión: '+o.ticket.reservations.map(r=>counts(r.quantities)).join(' + ')));}
+   const report=o.latestReport;if(report){
+    const evidence=el('details'),summary=el('summary','Evidencia del último combate');evidence.append(summary);
+    evidence.append(el('p',`Resultado observado: ${report.verdict}. ${report.captured?'Captura explícita.':'Una victoria no equivale a captura.'}`));
+    evidence.append(el('p','Defensores observados: '+(report.defenderBefore?counts(report.defenderBefore):'desconocidos')),
+     el('p','Defensores remanentes calculados del reporte: '+(report.defenderRemaining?counts(report.defenderRemaining):'desconocidos')),
+     el('p',report.netReplenishment?(report.replenishmentEvidence==='comparable-reports'?'Cambio neto entre reportes del mismo dueño: ':'Cambio neto estimado; dueño histórico no verificado: ')+SHIPS.map(t=>`${LABELS[t]} ${report.netReplenishment[t]>=0?'+':''}${report.netReplenishment[t]}`).join(' · ')+'. No demuestra fabricación.':'Reposición enemiga: no verificable con dueño o cantidades desconocidos. No se presenta como fabricación observada.'),
+     el('p',`Lealtad observada: ${report.loyalty.before??'?'} → ${report.loyalty.after??'?'} · daño ${report.loyalty.damage??'?'}`),
+     el('p',`Déficit de combate: ${report.combatDeficit===null?'desconocido':report.combatDeficit?'sí':'no'} · bonificación defensora ${report.defenderSectorBonusPct??'?'}%.`));card.append(evidence);
+   }
+   const actions=el('div',undefined,'cq-actions');card.append(actions);
+   if(['planning','awaiting_report'].includes(o.status))button(actions,'Pausar','pause',()=>controller.pause(o.id));
+   if(['paused','limit'].includes(o.status))button(actions,'Reanudar','resume',()=>controller.resume(o.id));
+   if(!['captured','cancelled'].includes(o.status))button(actions,'Cancelar','cancel',()=>controller.cancel(o.id));
+   if(o.ticket&&['uncertain','cancelled'].includes(o.status))button(actions,'Cerrar tras revisión manual','acknowledge',()=>{if(confirm('Confirma que has comprobado las misiones del juego. Se cerrará este objetivo sin reenviar ni retirar flotas enviadas.'))controller.acknowledge(o.id);});
+   if(['captured','cancelled'].includes(o.status))button(actions,'Retirar registro','remove',()=>controller.remove(o.id));
+   if(['paused','limit'].includes(o.status)&&!o.ticket){const editor=el('details'),summary=el('summary','Editar plan detenido');editor.append(summary);const read=settings(editor,o);button(editor,'Guardar plan','save-plan',()=>controller.configure(o.id,read()));card.append(editor);}
+   cards.append(card);
+  }
+  if(focusedId){const card=[...cards.children].find(n=>n.dataset.conquestObjective===focusedId);(card?.querySelector(`[data-conquest-action="${action}"]`)||card?.querySelector('h4')||status)?.focus({preventScroll:true});}
+ }
+ function mount(container){if(root)return;root=el('section',undefined,'cq-root');root.dataset.conquestPlanner='';
+  const style=el('style');style.textContent=`.cq-root{margin:12px 0;padding:10px;border:1px solid #456177;border-radius:9px;font-size:12px}.cq-root *{box-sizing:border-box}.cq-root h3,.cq-root h4{margin:4px 0 8px}.cq-root p{line-height:1.5;overflow-wrap:anywhere}.cq-root fieldset{margin:10px 0;padding:8px;min-width:0;border:1px solid #2b4053}.cq-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(120px,100%),1fr));gap:8px}.cq-field{display:grid;gap:4px;min-width:0}.cq-field input{width:100%;min-width:0;padding:6px;min-height:34px;color:var(--ol-text,#e5eef6);background:var(--ol-bg,#0c141d);border:1px solid var(--ol-border-strong,#456177);border-radius:6px}.cq-actions{display:flex;flex-wrap:wrap;gap:6px}.cq-card{padding:10px;margin-top:10px;border:1px solid #2b4053;border-radius:8px}.cq-root button{white-space:normal;max-width:100%;min-height:34px}.cq-authorize{display:flex;align-items:flex-start;gap:6px;margin:10px 0}.cq-authorize input{flex:0 0 auto;margin:3px 0}.cq-root summary{cursor:pointer}.cq-status{outline-offset:3px}`;
+  root.append(style,el('h3','Conquista por objetivos'),el('p','Reúne refuerzos en un origen y realiza una incursión por objetivo. Tras cada reporte reevalúa. No se coordinan ataques separados como combate conjunto.'));
+  root.append(el('p','Elige la flota inicial: no existe aquí una fórmula verificada que garantice vencer. La flota se ajusta con defensores remanentes exactos y reposición neta comparable; tras derrota añade un Marauder. Es una estimación limitada, no una fórmula de victoria. No se presupone fabricación ni llegada de flotas.'));
+  root.append(el('p','Solo se prepara una campaña con propietario ajeno confirmado en el censo nativo actual. Los destinos sin propietario verificable permanecen en espera. Los objetivos y sus autorizaciones se guardan solo en este navegador; no se transfieren mediante Drive ni copias de preferencias.'));
+  const details=el('details'),summary=el('summary','Marcar sistema como objetivo');details.append(summary);form=el('form');const target=el('div',undefined,'cq-grid');form.append(target);
+  const name=field(target,'Nombre del objetivo','',{type:'text'}),q=field(target,'Coordenada q','',{min:-10000000,max:10000000}),r=field(target,'Coordenada r','',{min:-10000000,max:10000000});fields=settings(form);
+  const authorization=el('label',undefined,'cq-authorize');authorized=el('input');authorized.type='checkbox';authorization.append(authorized,el('span','Autorizar las incursiones y refuerzos de esta campaña dentro de estos límites, cuando el Helper esté activo.'));form.append(authorization);
+  const submit=el('button','Crear campaña limitada');submit.type='submit';form.append(submit);form.addEventListener('submit',event=>{event.preventDefault();attempt(()=>{if(!authorized.checked)throw Error('Marca la autorización de esta campaña antes de crearla.');if(!confirm('¿Crear esta campaña con la flota, defensas y límites indicados? El Helper podrá preparar sus misiones nativas cuando esté activo.'))return;
+   controller.add({target:{q:integer(q,-10000000,10000000),r:integer(r,-10000000,10000000),name:name.value.trim()},...fields()});authorized.checked=false;});});details.append(form);root.append(details);
+  status=el('p',undefined,'cq-status');status.tabIndex=-1;status.setAttribute('role','status');cards=el('div');root.append(status,cards);container.prepend(root);render();
+ }
+ return {mount,render,destroy(){root?.remove();root=null;}};
+}
+return {create};
 });
 
 (function (root, factory) {
@@ -5716,7 +6234,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.24';
+  const SCRIPT_VERSION = '1.17.25';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -5761,6 +6279,7 @@ return Object.freeze({ encode });
   let fleetWait = null;
   let missionTargetResolver = null;
   let attackRetry = null;
+  let conquest = null, conquestPanel = null, conquestNavigation = null;
   const retryOriginChecks = new Map();
   const allyProtection = createAllyProtection({ getContext: missionContext,
     getWorld: () => globalThis.OldLightEmpireBridge?.snapshot?.() || null,
@@ -5779,9 +6298,15 @@ return Object.freeze({ encode });
     getSnapshot: () => readLevelTargetSnapshot(rows()), onSettingsChange: settingsChanged });
   const reports = createReportsWatcher({ send: event => notifier.emit(event),
     getAccount: () => missionContext().scope.split('/')[1] || '',
-    getBaselineSince: () => attackRetry?.getObservationSince() ?? null,
-    onReport: report => attackRetry?.observeReport(report),
-    onRecoverReports: batch => attackRetry?.recoverReports(batch) });
+    getBaselineSince: () => {
+      const values = [attackRetry?.getObservationSince(), conquest?.observationSince()].filter(Number.isSafeInteger);
+      return values.length ? Math.min(...values) : null;
+    },
+    onReport: report => { if (!conquest?.observeReport(report)) attackRetry?.observeReport(report); },
+    onRecoverReports: batch => {
+      const managed = new Set(conquest?.recoverReports(batch) || []);
+      return attackRetry?.recoverReports({ ...batch, reports: batch.reports.filter(entry => !managed.has(entry.item.id)) });
+    } });
   let driveBackup = null;
   let preferenceSync = null;
   let lastPreferenceEditAt = 0;
@@ -5854,7 +6379,7 @@ return Object.freeze({ encode });
 
   missionTargetResolver = createMissionTargetResolver({ getContext: missionContext, canAct: canOperateMission });
   missionAdapter = createNativeMissionAdapter({ getContext: missionContext, getFleet: fleetCounts,
-    canAct: job => canOperateMission() && isCurrentMissionClaim(job) && isRetryMissionAllowed(job) && isReinforcementAllowed(job), onBusyChange: schedule, onChange: schedule,
+    canAct: job => canOperateMission() && isCurrentMissionClaim(job) && isRetryMissionAllowed(job) && isReinforcementAllowed(job) && isConquestAllowed(job), onBusyChange: schedule, onChange: schedule,
     resolveTarget: (job, options) => missionTargetResolver.resolveTarget(job, options),
     checkTarget: (job, previous) => allyProtection.check(job, previous) });
   fleetWait = createFleetWaitQueue({
@@ -5903,6 +6428,35 @@ return Object.freeze({ encode });
     send: event => notifier.emit(event),
     onSettingsChange: () => { settingsChanged(); schedule(); },
   });
+
+  // BEGIN CONQUEST INTEGRATION
+  if (globalThis.OldLightConquestController && globalThis.OldLightConquestPanel) {
+    const conquestOwners = globalThis.OldLightConquestCore.createOwnerReader({ getBridge: () => globalThis.OldLightEmpireBridge || null });
+    conquest = globalThis.OldLightConquestController.create({
+      read: () => { if (typeof GM_getValue !== 'function') throw Error('No GM storage'); return GM_getValue('old-light-conquest:v1', undefined); },
+      write: value => { if (typeof GM_setValue !== 'function') throw Error('No GM storage'); return GM_setValue('old-light-conquest:v1', value); },
+      getContext: conquestContext,
+      getWorld: () => globalThis.OldLightEmpireBridge?.snapshot?.({ includeOwnership: false }) || null,
+      getJobs: () => fleetWait.list(), queue: (spec, options) => fleetWait.queue(spec, options),
+      cancel: id => { const result = fleetWait.cancel(id); missionAdapter.detach(id); return result; },
+      cancelPreparing: (id, message) => missionAdapter.cancel(id, message),
+      legacyTargets: () => attackRetry.exportConfig().campaigns,
+      getTargetOwner: (scope, target) => conquestOwners.read(scope, target),
+      isTargetAllowed: objective => allyProtection.check({ scope: objective.scope, target: { coordinate: objective.target } }).allowed === true,
+      onChange: schedule,
+    });
+    conquestPanel = globalThis.OldLightConquestPanel.create({ controller: conquest, document, onChange: schedule });
+  }
+  function conquestContext() {
+    const context = reinforcementContext();
+    return { ...context, canAct: context.canAct && context.coordinated && !document.querySelector('dialog[open]') };
+  }
+  function isConquestAllowed(job) {
+    const owned = job?.id?.startsWith('conquest:') || job?.campaignId?.startsWith('conquest:');
+    try { const context = owned ? conquestContext() : null; return owned ? Boolean(context.coordinated && (context.canAct || job.status === 'sending' && missionAdapter?.isBusy()) && conquest?.canRunJob(job)) : conquest?.canUseFleet(job) !== false; }
+    catch { return false; }
+  }
+  // END CONQUEST INTEGRATION
 
   function emitEvent(type, message, id, systemName = text(document.querySelector('[data-field="nameplate-name"]'))) {
     metrics.observeHelperEvent(type, id);
@@ -7263,7 +7817,7 @@ return Object.freeze({ encode });
         empty.append(el('strong'), el('p'));
         page.append(filters, content, empty);
         workspace.lists.set(id, { content, filters, empty, summary, filterKey,
-          selector: id === 'campaigns' ? '[data-attack-retry-campaign]' : '[data-fleet-wait-job]' });
+          selector: id === 'campaigns' ? '[data-attack-retry-campaign], [data-conquest-objective]' : '[data-fleet-wait-job]' });
       }
       workspace.views.set(id, page);
       button.addEventListener('click', () => {
@@ -7387,6 +7941,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.25', title: 'Conquista por objetivos con reunión y una incursión por reporte', changes: [
+        'Plan local autorizado con flota, defensas y límites. Reserva y reúne en un origen; espera llegada observada y un reporte por incursión. No se sincroniza por Drive.',
+        'Victoria sin captura mantiene el objetivo. Captura explícita o censo propio fresco lo detiene. Los envíos inciertos no se repiten.',
+        'Propietario nativo fresco y protección de aliados siguen siendo obligatorios. El ajuste de flota es una estimación, sin fórmula de combate garantizada.',
+      ] },
       { version: '1.17.24', title: 'Protección de créditos legible en las tarjetas de flota', changes: [
         'Proteger créditos ocupa una fila propia; la ayuda se muestra aparte y envuelve en paneles estrechos.',
         'Nombre, arrastre, cantidad y botones conservan su espacio. El ajuste y sus guardas de producción no cambian.',
@@ -8279,6 +8838,7 @@ return Object.freeze({ encode });
       levelTargets.mount(ui.levelTargetContainer);
       allyProtection.mount(ui.allyProtectionContainer);
       attackRetry.mount(ui.attackRetryContainer);
+      conquestPanel?.mount(ui.attackRetryContainer);
       fleetWait.mount(ui.fleetWaitContainer);
       if (driveBackup) driveBackup.mount(ui.driveContainer);
       else {
@@ -8406,7 +8966,7 @@ return Object.freeze({ encode });
   }
 
   function applyBackup(value) {
-    if (missionAdapter.isBusy() || attackRetry.isBusy() || empireController?.isBusy()) throw backupError('Espera a que termine la preparación o el intento de envío antes de importar una copia.');
+    if (missionAdapter.isBusy() || attackRetry.isBusy() || empireController?.isBusy() || conquestNavigation?.isBusy()) throw backupError('Espera a que termine la preparación o el intento de envío antes de importar una copia.');
     const next = validateBackup(value);
     shiftPresets.cancel();
     cancelNumericDraftTimers();
@@ -8680,6 +9240,7 @@ return Object.freeze({ encode });
     }
     if (ui.conditionsDetails.open !== settings.conditionsExpanded) ui.conditionsDetails.open = settings.conditionsExpanded;
     syncPresentationSections();
+    conquestPanel?.render();
     syncHelperWorkspace();
     ui.changelog?.sync();
     if (typeof empirePanel !== 'undefined') empirePanel?.render();
@@ -9132,7 +9693,7 @@ return Object.freeze({ encode });
   }
 
   function releaseLeadership() {
-    if (pending || observingNotifications || missionAdapter?.isBusy() || attackRetry?.isBusy() || empireController?.isBusy() || reinforcementNavigation?.isBusy()) return;
+    if (pending || observingNotifications || missionAdapter?.isBusy() || attackRetry?.isBusy() || empireController?.isBusy() || reinforcementNavigation?.isBusy() || conquestNavigation?.isBusy()) return;
     if (releaseLock) releaseLock();
     else leader = false;
   }
@@ -9141,7 +9702,7 @@ return Object.freeze({ encode });
     // Revoke a known stop synchronously, even when an update is already queued.
     // Otherwise the native selector can abort before that update and report an
     // uncertain selection, or a quick Resume can revive its remaining clicks.
-    if (!settings.enabled || document.hidden) { empireController?.cancelNavigation?.(); if (typeof reinforcementNavigation !== 'undefined') reinforcementNavigation?.cancel(); }
+    if (!settings.enabled || document.hidden) { empireController?.cancelNavigation?.(); if (typeof reinforcementNavigation !== 'undefined') reinforcementNavigation?.cancel(); if (typeof conquestNavigation !== 'undefined') conquestNavigation?.cancel(); }
     if (scheduled) return;
     scheduled = true;
     // Native messages and DOM mutations arrive in separate tasks. While the
@@ -9180,7 +9741,7 @@ return Object.freeze({ encode });
     const fleetPanel = document.querySelector(FLEET_PANEL);
     if ((!panel && !fleetPanel) || !document.body) {
       observingNotifications = false;
-      reports.tick({ active: false, enabled: notifier.isEventEnabled('game.reports') || attackRetry.isObservingReports() });
+      reports.tick({ active: false, enabled: notifier.isEventEnabled('game.reports') || attackRetry.isObservingReports() || conquest?.observationSince() != null });
       observeGameEvents([], false);
       // Si la página desmonta el panel durante una petición, conserva el bloqueo
       // hasta que se agote su plazo para no enviar otro clic desde otra pestaña.
@@ -9205,7 +9766,7 @@ return Object.freeze({ encode });
     const now = Date.now();
     const observeNotifications = notifier.isEnabled() && !document.hidden &&
       (hudPanelAvailable(panel) || hudPanelAvailable(fleetPanel));
-    const watchAttacks = attackRetry.isObservingReports();
+    const watchAttacks = attackRetry.isObservingReports() || conquest?.observationSince() != null;
     const visibleHud = !document.hidden && (hudPanelAvailable(panel) || hudPanelAvailable(fleetPanel));
     observingNotifications = visibleHud && (observeNotifications || watchAttacks);
     if (observeNotifications || (watchAttacks && visibleHud)) acquireLeadership();
@@ -9323,7 +9884,13 @@ return Object.freeze({ encode });
       show(empireController.state().status); return;
     }
     if (missionAdapter.isBusy()) { show('Preparando la misión pendiente…'); return; }
-    if (reinforcementNavigation?.tick()) { show(reinforcementNavigation.status()); return; }
+    conquest?.tick();
+    const localJob = currentMissionJob();
+    const localReady = localJob?.status === 'waiting' && isRetryMissionAllowed(localJob) && isReinforcementAllowed(localJob) && isConquestAllowed(localJob);
+    if (!localReady) {
+      if (conquestNavigation?.tick()) { show('Seleccionando origen de conquista…'); return; }
+      if (reinforcementNavigation?.tick()) { show(reinforcementNavigation.status()); return; }
+    }
     reinforcementRoutes?.tick();
     hasWaitingMission = currentMissionJob()?.status === 'waiting';
     void attackRetry.tick().catch(() => wakeAt(Date.now() + RETRY_GAP_MS));
@@ -10050,7 +10617,7 @@ return Object.freeze({ encode });
         // A route's explicit Send to a freshly verified self-owned destination
         // cannot attack that friend. Keep storage, owner, protected matches and
         // the previous owner/session token checks on this narrow path too.
-        const ownReinforcement = typeof job?.id === 'string' && job.id.startsWith('route:')
+        const ownReinforcement = typeof job?.id === 'string' && (job.id.startsWith('route:') || job.id.startsWith('conquest:') && job.campaignId?.startsWith('conquest:'))
           && spec.target?.mode === 'custom' && spec.target.missionAction === 'send' && owner.id === w.selfId;
         if (config.players.some(p => !p.id) && !ownReinforcement) return blocked('unresolved-alias', 'Hay un aliado pendiente de identificar por ID. Los ataques y envíos a destinos ajenos esperan para evitar atacarlo tras un cambio de nombre.');
         const token = { scope: s, q: point.q, r: point.r, ownerId: owner.id, epoch: w.epoch, generation: w.generation };
@@ -11866,7 +12433,12 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     }
 
     function campaignOwner(value, id) {
-      if (value === undefined) return undefined;
+      if (value === undefined) { if (typeof id === 'string' && id.startsWith('conquest:')) throw new TypeError('Falta el propietario del objetivo de conquista.'); return undefined; }
+      if (typeof value === 'string' && value.startsWith('conquest:')) {
+        const ownerId = value.slice(9), match = typeof id === 'string' && /^conquest:([0-9a-f-]{36}):([1-9][0-9]{0,3})$/i.exec(id);
+        if (!UUID.test(ownerId) || !match || match[1].toLowerCase() !== ownerId.toLowerCase() || Number(match[2]) > 1000) throw new TypeError('El vínculo de conquista no es válido.');
+        return 'conquest:' + ownerId.toLowerCase();
+      }
       if (typeof value !== 'string' || !value.startsWith('attack:') || !UUID.test(value.slice(7)) ||
           typeof id !== 'string' || !id.startsWith('retry:') || !UUID.test(id.slice(6))) {
         throw new TypeError('El vínculo de la misión con su campaña no es válido.');
@@ -12095,6 +12667,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
 
     function requireEditableJob(job, ordinary = false) {
       requireIndependentJob(job);
+      if (ordinary && job.campaignId?.startsWith('conquest:')) throw new Error('Pausa y edita el plan desde Campañas → Conquista.');
       if (ordinary && job.id.startsWith('retry:')) throw new Error('Edita esta flota desde su campaña de reintentos.');
       if (!['waiting', 'paused'].includes(job.status) || job.needsReview) {
         throw new Error('No se puede editar un envío iniciado o pendiente de confirmación. Comprueba primero las misiones del juego.');
@@ -13972,6 +14545,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const context = missionContext();
     return Boolean(leader && settings.enabled && !importingBackup && !pending && !document.hidden
       && !(typeof reinforcementNavigation !== 'undefined' && reinforcementNavigation?.isBusy())
+      && !(typeof conquestNavigation !== 'undefined' && conquestNavigation?.isBusy())
       && !reports.isRecovering()
       && !(typeof empireController !== 'undefined' && empireController?.isEnabled()
         && !empireMissionPermission())
@@ -13984,7 +14558,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const context = missionContext(), active = canOperateMission(), job = currentMissionJob();
     return { ...context, active,
       canAct: active && !missionAdapter?.isBusy() && !attackRetry?.isBusy()
-        && isRetryMissionAllowed(job) && isReinforcementAllowed(job) && !document.querySelector('dialog[open]') };
+        && isRetryMissionAllowed(job) && isReinforcementAllowed(job) && isConquestAllowed(job) && !document.querySelector('dialog[open]') };
   }
 
   function isRetryMissionAllowed(job) {
@@ -14025,6 +14599,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   }
 
   function openMissionFleetEditor(id) {
+    if (id?.startsWith('conquest:')) throw new Error('Pausa y edita la flota desde Campañas → Conquista.');
     if (id?.startsWith('retry:')) {
       const campaign = attackRetry.exportConfig().campaigns.find(value => value.queueJobId === id);
       if (!campaign) throw new Error('No se encuentra la campaña de esta misión. Revisa su estado en Flota.');
@@ -19183,7 +19758,11 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         addElement: typeof GM_addElement === 'function' ? GM_addElement : null,
         getScope: () => missionContext().scope });
       reinforcementNavigation = globalThis.OldLightReinforcementRuntime.create({
-        core: reinforcementRoutes, adapter: empireAdapter, getContext: reinforcementContext,
+        core: reinforcementRoutes, adapter: empireAdapter, getContext: () => ({ ...reinforcementContext(), canNavigate: canNavigateEmpire() && !conquestNavigation?.isBusy() }),
+        isEmpireEnabled: () => Boolean(empireController?.isEnabled()), onChange: schedule });
+      if (conquest) conquestNavigation = globalThis.OldLightReinforcementRuntime.create({
+        core: { list: conquest.navigationList, dueOrigins: conquest.dueOrigins, pause: conquest.pause }, adapter: empireAdapter,
+        getContext: () => ({ ...conquestContext(), canNavigate: canNavigateEmpire() && !reinforcementNavigation?.isBusy() }),
         isEmpireEnabled: () => Boolean(empireController?.isEnabled()), onChange: schedule });
     }
   } catch (_) { /* Unavailable route storage or observation never authorizes a mission. */ }
