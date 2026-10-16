@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.19
+// @version      1.17.20
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -1685,11 +1685,13 @@ return {create};
         const route = items.find(item => item.id === id), at = now(), next = diagnostic?.nextRunAt ?? route?.nextRunAt;
         const seconds = Number.isSafeInteger(next) && next >= 0 && finite(at) ? Math.max(0, Math.ceil((next - at) / 1000)) : null;
         const duration = seconds === null ? '' : `${String(Math.floor(seconds / 3600)).padStart(2, '0')}:${String(Math.floor(seconds / 60) % 60).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+        const reasonText = clean(diagnostic?.message || diagnostics?.error
+          || 'No se puede verificar el motivo actual. Revisa el estado del Helper y los datos del juego.');
         write(nodes.eta, route?.paused || route?.needsReview ? 'Cuenta atrás suspendida: la ruta no se reanudará automáticamente.'
           : route?.ticket ? 'Envío pendiente: esperando comprobaciones y confirmación.'
           : seconds === null ? 'ETA de comprobación sin verificar.' : seconds > 0
-            ? `Próxima comprobación en ${duration}. No garantiza un envío.` : 'Intervalo vencido: próxima comprobación pendiente. No garantiza un envío.');
-        write(nodes.reason, clean(diagnostic?.message || diagnostics?.error || 'Motivo actual de espera no disponible.'));
+            ? `Próxima comprobación en ${duration}. No garantiza un envío.` : `Intervalo vencido: ${reasonText} No garantiza un envío.`);
+        write(nodes.reason, reasonText);
         const checked = formatTime(diagnostic?.checkedAt ?? diagnostics?.checkedAt);
         write(nodes.checked, checked ? `Comprobación local: ${checked}. No confirma un envío ni actividad en la partida.` : 'Sin comprobación local disponible.');
         const sent = formatTime(diagnostic?.lastSentAt);
@@ -5631,7 +5633,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.19';
+  const SCRIPT_VERSION = '1.17.20';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -7295,6 +7297,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.20', title: 'Motivo visible cuando vence el intervalo', changes: [
+        'La línea de intervalo vencido muestra el estado comprobado: coordinación, censo, controles nativos u otro motivo disponible.',
+        'Si el diagnóstico falla, informa que no puede comprobar el estado; no da por activo el planificador ni por confirmado un envío.',
+        'Se mantienen pausa, revisión, comprobaciones de seguridad y cola sin duplicados; no se adelantan ni reintentan envíos desde el panel.',
+      ] },
       { version: '1.17.19', title: 'Protección de créditos en producción automática', changes: [
         'Protección por tipo de nave en Flota: detiene producción automática si el balance diario proyectado tras colas y lote queda negativo; sin datos, espera.',
         'Los controles quedan guardados por navegador y en las copias; no cancelan colas existentes ni cambian pedidos manuales.',

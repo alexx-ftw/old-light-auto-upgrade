@@ -517,11 +517,13 @@
         const route = items.find(item => item.id === id), at = now(), next = diagnostic?.nextRunAt ?? route?.nextRunAt;
         const seconds = Number.isSafeInteger(next) && next >= 0 && finite(at) ? Math.max(0, Math.ceil((next - at) / 1000)) : null;
         const duration = seconds === null ? '' : `${String(Math.floor(seconds / 3600)).padStart(2, '0')}:${String(Math.floor(seconds / 60) % 60).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+        const reasonText = clean(diagnostic?.message || diagnostics?.error
+          || 'No se puede verificar el motivo actual. Revisa el estado del Helper y los datos del juego.');
         write(nodes.eta, route?.paused || route?.needsReview ? 'Cuenta atrás suspendida: la ruta no se reanudará automáticamente.'
           : route?.ticket ? 'Envío pendiente: esperando comprobaciones y confirmación.'
           : seconds === null ? 'ETA de comprobación sin verificar.' : seconds > 0
-            ? `Próxima comprobación en ${duration}. No garantiza un envío.` : 'Intervalo vencido: próxima comprobación pendiente. No garantiza un envío.');
-        write(nodes.reason, clean(diagnostic?.message || diagnostics?.error || 'Motivo actual de espera no disponible.'));
+            ? `Próxima comprobación en ${duration}. No garantiza un envío.` : `Intervalo vencido: ${reasonText} No garantiza un envío.`);
+        write(nodes.reason, reasonText);
         const checked = formatTime(diagnostic?.checkedAt ?? diagnostics?.checkedAt);
         write(nodes.checked, checked ? `Comprobación local: ${checked}. No confirma un envío ni actividad en la partida.` : 'Sin comprobación local disponible.');
         const sent = formatTime(diagnostic?.lastSentAt);

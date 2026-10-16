@@ -3850,6 +3850,75 @@
         "Inspect direct rename same identity/history, canonical public URLs, unchanged installer namespace/storage/OAuth and explicitly accepted old Pages break.",
         "Question temporal movement probe and callback sensitivity; do not approve a claim of real flicker resolution."
       ]
+    },
+    {
+      "id": "reinforcement-expired-deadline-status",
+      "feedback": "Captura sin versión muestra solo intervalo vencido y comprobación pendiente. Se reproduce línea genérica pese a motivo conocido o diagnóstico fallido; no se reproduce un atasco causal del scheduler.",
+      "beforeFail": {
+        "revision": "081c0f61a5a4c1ff9565a025309c2f625e2c887e",
+        "command": "QA_REINFORCEMENT_PANEL_SOURCE=/workspace/oldlight-transfer/deadline-panel-before.js node --test tests/reinforcement-deadline-status.test.cjs",
+        "observedFailure": "Mismo harness:2fallos de texto genérico/diagnóstico fallido y2controles de scheduler aprobados.",
+        "evidence": "docs/1.17.20-deadline-status-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-deadline-status.test.cjs",
+          "name": "expired deadline includes the observed blocking reason in the countdown itself without actions or control replacement"
+        },
+        {
+          "file": "tests/reinforcement-deadline-status.test.cjs",
+          "name": "expired deadline with unavailable diagnostics reports uncertainty instead of claiming scheduler activity"
+        },
+        {
+          "file": "tests/reinforcement-deadline-status.test.cjs",
+          "name": "due scheduler rechecks coordination pause and missing census and queues exactly once after valid recovery"
+        },
+        {
+          "file": "tests/reinforcement-deadline-status.test.cjs",
+          "name": "actual scheduler coalesces due checks and reacquires valid core eligibility without duplicate queueing"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Expired route with known coordination/census/HUD reason",
+          "expected": "Same countdown line includes observed reason without controls replacement or actions.",
+          "regression": {
+            "file": "tests/reinforcement-deadline-status.test.cjs",
+            "name": "expired deadline includes the observed blocking reason in the countdown itself without actions or control replacement"
+          }
+        },
+        {
+          "scenario": "Diagnostic unavailable",
+          "expected": "Report uncertainty; do not claim scheduler activity.",
+          "regression": {
+            "file": "tests/reinforcement-deadline-status.test.cjs",
+            "name": "expired deadline with unavailable diagnostics reports uncertainty instead of claiming scheduler activity"
+          }
+        },
+        {
+          "scenario": "Valid recovery after paused or missing authority/data",
+          "expected": "Respect intervals and prepare exactly one queued mission; no native send.",
+          "regression": {
+            "file": "tests/reinforcement-deadline-status.test.cjs",
+            "name": "due scheduler rechecks coordination pause and missing census and queues exactly once after valid recovery"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Cause of supplied screenshot and real browser scheduler/locks",
+          "reason": "No installed version or full diagnosis; synthetic VM only, no real game action."
+        },
+        {
+          "scope": "Overlay flicker and repository rename",
+          "reason": "No overlay behavior changed; flicker real cause unconfirmed and rename GitHub403 remains blocked."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Reproduce expired-line output with known reason and failed diagnostic; preserve other countdown/ticket states and no action side effects.",
+        "Derive independent deadline/recovery probes and distinguish queue preparation from actual send.",
+        "Inspect real schedule and leadership wiring; do not turn a display improvement into a claim to fix real scheduler or flicker."
+      ]
     }
   ]
 }
