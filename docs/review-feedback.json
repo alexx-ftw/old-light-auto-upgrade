@@ -2959,6 +2959,60 @@
         "No waiting fallback for protected, invalid, exceptional, already-clicked or later-stage failures.",
         "Do not clear persisted pending review or bypass owner/generation/scope guard tokens."
       ]
+    },
+    {
+      "id": "reinforcement-empty-queue-diagnosis",
+      "feedback": "Informe de ningún envío observado con ruta activa y cola vacía en 1.17.10. La captura no prueba flota disponible, plazo vencido ni causa; el panel omite el motivo efectivo de espera. Se corrige la visibilidad, sin afirmar una avería de envío reproducida.",
+      "beforeFail": {
+        "revision": "b83503cbf43e0e1b691646147a92a88e23c48924",
+        "command": "env -u NODE_PATH node --test --test-name-pattern='route card explains current wait' tests/reinforcement-panel.test.cjs (new test unchanged against baseline panel)",
+        "observedFailure": "AssertionError: card text does not match /Abre Structures o Shipyard/ despite diagnostic input; previous panel ignored diagnostic adapter.",
+        "evidence": "docs/1.17.11-route-diagnostics-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "route card explains current wait and check time without replacing controls or issuing actions"
+        },
+        {
+          "file": "tests/reinforcement-core.test.cjs",
+          "name": "route diagnostics explain empty queue without changing intent or creating a send"
+        },
+        {
+          "file": "tests/reinforcement-diagnostics.test.cjs",
+          "name": "production route diagnosis explains native HUD gate and recovers without changing permissions"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Empty route queue and unavailable native Structures/Shipyard HUD",
+          "expected": "Show the native controls prerequisite and current local check time; no game effects.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "route card explains current wait and check time without replacing controls or issuing actions"
+          }
+        },
+        {
+          "scenario": "Insufficient fleet or stale census followed by restored valid data",
+          "expected": "Explain actual checks, recover the read-only ready state and preserve route/queue stores.",
+          "regression": {
+            "file": "tests/reinforcement-core.test.cjs",
+            "name": "route diagnostics explain empty queue without changing intent or creating a send"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Exact cause of the reported no-send session / real browser and game",
+          "reason": "Screenshot has no parked fleet counts, DOM, saved deadlines or complete runtime diagnostics; real game is not accessed."
+        }
+      ],
+      "independentReviewCriteria": [
+        "No diagnostic path may queue, cancel, reconcile, navigate, persist, mint a witness or bypass any native/ally guard.",
+        "Follow production gates including unavailable native HUD and imperial pause; do not infer elapsed interval from 15 min label.",
+        "Verify stale census, reserve, competing mission and recovered uncertain ticket separately from legitimate ready route.",
+        "Refreshing diagnosis must retain control identity/focus and distinguish local observation from confirmed game effects."
+      ]
     }
   ]
 }

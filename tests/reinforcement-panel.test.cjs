@@ -653,3 +653,19 @@ test('camera mismatch distinguishes static schematic from hidden main-map arrows
   assert.match(h.container.textContent, /siguen la cámara y el zoom/);
   h.app.destroy();
 });
+
+test('route card explains current wait and check time without replacing controls or issuing actions', () => {
+  let checks = {routes:[{id:'route-1',code:'hud',message:'Abre Structures o Shipyard para continuar.',checkedAt:1000,lastSentAt:null,nextRunAt:1000}]};
+  const h = harness({getDiagnostics:()=>checks}); create(h);
+  assert.match(h.container.textContent, /Abre Structures o Shipyard/);
+  assert.match(h.container.textContent, /Comprobación local:/);
+  assert.match(h.container.textContent, /Último envío confirmado: ninguno registrado/);
+  const edit = byButton(h.container, 'Editar'), calls = h.calls.length;
+  checks = {routes:[{...checks.routes[0],code:'no-ships',message:'Sin naves disponibles tras la reserva.',checkedAt:2000}]};
+  h.app.render();
+  assert.match(h.container.textContent, /Sin naves disponibles tras la reserva/);
+  assert.doesNotMatch(h.container.textContent, /Abre Structures o Shipyard/);
+  assert.equal(byButton(h.container, 'Editar'), edit);
+  assert.equal(h.calls.length, calls);
+  h.app.destroy();
+});

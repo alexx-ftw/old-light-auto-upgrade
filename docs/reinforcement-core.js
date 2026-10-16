@@ -190,8 +190,13 @@
         && object(job.quantities) && Object.keys(job.quantities).every(key => SHIPS.includes(key))
         && SHIPS.every(type => job.quantities[type] === ticket.quantities[type]);
     }
-    function worldFor(scope) {
+    function worldFor(scope, observeSession = true, diagnostic = null) {
       const world = sync(getWorld()), at = time();
+      if (diagnostic) {
+        diagnostic.code = !world || world.scope !== scope || world.connected !== true || world.complete !== true
+          ? 'census' : Number.isSafeInteger(world.observedAt) && world.observedAt <= at && at - world.observedAt > MAX_AGE_MS
+            ? 'stale-census' : 'invalid-census';
+      }
       if (!object(world) || world.scope !== scope || world.connected !== true || world.complete !== true
         || !Number.isSafeInteger(world.observedAt) || world.observedAt < 0 || world.observedAt > at
         || at - world.observedAt > MAX_AGE_MS || !Array.isArray(world.systems) || !Array.isArray(world.transits)) return null;
@@ -199,8 +204,10 @@
       if ((world.epoch !== undefined && (!Number.isSafeInteger(world.epoch) || world.epoch < 0))
         || (world.generation !== undefined && (!Number.isSafeInteger(world.generation) || world.generation < 0))) return null;
       const session = JSON.stringify([scope, world.epoch ?? null, world.generation ?? null]);
-      if (worldSession && session !== worldSession) liveTickets.clear();
-      worldSession = session;
+      if (observeSession) {
+        if (worldSession && session !== worldSession) liveTickets.clear();
+        worldSession = session;
+      }
       const systems = new Map(), coordinates = new Set();
       for (const raw of world.systems) {
         const id = systemId(raw?.id), coordinate = point(raw), key = `${coordinate.q},${coordinate.r}`;
@@ -266,27 +273,71 @@
       liveTickets.delete(witnessKey(state.scope, route.ticket));
       return { state: recorded, route: next };
     }
-    function plan(route, world, requested = null) {
-      if (!world || (route.lastSentAt !== null && world.observedAt <= route.lastSentAt)) return null;
+    function plan(route, world, requested = null, diagnostic = null) {
+      const reject = (code, message) => { if (diagnostic) Object.assign(diagnostic, { code, message }); return null; };
+      if (!world || (route.lastSentAt !== null && world.observedAt <= route.lastSentAt)) return reject('post-send-census', 'Esperando un censo posterior al último envío confirmado.');
       const origin = world.systems.get(route.originId), destination = world.systems.get(route.destinationId);
-      if (!origin || !destination || samePoint(origin, destination)) return null;
+      if (!origin || !destination || samePoint(origin, destination)) return reject('endpoints', 'Origen o destino propio sin verificar en el censo actual. No se enviará.');
       // The same route must settle before it can launch again. An independent
       // source may reinforce the same destination; its ships are not parked here.
       // A hidden origin cannot establish independence, so fail closed for either
       // endpoint until that transfer disappears from the native census.
       if (world.transits.some(transit => transit.from
         ? samePoint(transit.from, origin) && samePoint(transit.to, destination)
-        : samePoint(transit.to, origin) || samePoint(transit.to, destination))) return null;
+        : samePoint(transit.to, origin) || samePoint(transit.to, destination))) return reject('transit', 'Esperando que termine la flota en tránsito de esta ruta o un movimiento de origen desconocido hacia sus extremos.');
       const quantities = zeros();
       for (const type of SHIPS) {
         const rule = route.ships[type], available = Math.max(0, origin.fleet[type] - rule.reserve);
         const desired = requested ? requested[type] : rule.mode === 'fixed' ? rule.amount : Math.min(MAX_QUANTITY, available);
         if (!Number.isSafeInteger(desired) || desired < 0 || desired > MAX_QUANTITY || desired > available
-          || (rule.mode === 'fixed' && desired !== rule.amount)) return null;
+          || (rule.mode === 'fixed' && desired !== rule.amount)) return reject('insufficient-ships', `Flota insuficiente para ${type}: disponibles ${available} tras reserva ${rule.reserve}; solicitadas ${desired}.`);
         quantities[type] = desired;
       }
-      if (!SHIPS.some(type => quantities[type] > 0)) return null;
+      if (!SHIPS.some(type => quantities[type] > 0)) return reject('no-ships', 'Sin naves para enviar con estas reglas y reservas. Excedente usa las naves estacionadas menos la reserva; no produce naves.');
       return { origin, destination, quantities };
+    }
+    // Read-only explanation, never a dispatch permit, reconciliation or receipt.
+    // A panel read must not mint/revoke a live ticket or persist anything.
+    function diagnostics(block = null) {
+      let checkedAt = null;
+      try {
+        checkedAt = time();
+        const raw = sync(getContext()), scope = scopeId(get(raw, 'scope'));
+        const saved = load(scope), queueJobs = jobs(), proof = {};
+        const world = worldFor(scope, false, proof);
+        const result = (route, code, message) => ({ id: route.id, code, message, checkedAt,
+          lastSentAt: route.lastSentAt, nextRunAt: route.nextRunAt });
+        return { checkedAt, routes: saved.routes.map(route => {
+          const explain = (code, message) => result(route, code, message);
+          if (route.needsReview) return explain('review', 'Ruta pendiente de revisión. Comprueba los movimientos; no se repetirá el envío.');
+          if (route.paused) return explain('paused', 'Ruta pausada.');
+          if (block?.code && block?.message) return explain(block.code, block.message);
+          if (get(raw, 'coordinated') !== true) return explain('coordination', 'Esperando control exclusivo con Web Locks; no se enviará sin coordinación.');
+          if (get(raw, 'canAct') !== true) return explain('inactive', 'La automatización no permite actuar en el contexto actual.');
+          if (!world) return explain(proof.code, proof.code === 'stale-census'
+            ? 'Censo propio caducado: esperando datos nativos de los últimos dos minutos.' : 'Esperando un censo propio completo, conectado y válido.');
+          const job = route.ticket && queueJobs.find(item => item.id === route.ticket.id);
+          if (route.ticket) {
+            if (!matches(scope, route.ticket, job)) return explain('ticket', 'El ticket no coincide con la cola. Esperando reconciliación segura; no se repetirá.');
+            if (job.needsReview || job.fleetEdit || ['paused', 'uncertain'].includes(job.status)) return explain('review', 'La misión requiere revisión o conserva una edición pendiente.');
+            if (job.status === 'sending') return explain('sending', 'Envío en preparación o pendiente de confirmación; no se repetirá.');
+            if (job.status === 'sent') return explain('confirmation', 'Envío confirmado en la cola; esperando registrar el siguiente intervalo.');
+          }
+          const receipt = receiptFor(saved, route.originId);
+          const next = Math.max(route.nextRunAt, receipt?.nextRunAt ?? 0);
+          if (checkedAt < next) return explain('interval', `Esperando el intervalo guardado: ${Math.ceil((next - checkedAt) / 1000)} s. Reanudar no adelanta ese plazo.`);
+          if (receipt && world.observedAt <= receipt.lastSentAt) return explain('post-send-census', 'Esperando un censo posterior al envío registrado para este origen.');
+          if (!hasReceiptCapacity(saved, route.originId)) return explain('receipts', 'Registro de envíos lleno; esperando que caduquen comprobantes verificables.');
+          if (saved.routes.some(other => other.id !== route.id && other.originId === route.originId && (other.needsReview || other.ticket))) return explain('origin-route', 'Otra ruta de este origen tiene un envío o revisión pendiente.');
+          if (queueJobs.some(item => item.scope === scope && item.originId === route.originId && item.id !== route.ticket?.id && (item.status !== 'sent' || item.needsReview))) return explain('origin-mission', 'Otra misión de este origen está pendiente o requiere revisión.');
+          const detail = {};
+          if (!plan(route, world, route.ticket?.quantities || null, detail)) return explain(detail.code, detail.message);
+          if (get(raw, 'originId')?.toLowerCase() !== route.originId) return explain('origin', 'Esperando seleccionar el origen verificado de la ruta.');
+          return explain(route.ticket ? 'queued' : 'ready', route.ticket
+            ? 'Misión en cola: pendiente de las comprobaciones nativas y de protección del destino.'
+            : 'Preparada para la siguiente comprobación del planificador. Aún no es un envío confirmado.');
+        }) };
+      } catch (_) { return { checkedAt, routes: [], error: 'No se pueden comprobar las rutas: identidad, almacenamiento, cola o censo no disponibles.' }; }
     }
     function reconcile(state, queueJobs, world) {
       const originalState = state;
@@ -582,7 +633,7 @@
       } catch (cause) { error = cause.message || 'No se pudo preparar el refuerzo.'; return { queued: [], error }; }
       finally { running = false; }
     }
-    return Object.freeze({ state, list, save, pause, resume, remove, acknowledgeRoute, tick, canRunJob, jobState, dueOrigins });
+    return Object.freeze({ state, list, save, pause, resume, remove, acknowledgeRoute, tick, canRunJob, jobState, dueOrigins, diagnostics });
   }
   return Object.freeze({ create, SHIPS, MAX_AGE_MS, MAX_QUANTITY, MAX_ROUTES, MAX_RECEIPTS });
 });

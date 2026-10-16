@@ -56,7 +56,7 @@
     let explicitEndpoints = false;
     let sourceError = '', mapCache = null;
     const readError = () => { try { return clean(options.getError?.() || ''); } catch (_) { return 'No se puede leer el estado de las rutas.'; } };
-    const fields = new Map(), listeners = [];
+    const fields = new Map(), listeners = [], diagnosticNodes = new Map();
     const el = (tag, text, cls) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node; };
     const svg = tag => document.createElementNS(SVG, tag);
     const attr = (node, key, value) => { const s = String(value); if (node.getAttribute(key) !== s) node.setAttribute(key, s); };
@@ -322,7 +322,7 @@
       populateSelects(rows); drawMini(rows, items);
       const signature = JSON.stringify([scope, sourceError, rows.map(s => [s.id, s.name, s.q, s.r]), items]);
       if (signature !== listSignature) {
-        listSignature = signature; list.replaceChildren();
+        listSignature = signature; list.replaceChildren(); diagnosticNodes.clear();
         if (sourceError) list.append(el('p', 'Las rutas están bloqueadas hasta recuperar su estado local.', 'oldlight-route-error'));
         else if (!scope || !rows.length) list.append(el('p', 'Esperando el censo propio de la cuenta y galaxia actuales.', 'oldlight-route-hint'));
         else if (!items.length) list.append(el('p', 'Aún no hay rutas de refuerzo.', 'oldlight-route-hint'));
@@ -339,6 +339,11 @@
           row.append(el('p', `${route.needsReview ? 'Revisión necesaria' : route.paused ? 'Pausada' : route.status === 'queued' ? 'En cola' : 'Activa'} · cada ${route.intervalMinutes} min${composition ? ' · ' + composition : ''}`, 'oldlight-route-hint'));
           if (route.needsReview) row.append(el('p', 'Comprueba los movimientos del juego. Marcar como revisado descarta este intento local, conserva la ruta pausada y exige un nuevo intervalo y censo; no se repetirá el envío automáticamente.', 'oldlight-route-hint'));
           if (route.message) row.append(el('p', clean(route.message), route.needsReview ? 'oldlight-route-error' : 'oldlight-route-hint'));
+          const reason = el('p', '', 'oldlight-route-status'), checked = el('p', '', 'oldlight-route-hint');
+          const lastSend = el('p', '', 'oldlight-route-hint');
+          reason.dataset.routeDiagnostic = route.id;
+          row.append(reason, checked, lastSend);
+          diagnosticNodes.set(route.id, { reason, checked, lastSend });
           const controls = el('div', undefined, 'oldlight-route-tools');
           controls.append(button('Editar', () => { if (current() && rowEpoch === scopeEpoch) showEditor(route.originId, route.destinationId, routes().find(r => r.id === route.id)); }),
             button(route.paused ? 'Reanudar' : 'Pausar', () => { if (!current() || rowEpoch !== scopeEpoch) return; const latest = routes().find(r => r.id === route.id); if (latest) act(() => call('onPause', route.id, !latest.paused), () => report(latest.paused ? 'Ruta reanudada.' : 'Ruta pausada.')); }),
@@ -353,6 +358,19 @@
           }));
           row.append(controls); list.append(row);
         }
+      }
+      // Refresh just the text; ticking checks must not replace focused controls.
+      let diagnostics;
+      try { diagnostics = options.getDiagnostics?.(); } catch (_) { diagnostics = { error: 'No se puede comprobar el estado actual de envío.' }; }
+      const formatTime = at => Number.isSafeInteger(at) && at >= 0 && at <= 8640000000000000
+        ? new Date(at).toLocaleTimeString() : '';
+      for (const [id, nodes] of diagnosticNodes) {
+        const diagnostic = diagnostics?.routes?.find(item => item.id === id);
+        write(nodes.reason, clean(diagnostic?.message || diagnostics?.error || 'Motivo actual de espera no disponible.'));
+        const checked = formatTime(diagnostic?.checkedAt ?? diagnostics?.checkedAt);
+        write(nodes.checked, checked ? `Comprobación local: ${checked}. No confirma un envío ni actividad en la partida.` : 'Sin comprobación local disponible.');
+        const sent = formatTime(diagnostic?.lastSentAt);
+        write(nodes.lastSend, diagnostic ? sent ? `Último envío confirmado: ${sent}.` : 'Último envío confirmado: ninguno registrado.' : 'Último envío confirmado: sin verificar.');
       }
       updateDisabled(); drawOverlay();
     }

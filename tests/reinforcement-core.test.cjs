@@ -665,3 +665,50 @@ test('explicit review cannot skip its durable barrier or act after a scope switc
     assert.equal(h.storage.get(SCOPE).routes[0].needsReview, true);
   }
 });
+
+test('route diagnostics explain empty queue without changing intent or creating a send', () => {
+  const h = harness(); h.engine.save(route());
+  const before = clone([...h.storage]); const changes = h.changes;
+  const inspect = block => h.engine.diagnostics(block).routes[0];
+  assert.equal(inspect().code, 'ready');
+  assert.equal(inspect().checkedAt, h.at);
+  assert.equal(inspect().lastSentAt, null);
+  h.world.systems[0].fleet = fleet(20, 0);
+  assert.equal(inspect().code, 'no-ships');
+  assert.match(inspect().message, /reserva/);
+  h.world.systems[0].fleet = fleet();
+  h.world.observedAt = h.at - 120001;
+  assert.equal(inspect().code, 'stale-census');
+  h.world.observedAt = h.at;
+  h.world.transits = [{fromQ:0, fromR:0, toQ:5, toR:-2}];
+  assert.equal(inspect().code, 'transit');
+  h.world.transits = [];
+  assert.equal(inspect({code:'hud',message:'Abre Structures o Shipyard para continuar.'}).code, 'hud');
+  h.context.coordinated = false;
+  assert.equal(inspect().code, 'coordination');
+  assert.deepEqual([...h.storage], before);
+  assert.equal(h.changes, changes); assert.equal(h.calls.length, 0); assert.equal(h.queueJobs.length, 0);
+});
+
+test('route diagnostics distinguish interval, missing own endpoints and insufficient fixed fleet', () => {
+  const h = harness(); h.engine.save(route({ships:{probe:{mode:'fixed',amount:200,reserve:10}}}));
+  assert.equal(h.engine.diagnostics().routes[0].code, 'insufficient-ships');
+  h.world.systems = h.world.systems.filter(s => s.id !== B);
+  assert.equal(h.engine.diagnostics().routes[0].code, 'endpoints');
+  h.world.systems.push({id:B,q:5,r:-2,name:'Destination',fleet:fleet(0)});
+  const s = h.storage.get(SCOPE); s.routes[0].nextRunAt = h.at + 15000;
+  const d = h.engine.diagnostics().routes[0];
+  assert.equal(d.code, 'interval'); assert.equal(d.nextRunAt, h.at + 15000);
+  assert.equal(d.lastSentAt, null); assert.match(d.message, /15 s/);
+  h.advance(15000); assert.equal(h.engine.diagnostics().routes[0].code, 'insufficient-ships');
+});
+
+test('route diagnostics do not authorize a recovered sending claim or reconcile a ticket', () => {
+  const h = harness(); h.engine.save(route()); h.engine.tick();
+  h.queueJobs[0].status = 'sending'; h.queueJobs[0].claimedAt = h.at;
+  h.reload(); const before = clone([...h.storage]);
+  assert.equal(h.engine.diagnostics().routes[0].code, 'sending');
+  assert.equal(h.engine.canRunJob(h.queueJobs[0]), false);
+  assert.deepEqual([...h.storage], before);
+  assert.equal(h.calls.length, 1);
+});
