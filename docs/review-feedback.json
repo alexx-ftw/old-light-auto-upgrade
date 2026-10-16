@@ -4769,6 +4769,10 @@
         {
           "file": "tests/release-validation.test.cjs",
           "name": "gate retains fixed browser startup summaries without arbitrary stderr paths credentials or false success"
+        },
+        {
+          "file": "tests/release-validation.test.cjs",
+          "name": "gate preserves grouped and fragmented browser summaries without accepting oversized incomplete or secret stderr"
         }
       ],
       "boundaries": [
@@ -4787,12 +4791,24 @@
             "file": "tests/release-validation.test.cjs",
             "name": "gate retains fixed browser startup summaries without arbitrary stderr paths credentials or false success"
           }
+        },
+        {
+          "scenario": "CLI real Node24 con escrituras stderr agrupadas, partidas, sobredimensionadas y JSON final incompleto",
+          "expected": "Conserva los tres resúmenes válidos, recupera tras línea sobredimensionada y no imprime contenido privado sintético.",
+          "regression": {
+            "file": "tests/release-validation.test.cjs",
+            "name": "gate preserves grouped and fragmented browser summaries without accepting oversized incomplete or secret stderr"
+          }
         }
       ],
       "qaGaps": [
         {
           "scope": "Causa del primer arranque fallido en CI",
           "reason": "DBus stderr no demuestra causa. Ensayo separado invierte dos archivos completos en runners nuevos; no sustituye gate ni reproduce automáticamente un host frío local."
+        },
+        {
+          "scope": "Normalización de eventos por versiones de Node",
+          "reason": "El CLI real Node24 conserva líneas completas en el transporte probado; no reproduce el supuesto hueco de agrupación. La nueva regresión protege ese contrato sin cambiar parser ni afirmar cobertura de cada versión/plataforma."
         }
       ],
       "independentReviewCriteria": [
@@ -4860,6 +4876,51 @@
         "Recalcular241204+62531×1.25 con30% margen y redondeo420s; conservar límites funcionales.",
         "Verificar inventario completo, resumen global obligatorio, fallos y limpieza, sin skips/retries/warmup.",
         "No atribuir diferencias de runner/DBus/carga sin medición causal."
+      ]
+    },
+    {
+      "id": "overlay-self-mutation-microtask-starvation",
+      "feedback": "El overlay reescribe atributos ya iguales en lightDOM observados globalmente; con ImperioOFF realimenta microtasks sin ceder al cargar, incluso sin rutas/objetivos.",
+      "beforeFail": {
+        "revision": "1f157cb4ab008ea079a97e1f2f98e5ea5141bb52",
+        "command": "QA_REINFORCEMENT_PANEL_SOURCE=/workspace/oldlight-transfer/reinforcement-panel-loop-before.js node --test tests/reinforcement-observer-loop.test.cjs",
+        "observedFailure": "cutoff=true tras2000hiddenmutations/steps; timer yframes0 al corte. ControlidempotenciaDOM elimina cadena con mismoobserver/scheduler.",
+        "evidence": "docs/1.17.28-observer-loop-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-observer-loop.test.cjs",
+          "name": "production document observer and scheduler keep timers and frames alive without interaction for empty routes invalid camera and visible route markers"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Carga sininteracción,ceroobjetivos/rutas,ImperioOFF,cámara inválida",
+          "expected": "No corte; temporizador yframes avanzan sin ciclohidden.",
+          "regression": {
+            "file": "tests/reinforcement-observer-loop.test.cjs",
+            "name": "production document observer and scheduler keep timers and frames alive without interaction for empty routes invalid camera and visible route markers"
+          }
+        },
+        {
+          "scenario": "Ruta visible,coordenadas fraccionarias,cámara válida/invalidada eImperioON",
+          "expected": "Sin cicloaria/title/style; sigue respondiendo a mutación nativa nueva.",
+          "regression": {
+            "file": "tests/reinforcement-observer-loop.test.cjs",
+            "name": "production document observer and scheduler keep timers and frames alive without interaction for empty routes invalid camera and visible route markers"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Sesión real instalada",
+          "reason": "No partida ni cuenta reales; fixture ejecuta solo entrada de step antes de pasos de juego. Eros aún debe confirmar versióncorregida."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Contrastar cero timer/rAF ANTES del corte, no después. RevisarcontrolDOM yextracción exacta deobserver/scheduler.",
+        "Revisar idempotencia de todos los atributoslightDOM, floats ycallbacks; preservar autoridad fresca yobservación de cambios nativos.",
+        "No atribuir aConquista: blobpanelidéntico.24/.27."
       ]
     }
   ]
