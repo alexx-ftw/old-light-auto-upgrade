@@ -1,13 +1,15 @@
 'use strict';
 // Own one disposable browser process group. No account profile, retries or fallback.
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),{spawn}=require('node:child_process');
-function sanitize(value){return String(value).replace(/\b(?:https?|wss?):\/\/[^\s]+/gi,'<url>').replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|ph[ctx]_[A-Za-z0-9_-]+)\b/g,'<redacted>').replace(/\bBearer\s+[^\s]+/gi,'Bearer <redacted>').replace(/\b(token|authorization|password|secret|api[_-]?key)\s*[:=]\s*[^\s,;]+/gi,'$1=<redacted>');}
+function sanitize(value){return String(value).replace(/\b(?:https?|wss?):\/\/[^\s]+/gi,'<url>').replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|ph[ctx]_[A-Za-z0-9_-]+)\b/g,'<redacted>').replace(/\bBearer\s+[^\s]+/gi,'Bearer <redacted>').replace(/(["']?\b(?:token|authorization|password|secret|api[_-]?key)\b["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\r\n]*)/gi,'$1<redacted>');}
+
 function launch(executable,args,artifacts){
  let realpath=null;try{realpath=fs.realpathSync(executable);}catch{}
  const started=Date.now(),child=spawn(executable,args,{detached:true,stdio:['ignore','ignore','pipe']});
- let stderr='',closed=false,stopping=null,done=false,timer,exitCode=null,exitSignal=null;
+ let stderr='',endpointWindow='',stderrTruncated=false,closed=false,stopping=null,done=false,timer,exitCode=null,exitSignal=null;
  const metadata={executable,realpath,node:process.version,platform:process.platform,release:os.release(),pid:child.pid??null,status:'starting'};
- function persist(){try{fs.writeFileSync(path.join(artifacts,'browser-stderr.log'),sanitize(stderr));fs.writeFileSync(path.join(artifacts,'browser-startup.json'),JSON.stringify({...metadata,elapsedMs:Date.now()-started,exitCode,exitSignal},null,2));}catch{/* Never replace the original browser failure. */}}
+ function stderrText(){return (sanitize(stderr)+(stderrTruncated?'\n[stderr truncated at 16 KiB]\n':'')).slice(0,16384);}
+ function persist(){try{fs.writeFileSync(path.join(artifacts,'browser-stderr.log'),stderrText());fs.writeFileSync(path.join(artifacts,'browser-startup.json'),JSON.stringify({...metadata,elapsedMs:Date.now()-started,exitCode,exitSignal},null,2));}catch{/* Never replace the original browser failure. */}}
  function signal(value){if(!child.pid)return;try{process.kill(-child.pid,value);}catch(e){if(e.code!=='ESRCH')throw e;}}
  const onExit=()=>{try{signal('SIGKILL');}catch{}};
  const onTerm=()=>{onExit();process.removeListener('SIGTERM',onTerm);process.kill(process.pid,'SIGTERM');};
@@ -24,11 +26,11 @@ function launch(executable,args,artifacts){
  })();return stopping;}
  const endpoint=new Promise((resolve,reject)=>{
   const finish=(error,url)=>{if(done)return;done=true;clearTimeout(timer);metadata.status=error?'failed':'ready';persist();error?reject(error):resolve(url);};
-  const fail=reason=>finish(Error(reason+'; executable='+executable+'; stderr='+sanitize(stderr).slice(-2000)+'; diagnostics='+path.join(artifacts,'browser-startup.json')));
+  const fail=reason=>finish(Error(reason+'; executable='+executable+'; stderr='+stderrText().slice(-2000)+'; diagnostics='+path.join(artifacts,'browser-startup.json')));
   timer=setTimeout(()=>fail('Native Chromium startup timeout'),15000);
   child.once('error',error=>fail('Native Chromium launch failed: '+sanitize(error.message)));
   child.once('exit',(code,signalValue)=>{exitCode=code;exitSignal=signalValue;if(!done)fail('Native Chromium exited before DevTools: code='+code+' signal='+signalValue);});
-  child.stderr.on('data',data=>{stderr=(stderr+data).slice(-16384);const match=/DevTools listening on (ws:\/\/[^\s]+)/.exec(stderr);if(match)finish(null,match[1]);});
+  child.stderr.on('data',data=>{const text=String(data);if(stderr.length+text.length>16000)stderrTruncated=true;stderr=(stderr+text).slice(0,16000);if(!done){endpointWindow=(endpointWindow+text).slice(-4096);const match=/DevTools listening on (ws:\/\/[^\s]+)[\r\n]/.exec(endpointWindow);if(match){finish(null,match[1]);endpointWindow='';}}});
  });
  return {endpoint,close,child};
 }

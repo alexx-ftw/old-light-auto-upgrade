@@ -162,3 +162,5 @@ La primera candidata090058a falló en aceptación anterior al tick reconciliador
 ## Arranque Chromium: timeout no identifica causa ni confirma limpieza
 
 Los fallos repetidos1.17.26 refutaron que un timeout genérico bastase para diagnosticar el runner. Un launcher que sale42 se confundía con15s de espera y un wrapper dejaba descendiente/pipe vivos. Exigir código/señal y stderr acotado/sanitizado, grupo propio, cierre confirmado y prueba SIGTERM; contrastar deadline silencioso y endpoint legítimo sin retries/fallbacks. La inyección de launcher demuestra esas fronteras, no causa el fallo remoto ni prueba un renderer. Revisar logs completos/imagen exacta y conservar incertidumbre si no se recogió stderr. [Evidencia](browser-startup-validation.md).
+
+La candidata44851f8 demostró que separar logs del entorno no basta: las reglas simples de redacción omiten JSON, comillas/espacios y Basic. Revisar ejemplos sintéticos contra archivo y mensaje, antes y después de truncar. Conservar la etiqueta antes de redactar para no publicar una cola de valor sin contexto. No afirmar un detector universal de secretos; mantener diagnósticos limitados y sin datos de cuenta.
