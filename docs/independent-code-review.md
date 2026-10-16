@@ -186,3 +186,7 @@ La CI38927422752 de e48db1f localizó corte300s durante fixtures, con100archivos
 ## Mutaciones propias y microtasks sin ceder (1.17.28)
 
 Un render estable no es inocuo si escribe atributos observados aunque el valor coincida. La [reproducción](1.17.28-observer-loop-validation.md) liga hidden/aria-label/title a observer→microtask→render:2000iteraciones sin timer/rAF antes de corte. Exigir panelShadowRoot+marcadoreslightDOM, scheduler/observerproductivos, arranque sin interacción/objetivos, cámara inválida/válida eImperioOFF/ON. No confundir latidos posteriores al corte con progreso previo. Controlcausal de idempotenciaDOM y cambios nativos positivos; no aprobar un filtro global que silencie disponibilidad ni caché de autoridad. Probar floats largos por normalizaciónCSS. Módulo idéntico.24/.27: no adjudicar el defecto a Conquista ni cerrar incidente instalado sin confirmación.
+
+## Refutar un hueco de diagnóstico antes de añadir infraestructura
+
+El experimento de transporte stderr sobre b0ed476 refutó que agrupación/fragmentación de escrituras pierda resúmenes en el CLI real de Node24: ya retiene tres líneas válidas. Una llamada directa a un parser con dosJSON concatenados no representa por sí sola ese transporte. Se retiró buffering innecesario y se añadió cobertura de integración de mensajes válidos, oversize, incompletos y campos privados sintéticos. Exigir evidencia del límite real antes de programar una corrección y no inventar beforeFail para un test que ya pasa. Ver [contrato probado](browser-summary-transport-validation.md).

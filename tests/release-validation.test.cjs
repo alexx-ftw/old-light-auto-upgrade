@@ -520,3 +520,16 @@ test('gate retains fixed browser startup summaries without arbitrary stderr path
  const parse=require('../validate-release.cjs').browserStartupSummary;
  assert.equal(parse('arbitrary SYNTHETIC_SECRET_VALUE'),null);assert.equal(parse('OLDLIGHT_BROWSER_STARTUP '+JSON.stringify({...value,binary:'/private/profile'})),null);assert.equal(parse('OLDLIGHT_BROWSER_STARTUP '+JSON.stringify({...value,readyAfterMs:'SYNTHETIC_SECRET_VALUE'})),null);
 });
+
+test('gate preserves grouped and fragmented browser summaries without accepting oversized incomplete or secret stderr',t=>{
+ const value={phase:'settled',ordinal:1,binary:'chromium',status:'ready',cleanup:null,exitSignal:null,firstStderrAfterMs:12,readyAfterMs:30,outcomeAtMs:30,lifetimeAfterMs:31,exitCode:null,extra:'SYNTHETIC_PRIVATE_VALUE'};
+ const line=ordinal=>'OLDLIGHT_BROWSER_STARTUP '+JSON.stringify({...value,ordinal})+'\n';
+ const grouped=line(1)+line(2),fragment=line(3);
+ const source="const t=require('node:test');t('fixture passes',async()=>{process.stderr.write("+JSON.stringify(grouped)+");process.stderr.write("+JSON.stringify(fragment.slice(0,29))+");await new Promise(r=>setTimeout(r,20));process.stderr.write("+JSON.stringify(fragment.slice(29))+");});";
+ const {root}=fixture(t,{'tests/nested/sample.test.cjs':source});const {result,report}=invoke(root);assert.equal(result.status,0,JSON.stringify(report));
+ const records=report.stages.tests.stderr.trim().split('\n').filter(Boolean).map(line=>JSON.parse(line.slice('OLDLIGHT_BROWSER_STARTUP '.length)));
+ assert.deepEqual(records.map(record=>record.ordinal),[1,2,3]);assert.doesNotMatch(report.stages.tests.stderr,/SYNTHETIC|extra/);
+ const hostile='unrelated SYNTHETIC_PRIVATE_VALUE\n'+'OLDLIGHT_BROWSER_STARTUP '+ 'x'.repeat(6000)+'\n'+line(4)+'OLDLIGHT_BROWSER_STARTUP {"secret":"SYNTHETIC_PRIVATE_VALUE"';
+ const bad=fixture(t,{'tests/nested/sample.test.cjs':"process.stderr.write("+JSON.stringify(hostile)+");const t=require('node:test');t('fixture passes',()=>{});"});const after=invoke(bad.root);assert.equal(after.result.status,0,JSON.stringify(after.report));
+ assert.equal(after.report.stages.tests.stderr.trim().split('\n').length,1);assert.equal(JSON.parse(after.report.stages.tests.stderr.trim().slice('OLDLIGHT_BROWSER_STARTUP '.length)).ordinal,4);assert.doesNotMatch(after.report.stages.tests.stderr,/SYNTHETIC|secret|unrelated/);
+});
