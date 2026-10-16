@@ -3,7 +3,7 @@
 Userscript para [Old Light](https://oldlight.io/play) que atiende primero el Resource Depot necesario y su Reactor, después da prioridad a la flota y reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.17.12**, con gestión imperial coordinada y Drive sin ventana permanente, métricas locales opcionales de uso y errores y un changelog integrado. Mantiene la infraestructura necesaria antes que la flota. Retira automáticamente las misiones vinculadas al cancelar su campaña. Reintenta las interrupciones temporales, muestra su motivo concreto y funciona en las vistas estrechas Galaxy y Movements. Permite editar las flotas de misiones y campañas, con borradores guardados automáticamente. La versión cargada aparece en la cabecera del helper, también al minimizarlo.
 
 
-## Cuenta atrás, acceso en flecha y Enviar ahora (1.17.12)
+## Rutas con cuenta atrás y envío inmediato (1.17.12)
 
 Cada ruta muestra una cuenta atrás hasta que venza su plazo de **próxima comprobación**. Llegar a cero no garantiza un envío: siguen vigentes el diagnóstico, la flota disponible, propiedad, controles nativos y coordinación. Las rutas pausadas no se reanudan al vencer el plazo; un ticket pendiente espera su confirmación. Cambiar el intervalo conserva los comprobantes anteriores: reducirlo no acorta una espera ya registrada, y aumentarlo puede prolongarla.
 
