@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.15
+// @version      1.17.16
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -1224,6 +1224,40 @@ return {create};
     let explicitEndpoints = false;
     let sourceError = '', mapCache = null;
     let lastPaint = null, visualGapAt = null, paintSession = null;
+    // Memory-only, bounded and categorical. Never records world/route payloads.
+    const visualCounts = Object.create(null), visualReasons = Object.create(null), visualIntervals = Object.create(null);
+    const visualLast = Object.create(null), visualHistory = [];
+    const visualKeys = new Set(['initial', 'visible', 'no-routes', 'census-unavailable', 'projection-unavailable',
+      'scope-unavailable', 'ui-blocked', 'viewport-unavailable', 'placement-unavailable', 'invalidate',
+      'gesture-cancel', 'idle-cancel', 'pending-rejected', 'scope-change', 'view-change', 'hover-shift',
+      'wheel', 'resize', 'scroll', 'blur', 'pointercancel', 'pagehide', 'popstate', 'hashchange', 'other']);
+    let visualVisible = false, censusStamp = '', censusAvailable = null, visualCameraState = 'unknown';
+    const safeVisualTime = () => { try { const value = now(); return Number.isSafeInteger(value) && value >= 0 ? value : null; } catch (_) { return null; } };
+    const countVisual = key => { visualCounts[key] = Math.min(1000000, (visualCounts[key] || 0) + 1); };
+    const intervalVisual = key => {
+      const at = safeVisualTime(), previous = visualLast[key]; visualLast[key] = at;
+      if (at === null || previous === null || previous === undefined || at < previous) return;
+      const delta = at - previous, bucket = delta <= 16 ? 0 : delta <= 80 ? 1 : delta <= 500 ? 2 : delta <= 2000 ? 3 : 4;
+      const bins = visualIntervals[key] ||= [0, 0, 0, 0, 0]; bins[bucket] = Math.min(1000000, bins[bucket] + 1);
+    };
+    function recordVisual(hidden, reason) {
+      reason = visualKeys.has(reason) ? reason : 'other';
+      countVisual(hidden ? 'hideRequests' : 'showRequests');
+      if (visualVisible === !hidden) return;
+      visualVisible = !hidden; countVisual(hidden ? 'hiddenTransitions' : 'visibleTransitions');
+      visualReasons[reason] = Math.min(1000000, (visualReasons[reason] || 0) + 1);
+      intervalVisual('transitions');
+      visualHistory.push({ visible: !hidden, reason });
+      if (visualHistory.length > 12) visualHistory.shift();
+    }
+    function getVisualDiagnostics() {
+      return { schemaVersion: 1, scriptVersion: typeof options.scriptVersion === 'string' && options.scriptVersion.length <= 32 && /^\d+\.\d+\.\d+$/.test(options.scriptVersion) ? options.scriptVersion : 'unknown',
+        scope: 'sampled-local-memory-dom-not-browser-paint', visible: visualVisible, cameraState: visualCameraState,
+        counts: { ...visualCounts }, transitionReasons: { ...visualReasons },
+        intervalBucketMs: ['0-16', '17-80', '81-500', '501-2000', '2001+'],
+        intervals: Object.fromEntries(Object.entries(visualIntervals).map(([key, bins]) => [key, [...bins]])),
+        recentTransitions: visualHistory.map(item => ({ ...item })) };
+    }
     const readError = () => { try { return clean(options.getError?.() || ''); } catch (_) { return 'No se puede leer el estado de las rutas.'; } };
     const fields = new Map(), listeners = [], diagnosticNodes = new Map(), markerNodes = new Map();
     const helperContains = node => root?.contains?.(node) || markers?.contains?.(node);
@@ -1232,7 +1266,7 @@ return {create};
     const attr = (node, key, value) => { const s = String(value); if (node.getAttribute(key) !== s) node.setAttribute(key, s); };
     const write = (node, value) => { if (node && node.textContent !== value) node.textContent = value; };
     // SVGElement.hidden is not a reliable reflected property in browsers.
-    const hideSVG = (node, hidden) => { node.hidden = hidden; node.style.display = hidden ? 'none' : ''; };
+    const hideSVG = (node, hidden, reason = 'initial') => { if (node === overlay) recordVisual(hidden, reason); node.hidden = hidden; node.style.display = hidden ? 'none' : ''; };
     const call = (name, ...args) => { if (typeof options[name] !== 'function') throw new Error('El guardado de rutas no está disponible.'); return options[name](...args); };
     const listen = (target, name, callback, capture = false) => {
       if (!target?.addEventListener) return;
@@ -1240,9 +1274,15 @@ return {create};
     };
     const systems = () => {
       const world = getWorld();
+      const available = !!world;
+      if (censusAvailable !== available) { countVisual(available ? 'censusPresentChanges' : 'censusAbsentChanges'); censusAvailable = available; }
+      if (world) {
+        const nextStamp = JSON.stringify([world.generation, world.epoch, world.revision].map(value => typeof value === 'string' || Number.isSafeInteger(value) ? value : null));
+        if (nextStamp !== censusStamp) { censusStamp = nextStamp; countVisual('censusChanges'); intervalVisual('censusChanges'); }
+      }
       paintSession = world ? JSON.stringify([world.generation, world.epoch]) : null;
       const identity = `${getScope()}|${world?.epoch ?? ''}|${window.location?.pathname || ''}|${window.location?.search || ''}|${document.querySelector?.('[data-field="nameplate-name"]')?.textContent || ''}`;
-      if (identity !== viewIdentity) { viewIdentity = identity; cancelGesture(); invalidateMap(); }
+      if (identity !== viewIdentity) { viewIdentity = identity; cancelGesture(); invalidateMap('view-change'); }
       return ownSystems(world, getScope(), now());
     };
     const routes = () => { const value = getRoutes(); return Array.isArray(value) ? value.filter(route => route && (!route.scope || route.scope === scope)) : []; };
@@ -1258,14 +1298,17 @@ return {create};
       if (next === scope) return false;
       scope = next; scopeEpoch++; operation++; busy = false; editorScope = ''; draftId = null; explicitEndpoints = false;
       if (editor) editor.hidden = true;
-      cancelGesture(); invalidateMap(); mapCache = null; listSignature = ''; selectSignature = ''; miniSignature = '';
+      cancelGesture(); invalidateMap('scope-change'); mapCache = null; listSignature = ''; selectSignature = ''; miniSignature = '';
       if (root) report('');
       return true;
     }
-    function invalidateMap() {
+    function invalidateMap(reason = 'invalidate') {
+      countVisual('invalidations'); intervalVisual('invalidations');
+      reason = visualKeys.has(reason) ? reason : 'other';
+      countVisual('invalidate:' + reason);
       lastPaint = null; visualGapAt = null;
       anchors.clear(); hoverSample = null; pointerSample = null; overlaySignature = '';
-      if (overlay) { overlay.replaceChildren(); hideSVG(overlay, true); }
+      if (overlay) { countVisual('svgClearRequests'); if (overlay.children?.length) countVisual('svgClears'); overlay.replaceChildren(); hideSVG(overlay, true, reason); }
       if (markers) { markers.hidden = true; markers.replaceChildren(); markerNodes.clear(); }
     }
     function cancelGesture() {
@@ -1274,7 +1317,7 @@ return {create};
       try { if (previous?.capture?.hasPointerCapture?.(previous.pointerId)) previous.capture.releasePointerCapture(previous.pointerId); } catch (_) {}
       if (releaseTimer !== null) clearTimer(releaseTimer);
       releaseTimer = null; overlaySignature = '';
-      if (overlay) { overlay.replaceChildren(); hideSVG(overlay, true); }
+      if (overlay) { countVisual('svgClearRequests'); if (overlay.children?.length) countVisual('svgClears'); overlay.replaceChildren(); hideSVG(overlay, true, previous ? 'gesture-cancel' : 'idle-cancel'); }
     }
     function makeMarker(container, name) {
       const defs = svg('defs'), marker = svg('marker'), path = svg('path');
@@ -1331,7 +1374,7 @@ return {create};
       const sample = nativeHover(rows);
       if (!sample) { hoverSample = null; return null; }
       const existing = anchors.get(sample.system.id);
-      if (existing && Math.hypot(existing.x - sample.point.x, existing.y - sample.point.y) > .5) invalidateMap();
+      if (existing && Math.hypot(existing.x - sample.point.x, existing.y - sample.point.y) > .5) invalidateMap('hover-shift');
       anchors.set(sample.system.id, sample.point); hoverSample = sample;
       return sample;
     }
@@ -1355,6 +1398,7 @@ return {create};
       if (!system) return null;
       const given = options.projectSystem?.(system, { scope, canvas: stage(), rect });
       const point = typeof options.projectSystem === 'function' ? given : anchors.get(system.id);
+      countVisual(pointValid(point) ? 'projectionAvailableChecks' : 'projectionUnavailableChecks');
       return pointValid(point) ? { x: point.x - rect.left, y: point.y - rect.top, visible: point.visible } : null;
     }
     function placeOverlay(canvas) {
@@ -1373,17 +1417,21 @@ return {create};
     }
     function drawOverlay() {
       if (!overlay || destroyed) return;
+      countVisual('draws'); intervalVisual('draws');
       observeScope(getScope());
       if (holdVisualGap()) return;
       const canvas = stage(), rect = canvas?.getBoundingClientRect?.();
-      if ((!current() && !gesture) || blocked() || !rect || rect.width <= 0 || rect.height <= 0 || canvas.hidden || !placeOverlay(canvas)) { hideSVG(overlay, true); if (markers) markers.hidden = true; return; }
+      const unavailable = (!current() && !gesture) ? 'scope-unavailable' : blocked() ? 'ui-blocked'
+        : !rect || rect.width <= 0 || rect.height <= 0 || canvas.hidden ? 'viewport-unavailable'
+          : !placeOverlay(canvas) ? 'placement-unavailable' : '';
+      if (unavailable) { hideSVG(overlay, true, unavailable); if (markers) markers.hidden = true; return; }
       const at = now();
       if (!mapCache || mapCache.scope !== scope || at < mapCache.at || at - mapCache.at >= 500) {
         const items = routes();
         mapCache = { scope, at, items, rows: (gesture || items.length) ? systems() : [] };
       }
       const { rows, items } = mapCache;
-      if (!gesture && !items.length) { hideSVG(overlay, true); if (markers) markers.hidden = true; return; }
+      if (!gesture && !items.length) { hideSVG(overlay, true, 'no-routes'); if (markers) markers.hidden = true; return; }
       sampleHover(rows);
       const byId = new Map(rows.map(s => [s.id, s]));
       const segments = items.map(route => ({ route, from: projected(byId.get(route.originId), rect), to: projected(byId.get(route.destinationId), rect) })).filter(s => pointValid(s.from) && pointValid(s.to));
@@ -1394,7 +1442,7 @@ return {create};
       // its SVG nodes when the actual endpoints/style are unchanged.
       const signature = JSON.stringify([rect.left, rect.top, rect.width, rect.height,
         segments.map(s => [s.route.id, s.route.paused, s.from, s.to, !!s.preview])]);
-      hideSVG(overlay, !segments.length);
+      hideSVG(overlay, !segments.length, segments.length ? 'visible' : !rows.length ? 'census-unavailable' : 'projection-unavailable');
       drawMarkers(segments.filter(segment => !segment.preview), rect);
       if (segments.length && !gesture) lastPaint = { scope, session: paintSession, path: window.location?.pathname || '', canvas,
         rect: JSON.stringify([rect.left, rect.top, rect.width, rect.height]),
@@ -1403,7 +1451,7 @@ return {create};
       else lastPaint = null;
       visualGapAt = null; attr(overlay, 'data-census-pending', 'false');
       if (signature === overlaySignature) return;
-      overlaySignature = signature; overlay.replaceChildren();
+      overlaySignature = signature; countVisual('svgRebuilds'); overlay.replaceChildren();
       Object.assign(overlay.style, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
       attr(overlay, 'viewBox', `0 0 ${rect.width} ${rect.height}`); makeMarker(overlay, markerId);
       for (const segment of segments) addLine(overlay, segment.from, segment.to, segment.route, markerId, segment.preview);
@@ -1412,7 +1460,8 @@ return {create};
       let pending = false;
       try { pending = options.isCensusPending?.(scope, lastPaint?.session ?? null) === true; } catch (_) { /* No presentation fallback. */ }
       if (!pending) { visualGapAt = null; return false; }
-      const deny = () => { invalidateMap(); mapCache = null; return false; };
+      countVisual('pendingCensusChecks');
+      const deny = () => { invalidateMap('pending-rejected'); mapCache = null; return false; };
       // A maximum 100 ms of unchanged decorative geometry may bridge one native
       // publication gap. No cached world is exposed to gestures, editor or Send.
       const at = now();
@@ -1534,14 +1583,14 @@ return {create};
         intervalMinutes: Number(interval.value), ships, paused: existing?.paused === true };
       act(() => call('onSave', next), () => { editor.hidden = true; editorScope = ''; draftId = null; report('Ruta guardada.'); });
     }
-    function act(callback, success) {
+    function act(callback, success, failure = report) {
       observeScope(getScope()); if (!current() || busy) return;
-      const failure = readError(); if (failure) { report(failure, true); return; }
+      const sourceFailure = readError(); if (sourceFailure) { failure(sourceFailure, true); return; }
       const epoch = scopeEpoch, token = ++operation; busy = true; updateDisabled();
       const done = (result, cause) => {
         observeScope(getScope()); if (destroyed || epoch !== scopeEpoch || token !== operation) return;
         busy = false;
-        if (cause || result === false || result?.ok === false) report(clean(cause?.message || result?.message || result?.reason) || 'No se pudo guardar el cambio.', true);
+        if (cause || result === false || result?.ok === false) failure(clean(cause?.message || result?.message || result?.reason) || 'No se pudo guardar el cambio.', true);
         else success();
         listSignature = ''; render();
       };
@@ -1550,7 +1599,7 @@ return {create};
     }
     function updateDisabled() {
       if (!root) return;
-      for (const node of root.querySelectorAll?.('button, input, select') || []) node.disabled = busy || node.dataset.routeBlocked === 'true';
+      for (const node of root.querySelectorAll?.('button, input, select') || []) { if (node.dataset.localDiagnostic !== 'true') node.disabled = busy || node.dataset.routeBlocked === 'true'; }
     }
     function render() {
       if (!root || destroyed) return;
@@ -1558,6 +1607,12 @@ return {create};
       const previousError = sourceError; sourceError = readError();
       if (sourceError) write(error, sourceError); else if (previousError && error.textContent === previousError) write(error, '');
       const capability = options.getAvailability?.();
+      const cameraState = capability?.cameraAvailable === true ? 'available'
+        : capability?.cameraReason === 'camera-observation-pending' ? 'pending-delivery-or-change'
+          : capability?.cameraReason === 'stale-camera-observation' ? 'stale'
+            : capability?.cameraReason === 'native-viewport-size-mismatch' ? 'viewport-mismatch'
+              : capability?.cameraAvailable === false ? 'unavailable' : 'unknown';
+      if (cameraState !== visualCameraState) { visualCameraState = cameraState; countVisual('cameraStateChanges'); intervalVisual('cameraStateChanges'); }
       const measured = capability?.cameraGeometry, dimensions = ['nativeWidth', 'nativeHeight', 'cssWidth', 'cssHeight'];
       const geometryHint = capability?.cameraReason === 'native-viewport-size-mismatch' && measured
         && dimensions.every(key => finite(measured[key]) && measured[key] > 0 && measured[key] <= 100000)
@@ -1602,8 +1657,9 @@ return {create};
           const sendNow = button('Enviar ahora', event => {
             if (!trusted(event) || !current() || rowEpoch !== scopeEpoch) return;
             const latest = routes().find(item => item.id === route.id);
-            if (!latest || latest.paused || latest.needsReview || latest.ticket) { report('Ruta pausada, en revisión o con envío pendiente. No se reanuda ni se duplica.', true); return; }
-            act(() => call('onSendNow', route.id), () => report('Solicitud preparada en la cola. El envío conserva sus comprobaciones nativas y de protección.'));
+            if (!latest || latest.paused || latest.needsReview || latest.ticket) { reportGesture('Ruta pausada, en revisión o con envío pendiente. No se reanuda ni se duplica.', true); return; }
+            reportGesture('Comprobando si se puede preparar la solicitud. Todavía no confirma un envío.');
+            act(() => call('onSendNow', route.id), () => reportGesture('Solicitud preparada en la cola; aún no confirma un envío. Consulta el motivo actual de la ruta mientras se comprueban las protecciones.'), reportGesture);
           });
           sendNow.title = 'Omite solo el intervalo. Envía lo disponible de los tipos configurados, hasta la cantidad fija y dejando la reserva. Requiere seleccionar el origen y superar las demás comprobaciones.';
           sendNow.dataset.routeBlocked = String(!!(route.paused || route.needsReview || route.ticket));
@@ -1772,12 +1828,13 @@ return {create};
         // Retargeted Shadow DOM events are identified by the owner, not names.
         let helper = helperContains(event.target);
         try { helper ||= options.isHelperEvent?.(event) === true; } catch (_) { /* Unknown events still invalidate. */ }
+        countVisual('event:' + name + (helper ? ':helper' : ':outside'));
         if (['wheel', 'scroll'].includes(name) && helper && !gesture) {
           mapCache = null; // Recheck the census as well as the camera; no stale fallback.
           drawOverlay();
           return;
         }
-        cancelGesture(); invalidateMap();
+        cancelGesture(); invalidateMap(name);
         if (gestureNotice) gestureNotice.hidden = true;
         if (['blur', 'pointercancel', 'pagehide'].includes(name)) intent = null;
       }, true);
@@ -1787,6 +1844,7 @@ return {create};
       listen(document, 'visibilitychange', () => { cancelGesture(); invalidateMap(); });
       const tick = timestamp => {
         if (destroyed) return;
+        countVisual('rafCallbacks'); intervalVisual('rafCallbacks');
         if (timestamp - lastFrame >= 80) { lastFrame = timestamp; drawOverlay(); }
         frame = window.requestAnimationFrame?.(tick) || null;
       };
@@ -1806,6 +1864,14 @@ return {create};
       details.append(el('p', 'Esquema de rutas · independiente de la cámara', 'oldlight-route-hint'));
       mini = svg('svg'); mini.classList?.add('oldlight-route-map'); attr(mini, 'role', 'img'); attr(mini, 'aria-label', 'Esquema de rutas entre sistemas propios'); details.append(mini);
       mapHint = el('p', '', 'oldlight-route-hint'); details.append(mapHint);
+      const visualReport = el('pre'); visualReport.hidden = true; visualReport.setAttribute('aria-label', 'Diagnóstico local de flechas');
+      Object.assign(visualReport.style, { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: '11px' });
+      const visualReportButton = button('Ver diagnóstico local de flechas', () => {
+        write(visualReport, JSON.stringify(getVisualDiagnostics(), null, 2)); visualReport.hidden = false;
+      });
+      visualReportButton.dataset.localDiagnostic = 'true';
+      details.append(visualReportButton, el('p', 'Solo memoria local de esta carga. Pulsa para actualizar y copia el texto si quieres compartirlo. No incluye IDs, nombres ni coordenadas y no se envía automáticamente. Son muestras del panel, no todos los mensajes ni la pintura real del navegador.', 'oldlight-route-hint'), visualReport);
+
       list = el('div'); details.append(list);
       editor = el('div', undefined, 'oldlight-route-editor'); editor.hidden = true;
       editor.append(el('strong', 'Configurar ruta'));
@@ -1848,7 +1914,7 @@ return {create};
       for (const remove of listeners.splice(0)) remove();
       root?.remove(); overlay?.remove(); markers?.remove(); markerNodes.clear(); gestureNotice?.remove(); intent = null; anchors.clear();
     }
-    return Object.freeze({ mount, render, observeScope, open: showEditor, openRoute, containsControl: node => markers?.contains?.(node) === true, cancelGesture, invalidateMap, destroy });
+    return Object.freeze({ mount, render, observeScope, open: showEditor, openRoute, containsControl: node => markers?.contains?.(node) === true, getVisualDiagnostics, cancelGesture, invalidateMap, destroy });
   }
   return Object.freeze({ create, ownSystems, SHIPS: Object.freeze(SHIPS.slice()) });
 });
@@ -5565,7 +5631,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.15';
+  const SCRIPT_VERSION = '1.17.16';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -7154,6 +7220,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.16', title: 'Diagnóstico local de flechas y respuesta de envío', changes: [
+        'Diagnóstico local bajo demanda con motivos de ocultación, transiciones y cadencias agregadas; sin IDs, nombres, coordenadas ni envío remoto.',
+        'Enviar ahora muestra fuera de la lista desplazada el bloqueo o la preparación en cola, sin presentarla como envío confirmado.',
+        'Se mantiene la revocación de proyecciones durante cambios de cámara; el resultado del parpadeo real sigue pendiente.',
+      ] },
       { version: '1.17.15', title: 'Flechas estables al desplazar el Helper', changes: [
         'Desplazar el contenido del Helper ya no borra repetidamente las flechas verificadas entre los frames del mapa.',
         'Se comprueban de nuevo censo y cámara; el zoom del mapa, los gestos y los datos inválidos conservan su invalidación.',
@@ -18839,6 +18910,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       schedule(); return result;
     };
     reinforcementPanel = globalThis.OldLightReinforcementPanel.create({ document, window,
+      scriptVersion: SCRIPT_VERSION,
       isHelperEvent: event => Boolean(host && event.composedPath?.().includes(host)),
       onControlRoot: installHelperKeyboardBoundary,
       getScope: () => missionContext().scope,

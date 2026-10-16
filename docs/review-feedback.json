@@ -3363,6 +3363,18 @@
         {
           "file": "tests/reinforcement-panel.test.cjs",
           "name": "temporal census gaps tooltip changes and zoom preserve only valid decoration and revoke prolonged gaps"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "local visual diagnostics record categorical movement and census cadence without payloads or authority"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "local visual diagnostics tolerate clock reversal and never export raw camera reasons or errors"
+        },
+        {
+          "file": "tests/reinforcement-map.test.cjs",
+          "name": "moving camera has a measured revoked delivery window while static camera heartbeats remain usable"
         }
       ],
       "boundaries": [
@@ -3405,12 +3417,28 @@
             "file": "tests/reinforcement-panel.test.cjs",
             "name": "temporal census gaps tooltip changes and zoom preserve only valid decoration and revoke prolonged gaps"
           }
+        },
+        {
+          "scenario": "User requests a local diagnostic during camera/census transitions",
+          "expected": "Bounded categorical detached snapshot without IDs/coordinates/rawerrors or network/storage/actions.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "local visual diagnostics record categorical movement and census cadence without payloads or authority"
+          }
+        },
+        {
+          "scenario": "Camera moves before observer frame and port delivery, then static heartbeats",
+          "expected": "Preserve synchronous revocation on changes and usable identical static geometry; diagnostic does not bypass it.",
+          "regression": {
+            "file": "tests/reinforcement-map.test.cjs",
+            "name": "moving camera has a measured revoked delivery window while static camera heartbeats remain usable"
+          }
         }
       ],
       "qaGaps": [
         {
-          "scope": "Live flicker cause, user result on1.17.15 and browser compositor",
-          "reason": "Installed version is confirmed1.17.14; event context and user outcome on1.17.15 remain unconfirmed. Simulated DOM/rAF does not establish actual painting."
+          "scope": "Actual moving-camera flicker, current installed version after1.17.14 and compositor",
+          "reason": "User confirms no flicker when static.1.17.14 is latest confirmed installed; later result and actual diagnostic cadence remain pending. Local sampling does not establish painting."
         }
       ],
       "independentReviewCriteria": [
@@ -3419,7 +3447,9 @@
         "Demand current census and camera on the helper event; retain gesture cancellation and no stale hover fallback.",
         "Keep100ms pending-decoration limit, invalid scope/session/canvas hiding and all game action guards unchanged.",
         "State actual installed version and session mechanism are unconfirmed; never infer success in the real game from offline tests.",
-        "Count executed rAF callbacks within the actual fixture dispatcher; deliberately drop them and require the same temporal assertions to fail. Follow docs/overlay-validation-process.md."
+        "Count executed rAF callbacks within the actual fixture dispatcher; deliberately drop them and require the same temporal assertions to fail. Follow docs/overlay-validation-process.md.",
+        "Inspect privacy by allowlisted output and every counter caller; inject sentinel names/reasons/versions and verify no leaks, side effects or state aliasing.",
+        "Treat sampled DOM cadence as sampled, not a complete camera-message or compositor trace; retain real moving-camera cause as uncertain."
       ]
     },
     {
@@ -3469,6 +3499,51 @@
         "Inspect increment in the callback dispatcher rather than frame registration; rerun disabled-callback mutation.",
         "Keep old and final mutation identical apart from test assertions/counter; record false-green prior result and required failure after.",
         "Require fresh adversarial review and full final gate; do not call conditional simulated flicker fix confirmed in live session."
+      ]
+    },
+    {
+      "id": "reinforcement-manual-send-visible-feedback",
+      "feedback": "Enviar ahora reportado sin efecto en1.17.14. El recorrido apto sí envía en simulación; se demuestra que el feedback del click solo estaba en cabecera y no activaba aviso fijo fuera de la lista desplazada.",
+      "beforeFail": {
+        "revision": "55f347d2fde14324db4305b819a721fd8e918d59",
+        "command": "node --test /tmp/oldlight-send-feedback-11716-before/tests/reinforcement-send-now-feedback.test.cjs",
+        "observedFailure": "Mismo test final sobre base:1caso falla por ausencia de aviso accesible en preparación apta. No acredita fallo general de dispatch; el probe baseline apto confirma un envío simulado.",
+        "evidence": "docs/1.17.16-local-overlay-diagnostics-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-send-now-feedback.test.cjs",
+          "name": "manual send button reports preparation or cause visibly and reaches simulated dispatch only when eligible"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Eligible trusted click through actual integration/core/queue/native adapter",
+          "expected": "Durable mission first, visible preparation explicitly not confirmed send, then one simulated dispatch/confirmation.",
+          "regression": {
+            "file": "tests/reinforcement-send-now-feedback.test.cjs",
+            "name": "manual send button reports preparation or cause visibly and reaches simulated dispatch only when eligible"
+          }
+        },
+        {
+          "scenario": "HUD closed, pause, empty fleet, stale census or untrusted event",
+          "expected": "Zero sends; actionable trusted denials show cause without loosening guards.",
+          "regression": {
+            "file": "tests/reinforcement-send-now-feedback.test.cjs",
+            "name": "manual send button reports preparation or cause visibly and reaches simulated dispatch only when eligible"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Actual user send blocker and real scrolled layout",
+          "reason": "Native game and compositor are not exercised. Structural fixed notice is checked; actual blocker in1.17.14 remains unknown."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Follow actual button handler, production integration callback, durable ticket and queue dispatch rather than a mock returning success.",
+        "Verify preparation is not reported as a confirmed send and visible cause exists for actionable denials.",
+        "Keep all reservations, ownership, ally and native confirmation guards; do not clear pending/review tickets."
       ]
     }
   ]

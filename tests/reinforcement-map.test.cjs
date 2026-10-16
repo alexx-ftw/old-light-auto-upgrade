@@ -534,3 +534,27 @@ test('identical heartbeat keeps projection available before frame and delayed po
   h.frame(); b.deliver(queued.shift()); assert.ok(b.map.projectSystem(system, { scope }));
   h.observer.stop(); b.map.stop();
 });
+
+
+test('moving camera has a measured revoked delivery window while static camera heartbeats remain usable', async () => {
+  const b = bridgeHarness(), queued = [];
+  const h = await installed({ onPending: value => b.pending(value), emit: value => queued.push(value) });
+  h.project(); h.frame(); b.deliver(queued.shift());
+  const system = { id: 'fixture-only', q: 0, r: 0 };
+  let rejectedBeforeFrame = 0, rejectedBeforePort = 0, acceptedAfterPort = 0;
+  for (let n = 1; n <= 60; n++) {
+    h.advance(16); b.advance(16); h.project(n * 2);
+    if (b.map.projectSystem(system, { scope }) === null) rejectedBeforeFrame++;
+    h.frame();
+    if (b.map.projectSystem(system, { scope }) === null) rejectedBeforePort++;
+    b.deliver(queued.shift());
+    if (b.map.projectSystem(system, { scope })) acceptedAfterPort++;
+  }
+  assert.deepEqual([rejectedBeforeFrame, rejectedBeforePort, acceptedAfterPort], [60, 60, 60]);
+  for (let n = 0; n < 5; n++) {
+    h.tick(500); b.advance(500); assert.ok(b.map.projectSystem(system, { scope }));
+    h.frame(); assert.ok(b.map.projectSystem(system, { scope }));
+    b.deliver(queued.shift()); assert.ok(b.map.projectSystem(system, { scope }));
+  }
+  h.observer.stop(); b.map.stop();
+});

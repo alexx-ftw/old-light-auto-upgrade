@@ -872,3 +872,47 @@ test('temporal census gaps tooltip changes and zoom preserve only valid decorati
   h.window.dispatch('scroll', { target: root }); assert.equal(overlay.style.display, 'none');
   h.app.destroy();
 });
+
+
+test('local visual diagnostics record categorical movement and census cadence without payloads or authority', () => {
+  let camera = true, pending = false;
+  const h = harness({ scriptVersion: '1.17.16', isCensusPending: () => pending,
+    getAvailability: () => ({ cameraAvailable: camera, cameraReason: camera ? '' : 'camera-observation-pending' }),
+    projectSystem: system => camera ? { x: 150 + system.q * 20, y: 150 + system.r * 20, visible: true } : null }); create(h);
+  const root = h.container.querySelector('.oldlight-routes'), world = h.world;
+  const initialChanges = h.app.getVisualDiagnostics().counts.censusChanges || 0;
+  for (let i = 0; i < 20; i++) {
+    h.world = { ...world, revision: i + 1, generation: 'PRIVATE_GENERATION', observedAt: 1000 + i * 16 };
+    camera = i % 2 === 0; h.app.render(); h.frame(16);
+    h.window.dispatch('scroll', { target: root });
+  }
+  const state = h.app.getVisualDiagnostics();
+  assert.equal(state.scriptVersion, '1.17.16'); assert.equal(state.cameraState, 'pending-delivery-or-change');
+  assert.ok(state.counts.hiddenTransitions > 0 && state.counts.visibleTransitions > 0);
+  assert.ok(state.transitionReasons['projection-unavailable'] > 0);
+  assert.equal(state.counts.rafCallbacks, 20); assert.equal(state.counts.censusChanges - initialChanges, 20);
+  assert.equal(state.counts['event:scroll:helper'], 20);
+  assert.ok(state.intervals.censusChanges.some(value => value > 0));
+  const text = JSON.stringify(state); assert.ok(text.length < 6000);
+  for (const value of [A, B, SCOPE, 'PRIVATE_GENERATION', 'Origen', 'Destino']) assert.ok(!text.includes(value), value);
+  assert.equal(state.recentTransitions.length, 12);
+  assert.ok(state.recentTransitions.every(item => Object.keys(item).sort().join(',') === 'reason,visible'));
+  const before = JSON.stringify(h.routes), calls = h.calls.length;
+  h.click('Ver diagnóstico local de flechas');
+  const output = byLabel(h.container, 'Diagnóstico local de flechas'); assert.equal(output.hidden, false);
+  assert.equal(JSON.parse(output.textContent).counts.rafCallbacks, 20);
+  assert.equal(JSON.stringify(h.routes), before); assert.equal(h.calls.length, calls);
+  state.recentTransitions.length = 0; state.counts.rafCallbacks = 999;
+  assert.equal(h.app.getVisualDiagnostics().counts.rafCallbacks, 20, 'Report is a detached snapshot');
+  h.app.destroy();
+});
+
+test('local visual diagnostics tolerate clock reversal and never export raw camera reasons or errors', () => {
+  const h = harness({ scriptVersion: 'not-a-version PRIVATE_VALUE', getAvailability: () => ({ cameraAvailable: false, cameraReason: 'PRIVATE_REASON' }),
+    projectSystem: () => null, getError: () => 'PRIVATE_ERROR' });
+  h.app.render(); h.frame(16); h.advance(-100); h.app.render(); h.frame(16);
+  const report = h.app.getVisualDiagnostics(), text = JSON.stringify(report);
+  assert.equal(report.scriptVersion, 'unknown'); assert.equal(report.cameraState, 'unavailable');
+  assert.ok(!text.includes('PRIVATE_')); assert.ok(Object.values(report.intervals).flat().every(Number.isSafeInteger));
+  h.app.destroy();
+});
