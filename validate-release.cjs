@@ -298,7 +298,7 @@ async function main() {
   const started = new Date().toISOString();
   const report = { schemaVersion: 1, scope: 'offline-validation-only', status: 'failed', startedAt: started,
     node: process.version, platform: process.platform, stages: {}, errors: [],
-    limitations: ['No live game, OAuth or production network validation. Offline browser reference coverage only when its inventoried test and Chromium are available.',
+    limitations: ['No live game, OAuth or production network validation. Inventoried browser tests include a synthetic-world native galaxy map scene; authenticated boot and real user result are not covered.',
       'No independent reviewer approval, remote state/lease verification or publication authorization.',
       'Feedback before-fail records and review criteria are recorded claims; only current linked regression passes are checked automatically.',
       'Temporary copies isolate normal writes; trusted repository code is executed, not security-sandboxed.',
@@ -353,7 +353,7 @@ async function main() {
       }
       return { nodeMinimum: 24, processCleanup: 'POSIX process groups (Linux/macOS)',
         offlineBrowser: { executable: ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome', '/opt/google/chrome/chrome'].find(file => fs.existsSync(file)) || null,
-          required: process.env.OVERLAY_BROWSER_REQUIRED === '1', scope: 'Inventoried overlay browser test only; not native Pixi/game/transport coverage.' } };
+          required: process.env.OVERLAY_BROWSER_REQUIRED === '1', scope: 'Inventoried reference and native map-scene tests; synthetic world and pinned public modules, no authenticated game/session coverage.' } };
     });
     if (report.stages.preflight.help) return;
     await stage('snapshot', () => {

@@ -61,3 +61,7 @@ La batería incluye tests/reinforcement-overlay-browser.test.cjs dentro del gate
 ## Orden y transporte obligatorios desde1.17.22
 
 La regresión de10.29px debe ejercitar renderer antes Y después del overlay, con observación y MessagePort productivos, puerto inmediato y demorado, camino project y unproject/bounds. Un orden favorable nunca sustituye el invertido. Comprobar vector completo de extremos, visibilidad frame a frame, callbacks/notificaciones/puertos realmente ejecutados, controles que desactiven cada canal, negativos y recuperación útil. [Matriz y límites](1.17.22-camera-render-order-validation.md). La geometría decorativa síncrona no puede conceder hit-test, marcador activo o autoridad mientras el puerto esté pendiente.
+
+## Escena nativa y caducidad entre callbacks (1.17.23)
+
+La [batería nativa](1.17.23-native-galaxy-validation.md) debe conservar ambos órdenes con ticker/controlador/World/GPU originales, mundo aislado y puertos reales demorados/reordenados. Comprobar movimiento efectivo y píxeles, no solo coordenadas de un callback. Separar bootstrap y cámara inválida de fases válidas sin descartar primeros frames de estas. Verificar botones alcanzables (no solo disabled de elementos ocultos), caducidad real entre callbacks y clic sin render previo: un snapshot revocado debe comunicar el bloqueo, sin extenderTTL, y la recuperación fresca debe volver a servir.

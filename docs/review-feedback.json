@@ -4053,6 +4053,75 @@
         "Audit synchronous detached-target decoration validation and lifecycle; projectSystem/status/hitTest and pending route markers must retain authoritative MessagePort guards.",
         "Challenge same-world fixture and static dependency provenance; distinguish Pixi reference and exact camera methods from missing full native scene and actual Eros outcome; inspect CPU work per notification."
       ]
+    },
+    {
+      "id": "native-galaxy-scene-authority-expiry",
+      "feedback": "La escena nativa pública con World/ticker/GPU originales y Helper aislado revela marcador alcanzable tras caducar cámara entre callbacks, aunque flechas alineadas; el clic confiaba en el estado pintado. Hace permanente escena completa del mapa, píxeles, ambos órdenes y puertos demorados/reordenados.",
+      "beforeFail": {
+        "revision": "69d1304bcd698d5e84facd8c6bfe06186e1538e5",
+        "command": "node --test --test-name-pattern='camera authority expiry' tests/reinforcement-map.test.cjs; node --test --test-name-pattern='route marker rechecks' tests/reinforcement-panel.test.cjs",
+        "observedFailure": "Antes de editar producción, caducidad arroja0notificaciones donde se espera1 y clic con proyección ya inválida abre2veces donde se espera1; recorrido nativo invertido conserva8muestras stale-camera-observation con marcador visible/activo. No hubo envíos.",
+        "evidence": "docs/1.17.23-native-galaxy-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/native-galaxy-overlay.test.cjs",
+          "name": "native galaxy GPU scene and isolated production overlay align across before renderer order with delayed reordered ports"
+        },
+        {
+          "file": "tests/native-galaxy-overlay.test.cjs",
+          "name": "native galaxy GPU scene and isolated production overlay align across after renderer order with delayed reordered ports"
+        },
+        {
+          "file": "tests/reinforcement-map.test.cjs",
+          "name": "camera authority expiry and delayed transport revocation notify presentation immediately without extending freshness"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "route marker rechecks live camera authority at activation before opening while decoration remains valid"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Native map GPU, real World/controller/ticker, isolated consumer; renderer before/after and actual delayed/reordered MessagePort",
+          "expected": "Every valid sampled frame visible, native projection endpoints<1px and framebuffer-core endpoints<2px; actual movement/census/render/receive counters, no network/game actions.",
+          "regression": {
+            "file": "tests/native-galaxy-overlay.test.cjs",
+            "name": "native galaxy GPU scene and isolated production overlay align across after renderer order with delayed reordered ports"
+          }
+        },
+        {
+          "scenario": "Real1700ms stalled frame, expiry/reordered authoritative loss and activation without intervening redraw",
+          "expected": "Freshness1500ms unchanged; authority loss notifies UI, marker blocked, direct activation rechecks both authoritative endpoints and opens nothing.",
+          "regression": {
+            "file": "tests/reinforcement-map.test.cjs",
+            "name": "camera authority expiry and delayed transport revocation notify presentation immediately without extending freshness"
+          }
+        },
+        {
+          "scenario": "Fresh camera confirmation and legitimate route marker recovery",
+          "expected": "Fresh transport restores a usable marker and one explicit open; zero sends from either blocked or permitted marker activation.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "route marker rechecks live camera authority at activation before opening while decoration remains valid"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Authenticated galaxy boot, full account/HUD/economy screens, live Eros/Violentmonkey/Brave/Firefox/CSP",
+          "reason": "Public map-scene classes run offline in synthetic World; production camera pipeline crosses actual Chromium isolated world, but imperial census adapter is fixture and no real session is accessed."
+        },
+        {
+          "scope": "Arbitrary compositor intervals, DPR/mobile/GPU loss and many-route performance",
+          "reason": "Per-callback geometry plus WebGL ROI reads and screenshots, not full compositor movie. ReadPixels synchronizes software GPU and does not certify60fps. Cores deliberately unoccluded by synthetic transit."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Independently exercise both native ticker registration orders and actual port reorder, movement, census and expiry; inspect pixel detector against rings/brackets/occlusion and test sensitivity to CSS displacement/disabled notifications.",
+        "Audit exact public source transformation and every asset hash; unknown requests or missing cache must fail, with no account/network/authenticated boot. Distinguish actual two-world camera pipe from synthetic census adapter.",
+        "Probe authoritative expiry and click-before-redraw against immutable base, verify reentrancy/lifecycle, unchangedTTL/stamp/scope guards, zero orders and positive fresh recovery. Do not use early fixture failures as product bugs or claim Eros incident fixed."
+      ]
     }
   ]
 }

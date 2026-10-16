@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.22
+// @version      1.17.23
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -1058,6 +1058,7 @@ return {create};
     const eventName = 'oldlight-reinforcement-map-bootstrap', pendingAttribute = 'data-oldlight-map-pending';
     const projectionEvent = eventName + '-projection', projectionAttribute = pendingAttribute + '-projection';
     const projectionListeners = new Set();
+    let notifyingProjection = false;
     let decoration = null, decorationCanvas = null, decorationScope = '', decorationRevision = 0;
     let stopped = false, failed = false, installed = false, reason = 'awaiting-native-camera', current = null, currentCanvas = null, geometry = null;
     let container = null, port = null, ackTimer = null, watcher = null, lastRevision = 0, boundScope = '';
@@ -1066,6 +1067,12 @@ return {create};
     // Synchronous detached-target delivery is presentation-only. A new native
     // camera observation reaches SVG before paint regardless of rAF registration
     // or MessagePort latency. It never settles projectSystem or hitTestSystem.
+    function notifySubscribers() {
+      if (notifyingProjection || stopped || failed) return;
+      notifyingProjection = true;
+      try { for (const callback of projectionListeners) { try { callback(); } catch (_) {} } }
+      finally { notifyingProjection = false; }
+    }
     function notifyProjection() {
       if (stopped || failed) return;
       const value = validateSnapshot(container?.getAttribute(projectionAttribute));
@@ -1079,7 +1086,7 @@ return {create};
           decorationRevision = value.revision; decoration = value; decorationCanvas = view.canvas;
         }
       } catch (_) { /* Invalid observations revoke presentation. */ }
-      for (const callback of projectionListeners) { try { callback(); } catch (_) {} }
+      notifySubscribers();
     }
     function decorative({ canvas, rect, scope } = {}) {
       const value = decoration;
@@ -1105,7 +1112,12 @@ return {create};
       if (ackTimer !== null) { realm.clearTimeout(ackTimer); ackTimer = null; }
       container?.removeEventListener(eventName, handshake); container?.remove();
     }
-    function clear(why) { current = null; currentCanvas = null; reason = why; geometry = null; }
+    function clear(why) {
+      const lostAuthority = !!current; current = null; currentCanvas = null; reason = why; geometry = null;
+      // Expiry/reordered delivery can revoke authority between overlay frames.
+      // Reflect that loss immediately; never extend the accepted snapshot TTL.
+      if (lostAuthority) notifySubscribers();
+    }
     function fail(why) { failed = true; installed = false; cleanupBootstrap(); try { port?.postMessage('stop'); } catch (_) {} port?.close(); port = null; clear(why); }
     function receive(event) {
       if (stopped || failed) return;
@@ -1128,7 +1140,7 @@ return {create};
       try {
         const view = viewport(document);
         if (!view || !equalRect(value.viewport, view.rect) || !matchesProjection(view, value.projection || value.viewport)) { clear('viewport-unavailable'); return; }
-        current = value; currentCanvas = view.canvas; reason = ''; geometry = null;
+        current = value; currentCanvas = view.canvas; reason = ''; geometry = null; notifySubscribers();
       } catch (_) { clear('viewport-unavailable'); }
     }
     function handshake(event) {
@@ -1560,7 +1572,17 @@ return {create};
         let node = markerNodes.get(id);
         if (!node) {
           const epoch = scopeEpoch;
-          node = button('Ruta', event => { if (!node.disabled && trusted(event) && current() && epoch === scopeEpoch) openRoute(id); });
+          node = button('Ruta', event => {
+            if (node.disabled || !trusted(event) || !current() || epoch !== scopeEpoch) return;
+            // A rendered button is not a camera lease. Recheck both endpoints
+            // at activation, including expiry between animation callbacks.
+            const route = routes().find(item => item.id === id), rows = systems(), rect = stage()?.getBoundingClientRect?.();
+            if (!route || !rect || !pointValid(projected(rows.find(row => row.id === route.originId), rect))
+              || !pointValid(projected(rows.find(row => row.id === route.destinationId), rect))) {
+              node.disabled = true; mapCache = null; drawOverlay(); return;
+            }
+            openRoute(id);
+          });
           node.dataset.routeMarker = id;
           Object.assign(node.style, { position: 'fixed', pointerEvents: 'auto', transform: 'translate(-50%,-50%)', minHeight: '32px', padding: '4px 8px', border: '1px solid #79d7dd', borderRadius: '8px', background: '#101d29', color: '#e5eef6', font: '12px system-ui,sans-serif', cursor: 'pointer' });
           markers.append(node); markerNodes.set(id, node);
@@ -5694,7 +5716,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.22';
+  const SCRIPT_VERSION = '1.17.23';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -7358,6 +7380,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.23', title: 'Escena nativa offline y marcadores con cámara vigente', changes: [
+        'La cámara caducada o revocada actualiza de inmediato el estado de los marcadores; cada clic comprueba de nuevo sus dos extremos.',
+        'La batería usa la rejilla GPU, cámara, controlador y ticker nativos en un mundo sintético, con el Helper aislado y MessagePort real.',
+        'Ambos órdenes, mensajes demorados y reordenados, píxeles por frame, negativos y recuperación son obligatorios; la sesión real sigue sin confirmar.',
+      ] },
       { version: '1.17.22', title: 'Flechas independientes del orden de render y del transporte', changes: [
         'La cámara observada actualiza solo la decoración antes de pintar, también con renderer posterior al overlay y MessagePort demorado.',
         'Las interacciones y los marcadores siguen bloqueados hasta recibir la proyección autoritativa; no se reutilizan cámaras inválidas.',

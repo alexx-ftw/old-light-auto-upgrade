@@ -339,6 +339,7 @@
     const eventName = 'oldlight-reinforcement-map-bootstrap', pendingAttribute = 'data-oldlight-map-pending';
     const projectionEvent = eventName + '-projection', projectionAttribute = pendingAttribute + '-projection';
     const projectionListeners = new Set();
+    let notifyingProjection = false;
     let decoration = null, decorationCanvas = null, decorationScope = '', decorationRevision = 0;
     let stopped = false, failed = false, installed = false, reason = 'awaiting-native-camera', current = null, currentCanvas = null, geometry = null;
     let container = null, port = null, ackTimer = null, watcher = null, lastRevision = 0, boundScope = '';
@@ -347,6 +348,12 @@
     // Synchronous detached-target delivery is presentation-only. A new native
     // camera observation reaches SVG before paint regardless of rAF registration
     // or MessagePort latency. It never settles projectSystem or hitTestSystem.
+    function notifySubscribers() {
+      if (notifyingProjection || stopped || failed) return;
+      notifyingProjection = true;
+      try { for (const callback of projectionListeners) { try { callback(); } catch (_) {} } }
+      finally { notifyingProjection = false; }
+    }
     function notifyProjection() {
       if (stopped || failed) return;
       const value = validateSnapshot(container?.getAttribute(projectionAttribute));
@@ -360,7 +367,7 @@
           decorationRevision = value.revision; decoration = value; decorationCanvas = view.canvas;
         }
       } catch (_) { /* Invalid observations revoke presentation. */ }
-      for (const callback of projectionListeners) { try { callback(); } catch (_) {} }
+      notifySubscribers();
     }
     function decorative({ canvas, rect, scope } = {}) {
       const value = decoration;
@@ -386,7 +393,12 @@
       if (ackTimer !== null) { realm.clearTimeout(ackTimer); ackTimer = null; }
       container?.removeEventListener(eventName, handshake); container?.remove();
     }
-    function clear(why) { current = null; currentCanvas = null; reason = why; geometry = null; }
+    function clear(why) {
+      const lostAuthority = !!current; current = null; currentCanvas = null; reason = why; geometry = null;
+      // Expiry/reordered delivery can revoke authority between overlay frames.
+      // Reflect that loss immediately; never extend the accepted snapshot TTL.
+      if (lostAuthority) notifySubscribers();
+    }
     function fail(why) { failed = true; installed = false; cleanupBootstrap(); try { port?.postMessage('stop'); } catch (_) {} port?.close(); port = null; clear(why); }
     function receive(event) {
       if (stopped || failed) return;
@@ -409,7 +421,7 @@
       try {
         const view = viewport(document);
         if (!view || !equalRect(value.viewport, view.rect) || !matchesProjection(view, value.projection || value.viewport)) { clear('viewport-unavailable'); return; }
-        current = value; currentCanvas = view.canvas; reason = ''; geometry = null;
+        current = value; currentCanvas = view.canvas; reason = ''; geometry = null; notifySubscribers();
       } catch (_) { clear('viewport-unavailable'); }
     }
     function handshake(event) {

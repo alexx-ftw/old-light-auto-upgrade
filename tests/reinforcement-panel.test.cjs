@@ -916,3 +916,16 @@ test('local visual diagnostics tolerate clock reversal and never export raw came
   assert.ok(!text.includes('PRIVATE_')); assert.ok(Object.values(report.intervals).flat().every(Number.isSafeInteger));
   h.app.destroy();
 });
+
+test('route marker rechecks live camera authority at activation before opening while decoration remains valid', () => {
+  let available = true, opened = 0, sent = 0;
+  const point = system => ({ x: 150 + system.q * 20, y: 150 + system.r * 20, visible: true });
+  const h = harness({ projectSystem: system => available ? point(system) : null, projectDecorationSystem: point, onOpen: () => opened++, onSendNow: () => sent++ }); create(h);
+  const marker = all(h.document).find(node => node.dataset.routeMarker === h.routes[0].id);
+  assert.ok(marker && !marker.disabled); const before = opened;
+  available = false; marker.dispatch('click');
+  assert.equal(opened, before, 'Expired camera cannot activate a previously painted marker'); assert.equal(sent, 0);
+  assert.equal(marker.disabled, true); available = true; h.app.render(); marker.dispatch('click');
+  assert.equal(opened, before + 1, 'Fresh authority restores legitimate route activation'); assert.equal(sent, 0);
+  h.app.destroy();
+});

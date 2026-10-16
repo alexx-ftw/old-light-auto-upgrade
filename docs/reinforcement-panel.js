@@ -346,7 +346,17 @@
         let node = markerNodes.get(id);
         if (!node) {
           const epoch = scopeEpoch;
-          node = button('Ruta', event => { if (!node.disabled && trusted(event) && current() && epoch === scopeEpoch) openRoute(id); });
+          node = button('Ruta', event => {
+            if (node.disabled || !trusted(event) || !current() || epoch !== scopeEpoch) return;
+            // A rendered button is not a camera lease. Recheck both endpoints
+            // at activation, including expiry between animation callbacks.
+            const route = routes().find(item => item.id === id), rows = systems(), rect = stage()?.getBoundingClientRect?.();
+            if (!route || !rect || !pointValid(projected(rows.find(row => row.id === route.originId), rect))
+              || !pointValid(projected(rows.find(row => row.id === route.destinationId), rect))) {
+              node.disabled = true; mapCache = null; drawOverlay(); return;
+            }
+            openRoute(id);
+          });
           node.dataset.routeMarker = id;
           Object.assign(node.style, { position: 'fixed', pointerEvents: 'auto', transform: 'translate(-50%,-50%)', minHeight: '32px', padding: '4px 8px', border: '1px solid #79d7dd', borderRadius: '8px', background: '#101d29', color: '#e5eef6', font: '12px system-ui,sans-serif', cursor: 'pointer' });
           markers.append(node); markerNodes.set(id, node);

@@ -569,10 +569,10 @@ test('synchronous decoration follows pending camera without granting authoritati
   assert.equal(h.map.hitTestSystem({ x: 519, y: 385 }, [system]), null);
   h.deliver(sample()); assert.ok(h.map.projectSystem(system, args));
   const next = sample(2); next.camera.x = 200; h.pending(next);
-  assert.equal(notifications, 2); assert.ok(h.map.projectDecorationSystem(system, args).x < 519);
+  assert.equal(notifications, 3); assert.ok(h.map.projectDecorationSystem(system, args).x < 519);
   assert.equal(h.map.projectSystem(system, args), null); assert.equal(h.map.status().available, false);
   h.pending(null); assert.equal(h.map.projectDecorationSystem(system, args), null);
-  remove(); h.pending(sample(3)); assert.equal(notifications, 3);
+  remove(); h.pending(sample(3)); assert.equal(notifications, 4);
   h.map.stop(); assert.equal(h.map.projectDecorationSystem(system, args), null); assert.equal(h.nodes[0].listeners.size, 0);
 });
 
@@ -589,4 +589,17 @@ test('decorative observations reject malformed stale reordered geometry and revo
   const h = bridgeHarness(); h.pending(sample()); assert.ok(h.map.projectDecorationSystem(system, { scope }));
   assert.equal(h.map.projectDecorationSystem(system, { scope: 'alpha/new-account' }), null);
   assert.equal(h.map.projectDecorationSystem(system, { scope }), null); h.map.stop();
+});
+
+test('camera authority expiry and delayed transport revocation notify presentation immediately without extending freshness', () => {
+  const h = bridgeHarness(), system = { q: 0, r: 0 };
+  h.send(sample()); assert.ok(h.map.projectSystem(system, { scope }));
+  let notifications = 0, available = true;
+  h.map.subscribeProjection(() => { notifications++; available = !!h.map.projectSystem(system, { scope }); });
+  h.advance(1501); assert.equal(h.map.status().available, false);
+  assert.equal(notifications, 1, 'Expiry must revoke visible marker state synchronously'); assert.equal(available, false);
+  h.send(sample(2, { observedAt: NOW + 1501 })); assert.equal(available, true, 'Fresh accepted transport must notify recovery');
+  const before = notifications; h.deliver(sample(1));
+  assert.equal(notifications, before + 1, 'Late reordered transport must notify authoritative loss'); assert.equal(available, false);
+  h.map.stop();
 });

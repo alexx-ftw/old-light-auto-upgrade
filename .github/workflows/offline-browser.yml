@@ -16,6 +16,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - name: Provision hash-pinned public native scene modules (read only)
+        run: NODE_USE_ENV_PROXY=1 node tools/native-scene-assets.cjs
       - name: Run complete committed release gate including real Chromium overlay frames
         run: node validate-release.cjs --report "$RUNNER_TEMP/release-validation.json"
       - name: Preserve browser screenshots, frame measurements and gate report
@@ -26,5 +28,7 @@ jobs:
           path: |
             /tmp/oldlight-overlay-browser-*/*.png
             /tmp/oldlight-overlay-browser-*/frames.json
+            /tmp/oldlight-native-browser-*/*.png
+            /tmp/oldlight-native-browser-*/frames.json
             ${{ runner.temp }}/release-validation.json
           if-no-files-found: warn
