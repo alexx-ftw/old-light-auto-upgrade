@@ -165,7 +165,7 @@ function setup(options = {}) {
     const time = clock.realm(), window = eventTarget(), stored = new Map();
     const document = Object.assign(eventTarget(), { hidden: false, activeElement: null, createElement: node, createTextNode: value => ({ textContent: value }) });
     const gameRef = {};
-    const tab = { window, time, stored, gameRef, popup: null, runtime: null };
+    const tab = { window, document, time, stored, gameRef, popup: null, runtime: null };
     gameRef.postMessage = (data, origin) => {
       assert.equal(origin, GAME);
       publicMessages.push({ direction: 'popup-to-game', data: clone(data) });
@@ -694,4 +694,67 @@ test('explicit helper disconnect gives its open private management window an act
   assert.equal(popup.nodes.get('session-status').textContent, message);
   assertNoToken(env.statuses);
   tab.api.destroy();
+});
+
+
+test('returning to a dormant tab restores a newly confirmed shared authorization without another OAuth', async () => {
+  const env = setup(), first = env.loadGame(), second = env.loadGame();
+  await env.authorize(second); await settle();
+  assert.equal(first.api.testing.session(), null);
+  const saved = clone(env.gm.get(AUTH_KEY));
+  first.window.emit('focus'); await settle();
+  assert.equal(first.api.testing.session()?.authId, saved.id);
+  assert.equal(first.api.getStatus().code, 'connected');
+  assert.deepEqual(env.gm.get(AUTH_KEY), saved, 'Restoration never extends the absolute expiry');
+  assert.deepEqual(env.counts(), { opened: 1, closed: 1, oauthRequests: 1 });
+  const count = env.requests.length;
+  first.window.emit('focus'); first.document.emit('visibilitychange'); await settle();
+  assert.equal(env.requests.length, count, 'Repeated focus cannot restart an active session');
+  assertNoToken(env.statuses);
+});
+
+test('visibility recovery waits until visible and rejects expired or other-client shared authorization', async () => {
+  const env = setup(), tab = env.loadGame();
+  env.gm.set(AUTH_KEY, record(env.clock.now()));
+  tab.document.hidden = true; tab.document.emit('visibilitychange'); await settle();
+  assert.equal(tab.api.testing.session(), null); assert.equal(env.requests.length, 0);
+  tab.document.hidden = false; tab.document.emit('visibilitychange'); await settle();
+  assert.equal(tab.api.getStatus().code, 'connected');
+  tab.api.testing.closeSession(); await settle();
+  env.gm.set(AUTH_KEY, record(env.clock.now(), { clientId: OTHER_CLIENT }));
+  tab.window.emit('focus'); await settle();
+  assert.equal(tab.api.testing.session(), null);
+  const count = env.requests.length;
+  env.gm.set(AUTH_KEY, record(env.clock.now(), { expiresAt: env.clock.now() - 1 }));
+  tab.window.emit('focus'); await settle();
+  assert.equal(tab.api.testing.session(), null); assert.equal(env.requests.length, count);
+  assert.deepEqual(env.counts(), { opened: 0, closed: 0, oauthRequests: 0 });
+});
+
+test('focus cannot undo explicit disconnect or restart the same stopped authorization', async () => {
+  const { env, tab } = await connected();
+  const saved = clone(env.gm.get(AUTH_KEY));
+  tab.api.testing.closeSession(); await settle();
+  const count = env.requests.length;
+  tab.window.emit('focus'); await settle();
+  assert.equal(tab.api.testing.session(), null); assert.equal(env.requests.length, count);
+  env.gm.set(AUTH_KEY, saved); // A stale manager view of the very same credential is not a new login.
+  tab.window.emit('focus'); await settle();
+  assert.equal(tab.api.testing.session(), null); assert.equal(env.requests.length, count);
+  env.gm.set(AUTH_KEY, record(env.clock.now(), { id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' }));
+  tab.window.emit('focus'); await settle();
+  assert.equal(tab.api.getStatus().code, 'connected', 'A genuinely new confirmed login remains recoverable');
+});
+
+test('destroyed or storage-blocked dormant tabs never restore on focus', async () => {
+  const env = setup(), tab = env.loadGame();
+  env.failRead(true); tab.window.emit('focus'); await settle();
+  assert.equal(tab.api.getStatus().code, 'auth_storage_error');
+  env.failRead(false); env.gm.set(AUTH_KEY, record(env.clock.now()));
+  tab.window.emit('focus'); await settle();
+  assert.equal(tab.api.testing.session(), null); assert.equal(env.requests.length, 0);
+  const other = env.loadGame(); await settle(); other.api.destroy();
+  const count = env.requests.length;
+  other.window.emit('focus'); other.document.emit('visibilitychange'); await settle();
+  assert.equal(other.api.testing.session(), null); assert.equal(env.requests.length, count);
 });

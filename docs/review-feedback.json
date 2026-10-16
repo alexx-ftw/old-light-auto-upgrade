@@ -3259,6 +3259,80 @@
         "On authoritative delivery of lost ownership hide/update the arrow; genuine camera changes must not be masked.",
         "Do not infer emitter/session/version or absence of bugs from aggregated telemetry."
       ]
+    },
+    {
+      "id": "drive-dormant-tab-restoration",
+      "feedback": "Una pestaña sin sesión no descubre la autorización confirmada posteriormente en otra pestaña hasta recargar. Informe real de reconexión repetida aún sin causa confirmada.",
+      "beforeFail": {
+        "revision": "70cc18708d9f372068631eb46c46afee2358573e",
+        "command": "node --test /tmp/oldlight-drive-11714-before/tests/drive-local-authorization.test.cjs",
+        "observedFailure": "Mismo harness final sobre archivo base:49 casos,45 correctos y4 fallidos. Foco y visibilidad dejan la pestaña desconectada; nueva autorización tampoco restaura; el fallo de lectura al foco no se diagnostica.",
+        "evidence": "docs/1.17.14-drive-recovery-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/drive-local-authorization.test.cjs",
+          "name": "returning to a dormant tab restores a newly confirmed shared authorization without another OAuth"
+        },
+        {
+          "file": "tests/drive-local-authorization.test.cjs",
+          "name": "visibility recovery waits until visible and rejects expired or other-client shared authorization"
+        },
+        {
+          "file": "tests/drive-local-authorization.test.cjs",
+          "name": "focus cannot undo explicit disconnect or restart the same stopped authorization"
+        },
+        {
+          "file": "tests/drive-local-authorization.test.cjs",
+          "name": "destroyed or storage-blocked dormant tabs never restore on focus"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Dormant tab returns after a new confirmed same-client login in another tab",
+          "expected": "Restore via existing runtime without OAuth or expiry extension.",
+          "regression": {
+            "file": "tests/drive-local-authorization.test.cjs",
+            "name": "returning to a dormant tab restores a newly confirmed shared authorization without another OAuth"
+          }
+        },
+        {
+          "scenario": "Hidden, expired or different OAuth client",
+          "expected": "No access while hidden and no consumption of invalid authorization.",
+          "regression": {
+            "file": "tests/drive-local-authorization.test.cjs",
+            "name": "visibility recovery waits until visible and rejects expired or other-client shared authorization"
+          }
+        },
+        {
+          "scenario": "Explicit disconnect followed by stale same ID, then genuinely new ID",
+          "expected": "Never revive stopped ID; permit new confirmed authorization.",
+          "regression": {
+            "file": "tests/drive-local-authorization.test.cjs",
+            "name": "focus cannot undo explicit disconnect or restart the same stopped authorization"
+          }
+        },
+        {
+          "scenario": "Storage blocked or instance destroyed",
+          "expected": "No restoration or requests.",
+          "regression": {
+            "file": "tests/drive-local-authorization.test.cjs",
+            "name": "destroyed or storage-blocked dormant tabs never restore on focus"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Actual repeated authorization report and real browser multitab lifecycle",
+          "reason": "No issuance/expiry trace or actual browser storage/event evidence; offline multitab reproduction does not establish cause of screenshot."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Follow focus and visibility production listeners and teardown, using actual createDriveBackup/runtime rather than implementing recovery in a mock.",
+        "Reject same stopped ID, blocked storage, mismatched Client ID and expired authorization; do not extend expiry or initiate OAuth.",
+        "Verify a fresh confirmed ID remains usable after a prior disconnect and repeated events cannot restart an active runtime.",
+        "Keep provider-required user authorization at expiration explicit; no new scopes, credentials or silent refresh."
+      ]
     }
   ]
 }

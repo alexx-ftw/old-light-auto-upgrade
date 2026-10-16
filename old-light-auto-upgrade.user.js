@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.13
+// @version      1.17.14
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -5551,7 +5551,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.13';
+  const SCRIPT_VERSION = '1.17.14';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -7140,6 +7140,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.14', title: 'Recuperar Drive al volver a la pestaña', changes: [
+        'Al volver a una pestaña desconectada, recupera una autorización nueva ya confirmada en otra pestaña del mismo Client ID.',
+        'Conserva la caducidad absoluta y las comprobaciones de cuenta; no inicia OAuth ni reactiva la misma autorización detenida.',
+        'Recordar la cuenta no prolonga la autorización temporal: Google requiere un clic para renovarla cuando caduca.',
+      ] },
       { version: '1.17.13', title: 'Refuerzos propios y aliados pendientes', changes: [
         'Un aliado sin ID ya no provoca revisión repetida en rutas Send a destino propio verificado; las revisiones existentes conservan pausa y plazo.',
         'Se mantienen el bloqueo de destinos protegidos, ataques y envíos ajenos, los datos recientes y la revalidación de propietario y sesión.',
@@ -17829,6 +17834,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     let authorizationTimer = null;
     let authorizationBlocked = false;
     let authorizationEpoch = 0;
+    let lastLocalAuthorizationId = '';
     let pendingBackup = null; // Transport-local state only; never part of exported preferences.
 
     function validAuthorization(value, matchClient = true) {
@@ -17845,6 +17851,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       try {
         const stored = gmGetValue(AUTH_KEY, null);
         if (expectedId && stored?.id !== expectedId) return true; // A newer login in another tab wins.
+        if (stored?.id) lastLocalAuthorizationId = stored.id;
         clearTimeout(authorizationTimer); authorizationTimer = null;
         epoch = ++authorizationEpoch;
         authorizationBlocked = true; // Stop access before awaiting the manager acknowledgement.
@@ -17912,6 +17919,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       if (destroyed || !localRuntimeFactory) return false;
       const auth = readAuthorization();
       if (!auth) return false;
+      lastLocalAuthorizationId = auth.id;
       closeSession('disconnected', { preserveAuthorization: true });
       const current = { local: true, authId: auth.id, expiresAt: auth.expiresAt, ready: false, serving: false,
         openedAt: Date.now(), lastSeen: Date.now(), port: null, runtime: null };
@@ -17929,6 +17937,14 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         closeSession('failed', { preserveAuthorization: true });
         return false;
       }
+    }
+
+    // A dormant tab has no session watcher. Returning to it may discover a
+    // newly confirmed login from another tab; this never initiates Google OAuth.
+    function restoreOnReturn() {
+      if (destroyed || session || !localRuntimeFactory || authorizationBlocked || document.hidden === true) return;
+      const auth = readAuthorization();
+      if (auth && auth.id !== lastLocalAuthorizationId) startLocalSession();
     }
 
     function validateAccountHint(value) {
@@ -18504,12 +18520,16 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       clearTimeout(authorizationTimer); authorizationTimer = null;
       destroyed = true;
       window.removeEventListener('message', onWindowMessage);
+      window.removeEventListener('focus', restoreOnReturn);
+      document.removeEventListener?.('visibilitychange', restoreOnReturn);
       mountNode?.remove();
       inputs = null;
       mountNode = null;
     }
 
     window.addEventListener('message', onWindowMessage);
+    window.addEventListener('focus', restoreOnReturn);
+    document.addEventListener?.('visibilitychange', restoreOnReturn);
     // A saved route is not evidence of authorization. Wait for the live companion.
     if (!startLocalSession() && session) waitForResume(session);
     function getStatus() { return { code: statusCode, message: LABELS[statusCode], autoSync: config.autoSync !== false }; }
