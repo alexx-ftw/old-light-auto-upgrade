@@ -13,7 +13,14 @@ test('ship credit protection has its own responsive row without overlapping flee
  const f=fixture(),html='<!doctype html><title>Offline fleet credit layout</title><link rel=icon href=data:,><body style="margin:0;background:#071421"><div id=fixture></div>';
  const b=await browser.open(url=>url.href==='https://oldlight.io/offline-layout'?{type:'text/html',body:html}:null);
  try{
- await b.command('Page.navigate',{url:'https://oldlight.io/offline-layout'});await b.evaluate(`globalThis.layoutRoot=document.querySelector('#fixture').attachShadow({mode:'open'});layoutRoot.innerHTML=${JSON.stringify('<style>'+f.css+'</style><div class=helper-shell><div class=fleet-choices></div></div>')}`);await b.evaluate(f.js);
+ await b.command('Page.navigate',{url:'https://oldlight.io/offline-layout'});
+ let ready=false;
+ for(let i=0;i<200&&!ready;i++){
+  ready=await b.evaluate("location.href==='https://oldlight.io/offline-layout'&&document.title==='Offline fleet credit layout'&&Boolean(document.getElementById('fixture'))").catch(()=>false);
+  if(!ready)await new Promise(resolve=>setTimeout(resolve,10));
+ }
+ assert.equal(ready,true,'offline fixture document is loaded before mounting');
+ await b.evaluate(`globalThis.layoutRoot=document.querySelector('#fixture').attachShadow({mode:'open'});layoutRoot.innerHTML=${JSON.stringify('<style>'+f.css+'</style><div class=helper-shell><div class=fleet-choices></div></div>')}`);await b.evaluate(f.js);
  const failures=[];
  for(const width of [320,375,665,1000]){
   await b.command('Emulation.setDeviceMetricsOverride',{width:width+24,height:1000,deviceScaleFactor:1,mobile:false});
