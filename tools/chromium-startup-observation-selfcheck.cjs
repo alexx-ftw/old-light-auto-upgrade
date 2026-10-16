@@ -41,7 +41,7 @@ const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),asse
 
 {
  const {summarize}=require('./chromium-gate-summary.cjs');
- const d={scope:'diagnostic-observation-only',releaseValidation:false,status:'failed',input:{commit:'a'.repeat(40)},stages:{tests:{fileCount:113,failureEvents:[{data:{name:'public case',details:{error:{message:'Native Chromium startup timeout; secret=synthetic-private-marker'}}}},{data:{name:'synthetic-private-name',details:{error:{message:'synthetic-private-error',code:'ERR_ASSERTION'}}}}]}}};
+ const d={scope:'diagnostic-observation-only',releaseValidation:false,status:'failed',input:{commit:'a'.repeat(40)},stages:{tests:{fileCount:113,counts:{tests:1,passed:0,failed:1,syntheticPrivate:'synthetic-private-marker'},failureEvents:[{data:{name:'public case',details:{error:{message:'Native Chromium startup timeout; secret=synthetic-private-marker'}}}},{data:{name:'synthetic-private-name',details:{error:{message:'synthetic-private-error',code:'ERR_ASSERTION'}}}}]}}};
  const result=summarize(d,new Set(['public case']));
  assert.deepEqual(result.failures,[{name:'public case',kind:'browser-startup-timeout'},{name:'unlisted-test-name',kind:'assertion'}]);
  assert.equal(JSON.stringify(result).includes('synthetic-private'),false);

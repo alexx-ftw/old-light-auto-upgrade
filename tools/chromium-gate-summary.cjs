@@ -2,7 +2,9 @@
 const fs = require('node:fs');
 function summarize(d, knownNames) {
   if (d.scope !== 'diagnostic-observation-only' || d.releaseValidation !== false) throw Error('Diagnostic scope mismatch');
+  if (!['passed', 'failed'].includes(d.status) || !/^[0-9a-f]{40}$/.test(d.input?.commit || '')) throw Error('Diagnostic metadata mismatch');
   const t = d.stages.tests, progress = t.progress || {};
+  const counts = t.counts ? Object.fromEntries(['tests','passed','failed','cancelled','skipped','todo','topLevel','suites'].filter(key => Number.isSafeInteger(t.counts[key]) && t.counts[key] >= 0).map(key => [key,t.counts[key]])) : null;
   const failures = (t.failureEvents || []).slice(0, 8).map(event => {
     const data = event.data || {}, error = data.details?.error || {};
     const message = typeof error.message === 'string' ? error.message : '';
@@ -13,7 +15,7 @@ function summarize(d, knownNames) {
     return { name: knownNames.has(data.name) ? data.name.slice(0, 240) : 'unlisted-test-name', kind };
   });
   return { releaseValidation: false, status: d.status, commit: d.input.commit, files: t.fileCount,
-    counts: t.counts || null, elapsedMs: progress.elapsedMs || t.durationMs || null,
+    counts, elapsedMs: progress.elapsedMs || t.durationMs || null,
     completedFiles: progress.completedFiles?.length, remainingFiles: progress.remainingFiles?.length, failures };
 }
 module.exports = { summarize };
