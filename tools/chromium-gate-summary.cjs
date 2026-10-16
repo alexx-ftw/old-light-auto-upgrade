@@ -23,7 +23,8 @@ if (require.main === module) {
   const d = JSON.parse(fs.readFileSync(process.argv[2]));
   if (d.input?.commit !== process.env.GITHUB_SHA) throw Error('Diagnostic identity mismatch');
   const knownNames = new Set();
-  for (const file of d.stages.tests.files || []) {
+  for (const entry of d.stages.tests.files || []) {
+    const file = typeof entry === 'string' ? entry : entry?.path;
     if (!/^tests\/[a-z0-9/-]+\.test\.cjs$/.test(file)) throw Error('Unexpected diagnostic source path');
     for (const match of fs.readFileSync(file, 'utf8').matchAll(/\btest\s*\(\s*(['"])(.*?)\1/g)) knownNames.add(match[2]);
   }

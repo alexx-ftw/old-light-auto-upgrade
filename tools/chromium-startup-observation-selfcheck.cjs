@@ -47,5 +47,11 @@ const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),asse
  assert.equal(JSON.stringify(result).includes('synthetic-private'),false);
  assert.throws(()=>summarize({...d,releaseValidation:true},new Set()));
  assert.throws(()=>summarize({...d,scope:'offline-validation-only'},new Set()));
- console.log('PASS: diagnostic failure summary excludes arbitrary names messages and release approval.');
+ const folder=fs.mkdtempSync(path.join(os.tmpdir(),'oldlight-diagnostic-summary-'));
+ try{for(const files of [['tests/metrics-integration.test.cjs'],[{path:'tests/metrics-integration.test.cjs',counts:{passed:16}}]]){
+  const fixture=path.join(folder,'report.json');fs.writeFileSync(fixture,JSON.stringify({...d,stages:{tests:{...d.stages.tests,files}}}));
+  const child=require('node:child_process').spawnSync(process.execPath,[path.join(__dirname,'chromium-gate-summary.cjs'),fixture],{cwd:path.resolve(__dirname,'..'),env:{...process.env,GITHUB_SHA:d.input.commit},encoding:'utf8'});
+  assert.equal(child.status,0,child.stderr);assert.equal(child.stdout.includes('synthetic-private'),false);
+ }}finally{fs.rmSync(folder,{recursive:true,force:true});}
+ console.log('PASS: diagnostic failure summary excludes private payloads and CLI accepts passed-object or failed-string file inventories.');
 }
