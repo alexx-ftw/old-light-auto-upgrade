@@ -1,63 +1,60 @@
-name: Chromium startup order diagnostic
+name: Chromium gate preparation observation diagnostic
 on:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/chromium-startup-order.yml
-      - tests/helpers/browser-process.cjs
-      - tests/helpers/native-browser.cjs
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   diagnostic:
-    name: First real browser - ${{ matrix.first }}
     runs-on: ubuntu-latest
-    timeout-minutes: 12
-    strategy:
-      fail-fast: false
-      matrix:
-        first: [conquest, native]
+    timeout-minutes: 15
     env:
       OVERLAY_BROWSER_REQUIRED: '1'
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Provision public native modules without launching browser
-        run: NODE_USE_ENV_PROXY=1 node tools/native-scene-assets.cjs
-      - name: Record launcher identity without browser warmup
+      - name: Verify exact main sources and test inventory
         run: |
-          readlink -f /usr/bin/chromium
-          sha256sum /usr/bin/chromium
+          git diff --exit-code 75b504b7f52c2a34321a3a7d66c43c19f87952e1 HEAD -- tests/ old-light-auto-upgrade.user.js old-light-auto-upgrade.meta.js 'docs/*.js' validate-release.cjs
+          test "$(git ls-files '*.test.cjs' | wc -l)" -eq 113
+          stat -Lc 'LAUNCHER_BYTES=%s' /usr/bin/chromium
+          getconf CLK_TCK
           node --version
-      - name: Run both complete files in the declared order and preserve failures
-        env:
-          FIRST: ${{ matrix.first }}
+      - name: Provision pinned public modules without browser warmup
+        run: NODE_USE_ENV_PROXY=1 node tools/native-scene-assets.cjs
+      - name: Check diagnostic sticky-failure and resource controls
+        run: node tools/chromium-startup-observation-selfcheck.cjs
+      - name: Observe snapshot syntax full suite and builders (diagnostic only)
         run: |
           set +e
-          result=0
-          files=(tests/conquest-panel-browser.test.cjs tests/native-galaxy-overlay.test.cjs)
-          if [ "$FIRST" = native ]; then files=(tests/native-galaxy-overlay.test.cjs tests/conquest-panel-browser.test.cjs); fi
-          ordinal=0
-          for file in "${files[@]}"; do
-            ordinal=$((ordinal + 1))
-            echo "DIAGNOSTIC_FILE ordinal=$ordinal file=$file"
-            node --test --test-concurrency=1 --test-timeout=120000 "$file"
-            status=$?
-            echo "DIAGNOSTIC_RESULT ordinal=$ordinal exit=$status"
-            if [ "$status" -ne 0 ]; then result=1; fi
-          done
-          exit "$result"
-      - name: Preserve diagnostic browser evidence
+          node tools/chromium-gate-observation.cjs --report "$RUNNER_TEMP/observed-gate.json" > "$RUNNER_TEMP/startup-observation-suite.log" 2>&1
+          gate_status=$?
+          node tools/chromium-startup-observation-result.cjs
+          observation_status=$?
+          echo "DIAGNOSTIC_GATE_EXIT=$gate_status"
+          echo "DIAGNOSTIC_OBSERVATION_EXIT=$observation_status"
+          if [ "$gate_status" -ne 0 ] || [ "$observation_status" -ne 0 ]; then exit 1; fi
+      - name: Print bounded numeric gate progress and launcher hash after observation
+        if: always()
+        run: |
+          node - "$RUNNER_TEMP/observed-gate.json" <<'JS'
+          const fs=require('node:fs'),d=JSON.parse(fs.readFileSync(process.argv[2]));
+          if(d.scope!=='diagnostic-observation-only'||d.releaseValidation!==false||d.input?.commit!==process.env.GITHUB_SHA)throw Error('Diagnostic identity mismatch');
+          const t=d.stages.tests,progress=t.progress||{};
+          console.log('DIAGNOSTIC_ONLY_GATE '+JSON.stringify({releaseValidation:false,status:d.status,commit:d.input.commit,files:t.fileCount,counts:t.counts||null,elapsedMs:progress.elapsedMs||t.durationMs||null,completedFiles:progress.completedFiles?.length,remainingFiles:progress.remainingFiles?.length}));
+          JS
+          sha256sum /usr/bin/chromium
+          node tools/chromium-startup-observation-result.cjs
+      - name: Preserve diagnostic evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: chromium-startup-order-${{ matrix.first }}
+          name: chromium-gate-preparation-observation
           path: |
-            /tmp/oldlight-native-browser-*/browser-startup.json
-            /tmp/oldlight-native-browser-*/browser-stderr.log
-            /tmp/oldlight-native-browser-*/frames.json
-            /tmp/oldlight-native-browser-*/*.png
+            /tmp/oldlight-startup-observation/*.json
+            ${{ runner.temp }}/observed-gate.json
+            ${{ runner.temp }}/startup-observation-suite.log
           if-no-files-found: warn
