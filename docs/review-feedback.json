@@ -3838,6 +3838,10 @@
         {
           "scope": "Exact native accounting of queues and actual user flicker cause",
           "reason": "Queue maintenance reserved conservatively; installed version/diagnostic unknown; no overlay fix claimed."
+        },
+        {
+          "scope": "Direct repository rename and new URLs",
+          "reason": "Owner authorized direct rename and declined extra hosting, but GitHub integration returned403. Final release keeps existing URLs; no rename or new resource occurred."
         }
       ],
       "independentReviewCriteria": [

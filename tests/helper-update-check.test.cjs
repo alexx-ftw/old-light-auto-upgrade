@@ -7,7 +7,7 @@ const factory = vm.runInNewContext(block + ';createUpdateChecker', {});
 // Pin the remote fixture independently of the release being built.
 const meta = fs.readFileSync(path.join(__dirname, '../old-light-auto-upgrade.meta.js'), 'utf8')
   .replace(/(@version\s+)\S+/, (_, prefix) => prefix + '1.17.5');
-const META = 'https://raw.githubusercontent.com/alexx-ftw/old-light-helper/main/old-light-auto-upgrade.meta.js';
+const META = 'https://raw.githubusercontent.com/alexx-ftw/old-light-auto-upgrade/main/old-light-auto-upgrade.meta.js';
 const INSTALL = META.replace('.meta.js', '.user.js');
 function harness(extra = {}) {
   const states = [], opened = [], calls = [], store = new Map(); let timer;

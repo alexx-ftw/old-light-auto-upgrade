@@ -4,10 +4,10 @@
 // @version      1.17.19
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
-// @homepageURL  https://github.com/alexx-ftw/old-light-helper
-// @supportURL   https://github.com/alexx-ftw/old-light-helper/issues
-// @updateURL    https://raw.githubusercontent.com/alexx-ftw/old-light-helper/main/old-light-auto-upgrade.meta.js
-// @downloadURL  https://raw.githubusercontent.com/alexx-ftw/old-light-helper/main/old-light-auto-upgrade.user.js
+// @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
+// @supportURL   https://github.com/alexx-ftw/old-light-auto-upgrade/issues
+// @updateURL    https://raw.githubusercontent.com/alexx-ftw/old-light-auto-upgrade/main/old-light-auto-upgrade.meta.js
+// @downloadURL  https://raw.githubusercontent.com/alexx-ftw/old-light-auto-upgrade/main/old-light-auto-upgrade.user.js
 // @run-at       document-start
 // @inject-into  content
 // @grant        GM_xmlhttpRequest
@@ -5526,8 +5526,8 @@ return Object.freeze({ encode });
   // BEGIN PRIVATE UPDATE CHECKER
   // Metadata is data only. The only executable download is opened in the manager.
   function createUpdateChecker(options) {
-    const META_URL = 'https://raw.githubusercontent.com/alexx-ftw/old-light-helper/main/old-light-auto-upgrade.meta.js';
-    const INSTALL_URL = 'https://raw.githubusercontent.com/alexx-ftw/old-light-helper/main/old-light-auto-upgrade.user.js';
+    const META_URL = 'https://raw.githubusercontent.com/alexx-ftw/old-light-auto-upgrade/main/old-light-auto-upgrade.meta.js';
+    const INSTALL_URL = 'https://raw.githubusercontent.com/alexx-ftw/old-light-auto-upgrade/main/old-light-auto-upgrade.user.js';
     const MARKER = 'old-light-helper:update-installer-offered:v1';
     const versionParts = value => typeof value === 'string' && /^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/.test(value)
       ? value.split('.').map(Number) : null;
@@ -7295,10 +7295,10 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
-      { version: '1.17.19', title: 'Protección de créditos y nuevo repositorio', changes: [
+      { version: '1.17.19', title: 'Protección de créditos en producción automática', changes: [
         'Protección por tipo de nave en Flota: detiene producción automática si el balance diario proyectado tras colas y lote queda negativo; sin datos, espera.',
         'Los controles quedan guardados por navegador y en las copias; no cancelan colas existentes ni cambian pedidos manuales.',
-        'Migración directa a old-light-helper: actualiza para abrir Drive en la URL nueva. No se conserva la ruta Pages antigua ni se cambian permisos OAuth.',
+        'Conserva las barreras de selección, censo y confirmación; no cambia los permisos ni la autorización de Drive.',
       ] },
       { version: '1.17.18', title: 'Confirmar el guardado de preferencias de Drive', changes: [
         'Los cambios de preferencias de Drive solo se activan y confirman después de releer los valores guardados.',
@@ -16692,7 +16692,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   const PROTOCOL = 'old-light-drive-v1';
   const GAME_ORIGIN = 'https://oldlight.io';
   const HELPER_ORIGIN = 'https://alexx-ftw.github.io';
-  const HELPER_PATH = '/old-light-helper/drive.html';
+  const HELPER_PATH = '/old-light-auto-upgrade/drive.html';
   const SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
   const APP = 'old-light-auto-upgrade';
   const COPY_FORMAT = 'old-light-auto-upgrade-drive-copy';
@@ -17911,7 +17911,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       && GM_info.scriptHandler === 'Violentmonkey' && GM_info.injectInto === 'content');
     const localRuntimeFactory = isolatedContext && setAuthorization && (options.createRuntime ||
       (typeof createLocalDriveRuntime === 'function' ? createLocalDriveRuntime : null));
-    const HELPER_URL = 'https://alexx-ftw.github.io/old-light-helper/drive.html';
+    const HELPER_URL = 'https://alexx-ftw.github.io/old-light-auto-upgrade/drive.html';
     const HELPER_ORIGIN = 'https://alexx-ftw.github.io';
     const MAX_BYTES = 1024 * 1024;
     const ROUTING_KEY = 'old-light-drive:tab-link:v1';

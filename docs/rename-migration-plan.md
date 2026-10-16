@@ -2,7 +2,11 @@
 
 El propietario rechazó expresamente crear el recurso adicional alexx-ftw.github.io y autorizó usar el nuevo nombre directamente, aceptando que el enlace Pages anterior deje de funcionar. Esta decisión sustituye el plan de compatibilidad anterior. No crear otro repositorio, sitio, DNS, credencial ni configuración OAuth.
 
-## Operación autorizada
+## Estado operativo y operación autorizada
+
+Intento mediante GitHub REST PATCH del repositorio original: HTTP403 Resource not accessible by integration. Relectura confirma nombre old-light-auto-upgrade e identidad sin cambios. No es falta de autorización del propietario ni un rechazo de revisión automática: es una limitación de la integración GitHub actual. No se prueba otra ruta ni se cambia token/acceso para eludirla. La candidata con URLs nuevas quedó preparada offline, pero no se publica contra un nombre inexistente. La versión1.17.19 conserva URLs antiguas y publica únicamente la protección económica; la migración requiere ejecutar el rename con acceso existente del propietario y otro cierre de URLs/versión/revisión/gate.
+
+## Operación autorizada pendiente
 
 Renombrar el mismo repositorio id1413202349, node_id R_kgDOVDvBrQ, de alexx-ftw/old-light-auto-upgrade a alexx-ftw/old-light-helper. Conservar historia, padre de main y permisos; integración normal sin force push. Tras revisión y gate del commit final, renombrar, actualizar origin y publicar. Verificar identidad, commit/árbol/padre remoto y CI del SHA exacto.
 

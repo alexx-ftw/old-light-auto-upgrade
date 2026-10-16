@@ -3,13 +3,13 @@
 Userscript para [Old Light](https://oldlight.io/play) que atiende primero el Resource Depot necesario y su Reactor, después da prioridad a la flota y reserva recursos para los mínimos de naves y muestra una ETA del siguiente pedido. También mejora edificios por prioridad, ajusta Reactor y Resource Depot según necesidad, muestra presets de flota con Shift + clic, permite esperar o producir las naves que falten para una misión, reintenta ataques fallidos con un Marauder más y envía avisos opcionales al navegador o Telegram, incluidos objetivos de nivel por estructura. Versión **1.17.19**, con gestión imperial coordinada y Drive sin ventana permanente, métricas locales opcionales de uso y errores y un changelog integrado. Mantiene la infraestructura necesaria antes que la flota. Retira automáticamente las misiones vinculadas al cancelar su campaña. Reintenta las interrupciones temporales, muestra su motivo concreto y funciona en las vistas estrechas Galaxy y Movements. Permite editar las flotas de misiones y campañas, con borradores guardados automáticamente. La versión cargada aparece en la cabecera del helper, también al minimizarlo.
 
 
-## Protección de créditos y nuevo repositorio (1.17.19)
+## Protección de créditos en producción automática (1.17.19)
 
 En **Flota**, cada tipo tiene «Proteger créditos al producir … automáticamente en este navegador». Está activado por defecto y queda guardado localmente y en las copias exportadas. Antes de cada pedido automático, el Helper calcula ingresos diarios menos mantenimiento actual, reclutamiento pendiente de todos los sistemas y mantenimiento del lote completo. Un saldo disponible alto no sustituye un balance diario sostenible. Si el resultado es negativo, falta un dato o el censo es inválido/caducado, espera y muestra el motivo. No cancela colas ni cambia pedidos manuales. Desactivar un tipo permite continuar su automatización sin esta protección.
 
 Incluye mínimos locales, objetivos imperiales y producción solicitada por misiones/reintentos que pasa por el mismo pedido automático. No anticipa ahorro por desguaces pendientes; reservar su coste de forma conservadora puede detener producción antes de lo necesario si el servidor ya incluye colas en mantenimiento. Los controles son por navegador, no nuevos registros Drive: conserva la compatibilidad con clientes anteriores. [Pruebas y límites](docs/1.17.19-credit-protection-validation.md).
 
-El repositorio pasa directamente a **alexx-ftw/old-light-helper**. Actualiza desde [el instalador nuevo](https://raw.githubusercontent.com/alexx-ftw/old-light-helper/main/old-light-auto-upgrade.user.js) para usar [Drive en su nueva ruta](https://alexx-ftw.github.io/old-light-helper/drive.html). El propietario aceptó que la ruta Pages anterior deje de funcionar; no se crea otro repositorio ni sitio. Se conservan la identidad de instalación (@name/@namespace), claves, formatos, Client ID y origen OAuth. No se ha verificado una autorización real con Google tras migrar. [Migración directa](docs/rename-migration-plan.md).
+El propietario autorizó migración directa a **alexx-ftw/old-light-helper**, sin repositorio adicional y aceptando la ruptura de Pages antigua. GitHub rechazó el rename con403para la integración disponible: **todavía no se ha ejecutado**. Esta versión conserva las URLs actuales para mantener instalación y Drive operativos. El cambio de nombre requiere que el propietario lo ejecute con acceso ya autorizado; no se han solicitado credenciales ni ampliado permisos. [Estado y migración preparada](docs/rename-migration-plan.md).
 
 El nuevo reporte de flechas al mover el mapa no confirma versión ni diagnóstico. Una simulación adicional de120frames a8ms reproduce revocación antes de recibir la nueva cámara y recuperación después; no hay cambio de dibujo ni se afirma resuelto el parpadeo real. [Evidencia temporal](docs/1.17.19-movement-followup.md).
 
@@ -107,7 +107,7 @@ El panel distingue el esquema estático de las flechas del mapa principal. Si pe
 
 En cada carga del juego, el helper consulta únicamente los metadatos de su repositorio oficial, sin cookies. Si hay una versión numérica posterior, abre el instalador de Violentmonkey una sola vez por versión entre pestañas del mismo origen/perfil. Debes revisar y confirmar allí la actualización y después recargar el juego. La cabecera conserva la versión realmente en ejecución. Si cancelas, no vuelve a abrirse automáticamente para esa versión: el botón «Instalar» del pie permite volver a intentarlo.
 
-Se añaden el permiso `GM_openInTab` y acceso a `raw.githubusercontent.com`. El gestor puede pedir que aceptes estos permisos al instalar esta versión; sin aceptarlos, no puede funcionar el nuevo comprobador. Las versiones anteriores no contienen esta función: para empezar, actualiza mediante Violentmonkey o el [instalador oficial](https://raw.githubusercontent.com/alexx-ftw/old-light-helper/main/old-light-auto-upgrade.user.js).
+Se añaden el permiso `GM_openInTab` y acceso a `raw.githubusercontent.com`. El gestor puede pedir que aceptes estos permisos al instalar esta versión; sin aceptarlos, no puede funcionar el nuevo comprobador. Las versiones anteriores no contienen esta función: para empezar, actualiza mediante Violentmonkey o el [instalador oficial](https://raw.githubusercontent.com/alexx-ftw/old-light-auto-upgrade/main/old-light-auto-upgrade.user.js).
 
 La descarga no se ejecuta dentro del helper. Solo se abre la URL fija del instalador; nunca se confirma por ti. Si falla la red, se conserva la versión actual y se reintenta en la próxima recarga. Si faltan Web Locks o el almacenamiento del sitio, no se abre automáticamente. No se han comprobado aún la aceptación de permisos ni la instalación en una sesión real de Violentmonkey. [Validación y límites](docs/1.17.5-update-validation.md).
 
@@ -390,7 +390,7 @@ El informe queda ligado a los hashes probados. La revisión independiente, la ma
 ## Instalación
 
 1. Instala [Tampermonkey](https://www.tampermonkey.net/) o [Violentmonkey](https://violentmonkey.github.io/get-it/).
-2. Abre **[Instalar o actualizar el userscript](https://raw.githubusercontent.com/alexx-ftw/old-light-helper/main/old-light-auto-upgrade.user.js)** y confirma la instalación en el gestor.
+2. Abre **[Instalar o actualizar el userscript](https://raw.githubusercontent.com/alexx-ftw/old-light-auto-upgrade/main/old-light-auto-upgrade.user.js)** y confirma la instalación en el gestor.
 3. Recarga Old Light y selecciona un sistema. En escritorio, abre **Structures** o **Shipyard**; en la vista estrecha también puedes permanecer en **Galaxy** o **Movements**.
 
 Si el enlace muestra texto, utiliza la opción de instalar desde URL de tu gestor con ese mismo enlace.
@@ -658,7 +658,7 @@ Los ajustes del panel y sus borradores numéricos usan almacenamiento local del 
 
 ## Copias en Google Drive
 
-La integración es **opcional** y viene configurada con la aplicación de Google del helper. La autorización se realiza en [la página de copias](https://alexx-ftw.github.io/old-light-helper/drive.html), abierta desde el helper.
+La integración es **opcional** y viene configurada con la aplicación de Google del helper. La autorización se realiza en [la página de copias](https://alexx-ftw.github.io/old-light-auto-upgrade/drive.html), abierta desde el helper.
 
 ### Iniciar sesión
 
@@ -721,4 +721,4 @@ La cancelación de campañas se prueba con las colas y controladores reales: lim
 
 ## Incidencias
 
-[Informar de un problema](https://github.com/alexx-ftw/old-light-helper/issues)
+[Informar de un problema](https://github.com/alexx-ftw/old-light-auto-upgrade/issues)
