@@ -1,6 +1,6 @@
 'use strict';
 // Diagnostic only. Never loaded by validate-release or by the distributed Helper.
-const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),vm=require('node:vm'),crypto=require('node:crypto'),cp=require('node:child_process');
+const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),vm=require('node:vm'),cp=require('node:child_process');
 const helper=path.resolve(__dirname,'../tests/helpers/browser-process.cjs');
 function resources(group){
  let processes=0,cpuTicks=0,rssPages=0,threads=0;
@@ -18,9 +18,9 @@ function createObserver({directory,acceptanceMs=15000,observationMs=45000,source
   let samplingCostMs=0,acceptanceFailed=false,outcome='pending',readyAfterMs=null,firstStderrAfterMs=null,closed=false,handle,acceptanceTimer,samplingTimer;
   const name=path.basename(executable),binary=['chromium','chromium-browser','google-chrome','chrome','node'].includes(name)?name:'other';
   const file=path.basename(process.argv[1]||''),testFile=/^[a-z0-9-]+\.test\.cjs$/.test(file)?file:null;
-  const launcherSha256=crypto.createHash('sha256').update(fs.readFileSync(executable)).digest('hex');
+  const launcherBytes=fs.statSync(executable).size;
   function sample(){if(!handle?.child.pid||samples.length>=64)return;const before=process.hrtime.bigint();samples.push({atMs:elapsed(),...resources(handle.child.pid)});samplingCostMs+=Number(process.hrtime.bigint()-before)/1e6;}
-  function record(phase){let cleanup=null,stderrTail=null;if(phase==='closed'){try{const value=JSON.parse(fs.readFileSync(path.join(artifacts,'browser-startup.json'))).cleanup;cleanup=['closed','incomplete'].includes(value)?value:null;}catch{}try{stderrTail=compiled.exports.sanitize(fs.readFileSync(path.join(artifacts,'browser-stderr.log'),'utf8')).slice(-2000);}catch{}}const record={cleanup,stderrTail,diagnosticOnly:true,id,testFile,ordinal,binary,launcherSha256,acceptanceMs,observationMs,acceptance:acceptanceFailed?'FAIL':outcome==='ready'?'PASS':'PENDING',phase,outcome,readyAfterMs,firstStderrAfterMs,atMs:elapsed(),closed,clkTck,samplingCostMs,samples};fs.writeFileSync(path.join(directory,id+'.json'),JSON.stringify(record)+'\n');process.stderr.write('OLDLIGHT_OBSERVATION '+JSON.stringify(record)+'\n');}
+  function record(phase){let cleanup=null,stderrTail=null;if(phase==='closed'){try{const value=JSON.parse(fs.readFileSync(path.join(artifacts,'browser-startup.json'))).cleanup;cleanup=['closed','incomplete'].includes(value)?value:null;}catch{}try{stderrTail=compiled.exports.sanitize(fs.readFileSync(path.join(artifacts,'browser-stderr.log'),'utf8')).slice(-2000);}catch{}}const record={cleanup,stderrTail,diagnosticOnly:true,id,testFile,ordinal,binary,launcherBytes,acceptanceMs,observationMs,acceptance:acceptanceFailed?'FAIL':outcome==='ready'?'PASS':'PENDING',phase,outcome,readyAfterMs,firstStderrAfterMs,atMs:elapsed(),closed,clkTck,samplingCostMs,samples};fs.writeFileSync(path.join(directory,id+'.json'),JSON.stringify(record)+'\n');process.stderr.write('OLDLIGHT_OBSERVATION '+JSON.stringify(record)+'\n');}
   const compiled={exports:{}},sandbox={process,Buffer,WebSocket,setTimeout:(callback,ms,...rest)=>setTimeout(callback,ms===15000?observationMs:ms,...rest),clearTimeout};
   vm.runInNewContext('(function(require,module,exports){'+source+'\n})',sandbox)(require,compiled,compiled.exports);
   handle=compiled.exports.launch(executable,args,artifacts);

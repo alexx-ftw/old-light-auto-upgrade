@@ -20,7 +20,7 @@ jobs:
         run: |
           git diff --exit-code 1f157cb4ab008ea079a97e1f2f98e5ea5141bb52 HEAD -- tests/ old-light-auto-upgrade.user.js old-light-auto-upgrade.meta.js docs/conquest-core.js docs/conquest-controller.js docs/conquest-panel.js validate-release.cjs
           test "$(git ls-files '*.test.cjs' | wc -l)" -eq 112
-          sha256sum /usr/bin/chromium
+          stat -Lc 'LAUNCHER_BYTES=%s' /usr/bin/chromium
           getconf CLK_TCK
           node --version
       - name: Provision pinned public modules without launching browser
@@ -38,6 +38,9 @@ jobs:
           echo "DIAGNOSTIC_SUITE_EXIT=$suite_status"
           echo "DIAGNOSTIC_OBSERVATION_EXIT=$observation_status"
           if [ "$suite_status" -ne 0 ] || [ "$observation_status" -ne 0 ]; then exit 1; fi
+      - name: Record launcher hash only after the observed suite
+        if: always()
+        run: sha256sum /usr/bin/chromium
       - name: Print bounded diagnostic evidence and explicit non-validation status
         if: always()
         run: |
