@@ -22,7 +22,8 @@ const confirmEnd = source.indexOf('\n    if (!settings.enabled) {', confirmBody)
 const shipStart = source.indexOf('  function shipConfirmed(request, counts) {');
 const shipEnd = source.indexOf('\n  function readShipUnitCost(', shipStart);
 assert.ok(register > 0 && dispatchStart > 0 && dispatchEnd > register && confirmStart > 0 && confirmEnd > confirmBody && shipStart > 0 && shipEnd > shipStart);
-const executable = source.slice(shipStart, shipEnd) + '\nfunction dispatch(candidate) {\n' + source.slice(dispatchStart, dispatchEnd)
+const creditCode = source.slice(source.indexOf('  function projectShipCredits('), source.indexOf('  function prepareShip('));
+const executable = creditCode + '\n' + source.slice(shipStart, shipEnd) + '\nfunction dispatch(candidate) {\n' + source.slice(dispatchStart, dispatchEnd)
   + '\n}\nfunction confirmPending() {\n' + source.slice(confirmStart, confirmEnd) + '\n}';
 const A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const P = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', J = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
@@ -65,7 +66,7 @@ function harness({ empire = true, kind = 'ship' } = {}) {
     read: () => saved, write: (_key, value) => { saved = value; } });
   const wrapped = { ...controller, invalidate(id, token) { invalidations.push({ id, token, clock, pending: ctx.pending, clicks }); controller.invalidate(id, token); } };
   const ctx = { empireController: wrapped, empireAdapter: adapter, document,
-    settings: { enabled: true }, pending: null, now: clock, activeSystem: active, nextClickAt: 0, lastClick: '', error: '', unconfirmed: 0,
+    settings: { enabled: true, creditProtection: { probe: false, marauder: false, sentinel: false, vanguard: false } }, pending: null, now: clock, activeSystem: active, nextClickAt: 0, lastClick: '', error: '', unconfirmed: 0,
     eventSequence: 0, notificationSession: 'fixture', MIN_GAP_MS: 1000, RETRY_GAP_MS: 5000, MAX_UNCONFIRMED: 3, RESPONSE_TIMEOUT_MS: 30000,
     current: kind === 'ship' ? [] : [candidate], ships: kind === 'ship' ? [candidate] : [],
     systemId: () => active, text: node => node?.textContent || '', queueLength: () => hud()?.queue.buildings || 0,
@@ -370,7 +371,7 @@ test('actual mission and navigation entrypoints both reject pending even if an i
   const navStart = source.indexOf('  function canNavigateEmpire() {'), navEnd = source.indexOf('\n  function ', navStart + 1);
   const missionStart = source.indexOf('  function canOperateMission() {'), missionEnd = source.indexOf('\n  function missionQueueContext()', missionStart);
   assert.ok(navStart > 0 && navEnd > navStart && missionStart > 0 && missionEnd > missionStart);
-  const ctx = { leader: true, settings: { enabled: true }, importingBackup: false, pending: null,
+  const ctx = { leader: true, settings: { enabled: true, creditProtection: { probe: false, marauder: false, sentinel: false, vanguard: false } }, importingBackup: false, pending: null,
     document: { hidden: false, querySelector: () => null }, hudBlocked: () => false, hudPanelAvailable: () => true,
     reports: { isRecovering: () => false }, missionAdapter: { isBusy: () => false }, attackRetry: { isBusy: () => false },
     host: null, PANEL: 'structures', FLEET_PANEL: 'shipyard', empireController: { isEnabled: () => true },

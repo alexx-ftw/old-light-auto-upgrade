@@ -40,7 +40,7 @@ const confirmStart = source.lastIndexOf('    if (pending) {', confirmBody);
 assert.ok(confirmStart > 0);
 const confirmCode = section('    if (pending) {', '\n    if (!settings.enabled) {', confirmStart);
 const integrationCode = section('  function empireMissionPermission(', '\n  function observeEmpireStartup(');
-const code = section('  function shipConfirmed(', '\n  function readShipUnitCost(')
+const code = section('  function projectShipCredits(', '  function prepareShip(') + '\n' + section('  function shipConfirmed(', '\n  function readShipUnitCost(')
   + '\n' + integrationCode
   + '\n' + section('  function canOperateMission(', '\n  function missionQueueContext(')
   + '\nfunction dispatchCandidate(candidate) {\n' + dispatchCode + '\n}\n'
@@ -159,7 +159,8 @@ function harness(t, { kind = 'ship', initialize = true, dwellMs = 1000000, maxAg
   button.classList.contains = cls => cls === 'b-loading' ? loading : cls === 'b-upgrade-error' ? failed : false;
   button.click = () => { clicks++; clickCallback?.(); };
   apiContext = { empireController: instrumented, empireAdapter: adapter, document,
-    Date: { now: () => clock }, settings: { enabled: true }, pending: null, now: clock, activeSystem: active,
+    OldLightEmpireBridge: { snapshot: () => delivered },
+    Date: { now: () => clock }, settings: { enabled: true, creditProtection: { probe: false, marauder: false, sentinel: false, vanguard: false } }, pending: null, now: clock, activeSystem: active,
     nextClickAt: 0, lastClick: '', error: '', unconfirmed: 0, eventSequence: 0, notificationSession: 'synthetic-pipeline',
     MIN_GAP_MS: 1000, RETRY_GAP_MS: 5000, MAX_UNCONFIRMED: 3, RESPONSE_TIMEOUT_MS: 30000,
     current: [], ships: [], systemId: () => active, text: node => node?.textContent || '',
@@ -523,4 +524,19 @@ test('pipeline: immediate config edits hide retained allocations until runtime r
     } else assert.ok(withClass(h.container, 'empire-progress').every(node => !node.textContent.includes('Reparto propuesto')));
     assert.equal(h.clicks, 0); assert.equal(h.navigationClicks, 0);
   }
+});
+
+// Real native reducer/validator -> bridge -> shipped final credit guard -> native click.
+test('pipeline: protected credit production blocks unknown and negative projection then permits verified zero balance', t => {
+  const h = harness(t); assertReady(h); h.ctx.settings.creditProtection.probe = true;
+  h.dispatch(); assert.equal(h.clicks, 0); assert.equal(h.ctx.pending, null);
+  assert.ok(h.displays.some(message => message.includes('créditos')));
+  for (const row of h.rows) row.shipyard.types = [{ type: 'probe', unlocked: true, shipyardLevelRequired: 1, stats: { upkeepPerDay: 12 } }];
+  function publish(incomePerDay) {
+    h.advance(); h.publishDelta({ payload: { updated: { players: [{ id: SELF, owned: clone(h.rows), credits: {
+      amount: 19500, settledAt: new Date(h.clock).toISOString(), incomePerDay, upkeepPerDay: 0, inDeficit: false,
+    } }] } } }); assertReady(h);
+  }
+  publish(35); h.dispatch(); assert.equal(h.clicks, 0); assert.equal(h.ctx.pending, null);
+  publish(36); h.dispatch(); assert.equal(h.clicks, 1); assert.equal(h.ctx.pending.quantity, 3);
 });

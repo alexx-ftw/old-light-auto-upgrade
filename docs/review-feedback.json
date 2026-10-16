@@ -3790,6 +3790,10 @@
         {
           "file": "tests/ship-credit-protection.test.cjs",
           "name": "credit choices remain local during shared journal overlay to preserve older client compatibility"
+        },
+        {
+          "file": "tests/empire-order-pipeline.test.cjs",
+          "name": "pipeline: protected credit production blocks unknown and negative projection then permits verified zero balance"
         }
       ],
       "boundaries": [
