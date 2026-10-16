@@ -57,3 +57,7 @@ Con los tests anteriores de599f184:2/2pasan, aunque se ejecutan cero callbacks. 
 ## Cobertura Chromium permanente desde1.17.21
 
 La batería incluye tests/reinforcement-overlay-browser.test.cjs dentro del gate y un job CI que exige navegador. Ejecuta el SVG real en Chromium sobre una escena Canvas2D offline, con arrastre/rueda, inercia, inversión, revisiones de censo y negativos. Conservar hashes de módulo, JSON por frame, capturas y control que desactiva callbacks. Esta referencia NO reemplaza la escena galaxy-map/Pixi ni el transporte de cámara; consultar1.17.21-browser-overlay-validation.md para artefacto faltante y alcance. Nunca trasladar su éxito a «parpadeo real resuelto».
+
+## Orden y transporte obligatorios desde1.17.22
+
+La regresión de10.29px debe ejercitar renderer antes Y después del overlay, con observación y MessagePort productivos, puerto inmediato y demorado, camino project y unproject/bounds. Un orden favorable nunca sustituye el invertido. Comprobar vector completo de extremos, visibilidad frame a frame, callbacks/notificaciones/puertos realmente ejecutados, controles que desactiven cada canal, negativos y recuperación útil. [Matriz y límites](1.17.22-camera-render-order-validation.md). La geometría decorativa síncrona no puede conceder hit-test, marcador activo o autoridad mientras el puerto esté pendiente.

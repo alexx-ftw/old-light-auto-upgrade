@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.21
+// @version      1.17.22
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -1056,10 +1056,50 @@ return {create};
   }
   function create({ realm = globalThis, document = realm.document, addElement, observerSource, now = Date.now, getScope } = {}) {
     const eventName = 'oldlight-reinforcement-map-bootstrap', pendingAttribute = 'data-oldlight-map-pending';
+    const projectionEvent = eventName + '-projection', projectionAttribute = pendingAttribute + '-projection';
+    const projectionListeners = new Set();
+    let decoration = null, decorationCanvas = null, decorationScope = '', decorationRevision = 0;
     let stopped = false, failed = false, installed = false, reason = 'awaiting-native-camera', current = null, currentCanvas = null, geometry = null;
     let container = null, port = null, ackTimer = null, watcher = null, lastRevision = 0, boundScope = '';
     let channel;
     try { channel = 'oldlight_map_' + realm.crypto.randomUUID().replace(/-/g, ''); } catch (_) { failed = true; reason = 'camera-channel-unavailable'; }
+    // Synchronous detached-target delivery is presentation-only. A new native
+    // camera observation reaches SVG before paint regardless of rAF registration
+    // or MessagePort latency. It never settles projectSystem or hitTestSystem.
+    function notifyProjection() {
+      if (stopped || failed) return;
+      const value = validateSnapshot(container?.getAttribute(projectionAttribute));
+      decoration = null; decorationCanvas = null;
+      try {
+        const view = viewport(document);
+        if (value && value.revision > decorationRevision && value.galaxy === galaxyAt(realm)
+          && value.observedAt <= now() && now() - value.observedAt <= LIMITS.staleMs && view
+          && equalRect(value.viewport, view.rect) && matchesProjection(view, value.projection || value.viewport)
+          && container.getAttribute(pendingAttribute) === stamp(value)) {
+          decorationRevision = value.revision; decoration = value; decorationCanvas = view.canvas;
+        }
+      } catch (_) { /* Invalid observations revoke presentation. */ }
+      for (const callback of projectionListeners) { try { callback(); } catch (_) {} }
+    }
+    function decorative({ canvas, rect, scope } = {}) {
+      const value = decoration;
+      if (stopped || failed || !installed || !value) return null;
+      if (scope) {
+        if (scope.split('/')[0] !== value.galaxy || (decorationScope && scope !== decorationScope)) {
+          decorationScope = scope; decoration = null; return null;
+        }
+        decorationScope = scope;
+      }
+      if (value.galaxy !== galaxyAt(realm) || value.observedAt > now() || now() - value.observedAt > LIMITS.staleMs) return null;
+      try {
+        const view = viewport(document);
+        if (!view || view.canvas !== decorationCanvas || (canvas && canvas !== view.canvas)
+          || !equalRect(value.viewport, view.rect) || (rect && !equalRect(rect, view.rect))
+          || !matchesProjection(view, value.projection || value.viewport)
+          || container?.getAttribute(pendingAttribute) !== stamp(value)) return null;
+        return value;
+      } catch (_) { return null; }
+    }
     function cleanupBootstrap() {
       watcher?.disconnect(); watcher = null;
       if (ackTimer !== null) { realm.clearTimeout(ackTimer); ackTimer = null; }
@@ -1098,11 +1138,11 @@ return {create};
     function inject() {
       if (stopped || failed || installed || container) return;
       const parent = document.documentElement || document.head; if (!parent) return;
-      container = document.createElement('div'); container.hidden = true; container.addEventListener(eventName, handshake);
+      container = document.createElement('div'); container.hidden = true; container.addEventListener(eventName, handshake); container.addEventListener(projectionEvent, notifyProjection);
       const source = typeof observerSource === 'string'
         ? observerSource + '\nconst api=globalThis.OldLightReinforcementMap;'
         : 'const api=(' + mapFactory.toString() + ')();';
-      const textContent = `(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected)return;target.remove();${source}\nconst channel=${JSON.stringify(channel)},attribute=${JSON.stringify(pendingAttribute)},stamp=${stamp.toString()};const pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;const cleanup=()=>{try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();};pipe.port1.addEventListener('message',event=>{if(event.data==='stop')cleanup();});try{handle=api.installPageObserver({onPending:value=>{if(value)target.setAttribute(attribute,stamp(value));else {target.removeAttribute(attribute);const status=handle?.status?.(),reason=status?.reason;if(ready&&reason)send(JSON.stringify({version:1,type:'status',reason,geometry:status.geometry}));}},emit:value=>{const data=JSON.stringify(value);if(ready)send(data);else pending=data;}});target.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);handle.ready?.then(()=>{const status=handle?.status?.(),reason=status?.reason;if(reason)send(JSON.stringify({version:1,type:'status',reason,geometry:status.geometry}));});}catch(_){cleanup();}})();`;
+      const textContent = `(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected)return;target.remove();${source}\nconst channel=${JSON.stringify(channel)},attribute=${JSON.stringify(pendingAttribute)},stamp=${stamp.toString()};const pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;const cleanup=()=>{try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();};pipe.port1.addEventListener('message',event=>{if(event.data==='stop')cleanup();});try{handle=api.installPageObserver({onPending:value=>{if(value){target.setAttribute(attribute,stamp(value));target.setAttribute(${JSON.stringify(projectionAttribute)},JSON.stringify(value));target.dispatchEvent(new Event(${JSON.stringify(projectionEvent)}));}else {target.removeAttribute(attribute);target.removeAttribute(${JSON.stringify(projectionAttribute)});target.dispatchEvent(new Event(${JSON.stringify(projectionEvent)}));const status=handle?.status?.(),reason=status?.reason;if(ready&&reason)send(JSON.stringify({version:1,type:'status',reason,geometry:status.geometry}));}},emit:value=>{const data=JSON.stringify(value);if(ready)send(data);else pending=data;}});target.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);handle.ready?.then(()=>{const status=handle?.status?.(),reason=status?.reason;if(reason)send(JSON.stringify({version:1,type:'status',reason,geometry:status.geometry}));});}catch(_){cleanup();}})();`;
       try {
         parent.appendChild(container);
         ackTimer = realm.setTimeout(() => { ackTimer = null; if (!installed && !stopped) fail('camera-injection-unavailable'); }, 2000);
@@ -1136,6 +1176,11 @@ return {create};
       }
     }
     return Object.freeze({
+      projectDecorationSystem(system, options = {}) { const value = decorative(options); return value ? projectPoint(system, value) : null; },
+      subscribeProjection(callback) {
+        if (typeof callback !== 'function' || stopped || failed) return () => {};
+        projectionListeners.add(callback); return () => projectionListeners.delete(callback);
+      },
       projectSystem(system, options = {}) { const value = settled(options); return value ? projectPoint(system, value) : null; },
       hitTestSystem(point, rows) {
         if (!point || !finite(point.x) || !finite(point.y) || !Array.isArray(rows) || rows.length > LIMITS.systems) return null;
@@ -1158,6 +1203,7 @@ return {create};
       status() { const valid = !!settled(); return { installed, observed: !!current, available: valid, reason: valid ? '' : reason || 'camera-observation-pending', geometry: valid ? null : geometry }; },
       stop() {
         if (stopped) return; stopped = true; cleanupBootstrap();
+        container?.removeEventListener(projectionEvent, notifyProjection); projectionListeners.clear(); decoration = null; decorationCanvas = null;
         try { port?.postMessage('stop'); } catch (_) {}
         port?.removeEventListener('message', receive); port?.close(); port = null; installed = false; clear('stopped');
       },
@@ -1394,10 +1440,11 @@ return {create};
       const sample = sampleHover(rows);
       return sample && Math.hypot(sample.point.x - event.clientX, sample.point.y - event.clientY) <= 22 ? sample.system : null;
     }
-    function projected(system, rect) {
+    function projected(system, rect, decorative = false) {
       if (!system) return null;
-      const given = options.projectSystem?.(system, { scope, canvas: stage(), rect });
-      const point = typeof options.projectSystem === 'function' ? given : anchors.get(system.id);
+      const projector = decorative && typeof options.projectDecorationSystem === 'function' ? options.projectDecorationSystem : options.projectSystem;
+      const given = projector?.(system, { scope, canvas: stage(), rect });
+      const point = typeof projector === 'function' ? given : anchors.get(system.id);
       countVisual(pointValid(point) ? 'projectionAvailableChecks' : 'projectionUnavailableChecks');
       return pointValid(point) ? { x: point.x - rect.left, y: point.y - rect.top, visible: point.visible } : null;
     }
@@ -1434,7 +1481,12 @@ return {create};
       if (!gesture && !items.length) { hideSVG(overlay, true, 'no-routes'); if (markers) markers.hidden = true; return; }
       sampleHover(rows);
       const byId = new Map(rows.map(s => [s.id, s]));
-      const segments = items.map(route => ({ route, from: projected(byId.get(route.originId), rect), to: projected(byId.get(route.destinationId), rect) })).filter(s => pointValid(s.from) && pointValid(s.to));
+      const segments = items.map(route => {
+        const from = projected(byId.get(route.originId), rect, true), to = projected(byId.get(route.destinationId), rect, true);
+        const verifiedFrom = projected(byId.get(route.originId), rect), verifiedTo = projected(byId.get(route.destinationId), rect);
+        return { route, from, to, verified: !!(pointValid(verifiedFrom) && pointValid(verifiedTo)
+          && JSON.stringify([from, to]) === JSON.stringify([verifiedFrom, verifiedTo])) };
+      }).filter(s => pointValid(s.from) && pointValid(s.to));
       // A screen-space gesture preview expresses intent, not a verified route.
       // Persisted routes above continue to require a current camera projection.
       if (gesture && gesture.scope === scope) segments.push({ route: { id: 'draft' }, from: { x: gesture.sourceX - rect.left, y: gesture.sourceY - rect.top }, to: { x: gesture.x - rect.left, y: gesture.y - rect.top }, preview: true });
@@ -1516,7 +1568,7 @@ return {create};
         const name = clean(segment.route.name) || `Ruta ${index + 1}`;
         node.setAttribute('aria-label', `Abrir resumen y configuración: ${name}`);
         node.title = `Abrir resumen y configuración: ${name}. No envía naves.`;
-        node.disabled = false;
+        node.disabled = segment.verified === false;
         node.style.left = `${x}px`; node.style.top = `${y}px`;
       }
       for (const [id, node] of markerNodes) if (!keep.has(id)) { node.remove(); markerNodes.delete(id); }
@@ -1826,7 +1878,7 @@ return {create};
       listen(window, 'keyup', event => { if (event.key === 'Control') { cancelGesture(); drawOverlay(); } }, true);
       for (const name of ['wheel', 'resize', 'scroll', 'blur', 'pointercancel', 'pagehide', 'popstate', 'hashchange']) listen(window, name, event => {
         // Scrolling Helper content cannot move the native map. Avoid clearing
-        // a settled arrow until the next 80 ms frame just for that UI event.
+        // a settled arrow until the next frame just for that UI event.
         // Retargeted Shadow DOM events are identified by the owner, not names.
         let helper = helperContains(event.target);
         try { helper ||= options.isHelperEvent?.(event) === true; } catch (_) { /* Unknown events still invalidate. */ }
@@ -1844,6 +1896,11 @@ return {create};
       listen(window, 'pointerleave', event => { if (gesture && event.target === stage()) { cancelGesture(); invalidateMap(); } }, true);
       listen(window, 'pointerout', event => { if (gesture && (event.relatedTarget === null || !inside(event))) { cancelGesture(); invalidateMap(); } }, true);
       listen(document, 'visibilitychange', () => { cancelGesture(); invalidateMap(); });
+      const unsubscribeProjection = options.subscribeProjection?.(() => {
+        if (destroyed) return;
+        countVisual('projectionNotifications'); mapCache = null; drawOverlay();
+      });
+      if (typeof unsubscribeProjection === 'function') listeners.push(unsubscribeProjection);
       const tick = () => {
         if (destroyed) return;
         countVisual('rafCallbacks'); intervalVisual('rafCallbacks');
@@ -5637,7 +5694,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.21';
+  const SCRIPT_VERSION = '1.17.22';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -7301,6 +7358,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.22', title: 'Flechas independientes del orden de render y del transporte', changes: [
+        'La cámara observada actualiza solo la decoración antes de pintar, también con renderer posterior al overlay y MessagePort demorado.',
+        'Las interacciones y los marcadores siguen bloqueados hasta recibir la proyección autoritativa; no se reutilizan cámaras inválidas.',
+        'La batería exige ambos órdenes con Pixi offline, cámara nativa y transporte real; el resultado en la sesión real continúa pendiente.',
+      ] },
       { version: '1.17.21', title: 'Flechas sincronizadas por frame y prueba de navegador', changes: [
         'El overlay redibuja en cada rAF: corrige desfase y ocultaciones reproducidos en Chromium con cámara de referencia fresca durante movimiento y zoom.',
         'La batería permanente mide visibilidad y alineación por frame, conserva capturas y exige Chromium en CI; mantiene controles de datos inválidos.',
@@ -19041,6 +19103,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       getError: () => reinforcementRoutes.state().error,
       getAvailability: () => { const camera = reinforcementMap?.status(); return { coordinated: Boolean(navigator.locks?.request), cameraAvailable: camera?.available === true, cameraReason: camera?.reason || 'camera-unavailable', cameraGeometry: camera?.geometry || null }; },
       projectSystem: (system, options) => reinforcementMap?.projectSystem(system, options) || null,
+      projectDecorationSystem: (system, options) => reinforcementMap?.projectDecorationSystem(system, options) || null,
+      subscribeProjection: callback => reinforcementMap?.subscribeProjection(callback) || (() => {}),
       hitTestSystem: (point, rows) => reinforcementMap?.hitTestSystem(point, rows) || null,
       onInteraction: event => empireAdapter?.observeInteraction(event),
       onOpen: () => {

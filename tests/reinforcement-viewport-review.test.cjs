@@ -72,7 +72,7 @@ function bridge(geo = geometry()) {
   const realm = { document, location: { origin: 'https://oldlight.io', pathname: '/game/galaxy/review' }, crypto: { randomUUID: () => 'independent-review' },
     setTimeout: () => ++serial, clearTimeout() {},
   };
-  page = vm.createContext({ document, MessageChannel, MessageEvent: class { constructor(type, options) { this.type = type; Object.assign(this, options); } } });
+  page = vm.createContext({ document, MessageChannel, Event: class { constructor(type) { this.type = type; } }, MessageEvent: class { constructor(type, options) { this.type = type; Object.assign(this, options); } } });
   const api = M.create({ realm, document, now: () => NOW,
     observerSource: 'globalThis.OldLightReinforcementMap={installPageObserver(options){globalThis.options=options;return{status(){return{reason:""};},stop(){}};}};',
     addElement(container, tag, attrs) { document.currentScript = { parentNode: container }; vm.runInContext(attrs.textContent, page); document.currentScript = null; },

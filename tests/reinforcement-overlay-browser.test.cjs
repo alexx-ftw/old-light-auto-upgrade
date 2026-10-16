@@ -6,7 +6,8 @@ const { spawn } = require('node:child_process');
 const root = path.join(__dirname, '..');
 const candidates = ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome', '/opt/google/chrome/chrome'];
 
-test('browser overlay remains visible and aligned during offline pan inertia zoom reversal and census updates', { timeout: 60000 }, async t => {
+for (const scenario of [{ order: 'before', transport: 0, renderer: 'canvas' }, { order: 'after', transport: 0, renderer: 'canvas' }, { order: 'before', transport: 45, renderer: 'pixi' }, { order: 'after', transport: 45, renderer: 'pixi' }, { order: 'before', transport: 180, renderer: 'pixi', method: 'unproject' }, { order: 'after', transport: 180, renderer: 'pixi', method: 'unproject' }])
+test('browser overlay remains visible and aligned during offline pan inertia zoom reversal and census updates' + (scenario.order === 'before' && scenario.transport === 0 ? '' : ' [' + scenario.order + '/' + scenario.transport + '/' + scenario.renderer + ']'), { timeout: 60000 }, async t => {
   const executable = candidates.find(file => fs.existsSync(file));
   if (!executable) {
     assert.notEqual(process.env.OVERLAY_BROWSER_REQUIRED, '1', 'Required Chromium browser is unavailable');
@@ -15,7 +16,7 @@ test('browser overlay remains visible and aligned during offline pan inertia zoo
   }
   const artifacts = fs.mkdtempSync(path.join(os.tmpdir(), 'oldlight-overlay-browser-'));
   const processHandle = spawn(executable, ['--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking',
-    '--no-first-run', '--remote-debugging-port=0', '--user-data-dir=' + path.join(artifacts, 'profile'), 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+    '--no-first-run', '--enable-unsafe-swiftshader', '--remote-debugging-port=0', '--user-data-dir=' + path.join(artifacts, 'profile'), 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
   let socket, serial = 0, session, stderr = '', closeBrowser;
   const pending = new Map(), errors = [], requests = [];
   try {
@@ -51,6 +52,16 @@ test('browser overlay remains visible and aligned during offline pan inertia zoo
     }
     const source = fs.readFileSync(process.env.QA_REINFORCEMENT_PANEL_SOURCE || path.join(root, 'docs/reinforcement-panel.js'), 'utf8');
     await evaluate(source);
+    const mapSource = fs.readFileSync(process.env.QA_REINFORCEMENT_MAP_SOURCE || path.join(root, 'docs/reinforcement-map.js'), 'utf8');
+    await evaluate(mapSource); await evaluate('globalThis.__mapSource=' + JSON.stringify(mapSource));
+    await evaluate(fs.readFileSync(path.join(__dirname, 'native-camera-excerpt.fixture.js'), 'utf8'));
+    const pixiSource = fs.readFileSync(path.join(__dirname, 'vendor/pixi-8.22.0.min.js'), 'utf8');
+    const pixiSha256 = require('node:crypto').createHash('sha256').update(pixiSource).digest('hex');
+    assert.equal(pixiSha256, '06d9ef9823e743518793083c296d801e752db128cb1f519fbabe37e1259567ea', 'Unmodified official Pixi distribution');
+    if (scenario.renderer === 'pixi') await evaluate(pixiSource);
+    await evaluate('globalThis.__fixtureUUID=' + JSON.stringify(require('node:crypto').randomUUID()));
+    await evaluate('globalThis.__overlayScenario=' + JSON.stringify(scenario));
+    await evaluate('globalThis.__disableProjectionNotifications=' + (process.env.QA_OVERLAY_DISABLE_NOTIFICATIONS === '1'));
     await evaluate('globalThis.__disableOverlayFrames=' + (process.env.OVERLAY_BROWSER_DISABLE_CALLBACKS === '1')); 
     await evaluate(fs.readFileSync(path.join(__dirname, 'reinforcement-overlay-browser.fixture.js'), 'utf8') + '\ninstallOverlayBrowserFixture();');
     assert.equal(await evaluate('document.title'), 'Offline reinforcement overlay QA');
@@ -70,14 +81,21 @@ test('browser overlay remains visible and aligned during offline pan inertia zoo
     await mouse('mouseReleased', 270, 360, { button: 'left', buttons: 0, clickCount: 1 }); await frames(12);
     const shot = await command('Page.captureScreenshot', { format: 'png' }); fs.writeFileSync(path.join(artifacts, 'movement.png'), Buffer.from(shot.data, 'base64'));
     for (const negative of ['camera', 'census', 'scope']) { await phase('invalid-' + negative); await evaluate(`overlayQA.negative('${negative}')`); await frames(38); }
+    await phase('recovery'); await evaluate("overlayQA.negative('none')"); await frames(38);
     const result = await evaluate('overlayQA.finish()');
+    result.pixiSha256 = scenario.renderer === 'pixi' ? pixiSha256 : null;
+    result.fixtureSha256 = require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(__dirname, 'reinforcement-overlay-browser.fixture.js'))).digest('hex');
+    result.nativeExcerptSha256 = require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(__dirname, 'native-camera-excerpt.fixture.js'))).digest('hex');
+    result.mapSourceSha256 = require('node:crypto').createHash('sha256').update(mapSource).digest('hex');
     result.sourceSha256 = require('node:crypto').createHash('sha256').update(source).digest('hex');
     result.browserVersion = (await command('Browser.getVersion', {}, null)).product;
-    result.browser = executable; result.renderer = 'real Chromium Canvas2D reference + production SVG; not native Pixi scene or camera transport';
+    result.browser = executable; result.renderer = 'real Chromium Canvas2D/Pixi 8.22.0 reference + native camera excerpt + production observer/MessagePort/SVG; not native galaxy boot';
     result.errors = errors; result.requests = requests;
     fs.writeFileSync(path.join(artifacts, 'frames.json'), JSON.stringify(result, null, 2)); t.diagnostic('BROWSER_ARTIFACTS=' + artifacts);
-    assert.equal(errors.length, 0); assert.equal(requests.length, 0);
+    assert.equal(errors.length, 0, JSON.stringify(errors)); assert.ok(result.portPosts > 0 && result.portDeliveries > 0, 'Real MessagePort transport must execute'); assert.equal(requests.length, 0);
     assert.ok(result.sceneCallbacks > 100 && result.sampleCallbacks > 100 && result.pointerEvents > 10 && result.wheelEvents === 8);
+    assert.ok(result.samples.filter(sample => sample.visible && !sample.authoritative).length > 10, 'Exercise pending authoritative transport while decoration is visible');
+    assert.ok(result.samples.every(sample => sample.authoritative || sample.markerDisabled), 'Pending decoration must not enable route markers');
     assert.ok(result.diagnostics.counts.rafCallbacks > 100, 'Production overlay RAF callbacks must execute');
     for (const name of ['rest', 'pan', 'inertia', 'zoom', 'reversal']) {
       const samples = result.samples.filter(sample => sample.phase === name);
@@ -85,6 +103,9 @@ test('browser overlay remains visible and aligned during offline pan inertia zoo
       assert.equal(samples.filter(sample => !sample.visible).length, 0, name + ' has hidden frames');
       assert.ok(samples.every(sample => sample.error < 1), name + ' has misaligned frames; max=' + Math.max(...samples.map(sample => sample.error || 0)));
     }
+    assert.ok(result.diagnostics.counts.projectionNotifications > 10, 'Native projection notifications must execute');
+    const recovery = result.samples.filter(sample => sample.phase === 'recovery').slice(33);
+    assert.ok(recovery.length >= 3 && recovery.every(sample => sample.visible && sample.error < 1 && sample.authoritative && !sample.markerDisabled), 'Fresh camera and census must recover usable route markers');
     for (const name of ['camera', 'census', 'scope']) {
       const samples = result.samples.filter(sample => sample.phase === 'invalid-' + name).slice(33);
       assert.ok(samples.length >= 3); assert.ok(samples.every(sample => !sample.visible), 'invalid ' + name + ' retains overlay');

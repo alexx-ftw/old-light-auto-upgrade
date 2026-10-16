@@ -42,7 +42,7 @@ function bridge() {
   }
   const realm = { document, location: { origin: 'https://oldlight.io', pathname: '/game/galaxy/review' },
     crypto: { randomUUID: () => 'independent-flicker-review' }, setTimeout: () => ++serial, clearTimeout() {} };
-  page = vm.createContext({ document, MessageChannel, MessageEvent: class { constructor(type, options) { Object.assign(this, { type }, options); } } });
+  page = vm.createContext({ document, MessageChannel, Event: class { constructor(type) { this.type = type; } }, MessageEvent: class { constructor(type, options) { Object.assign(this, { type }, options); } } });
   const map = M.create({ realm, now: () => time, getScope: () => SCOPE,
     observerSource: 'globalThis.reason="";globalThis.OldLightReinforcementMap={installPageObserver(options){globalThis.options=options;return{status(){return{reason:globalThis.reason};},stop(){}};}};',
     addElement(node, tag, attributes) { assert.equal(tag, 'script'); document.currentScript = { parentNode: node }; vm.runInContext(attributes.textContent, page); document.currentScript = null; },

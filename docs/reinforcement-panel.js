@@ -226,10 +226,11 @@
       const sample = sampleHover(rows);
       return sample && Math.hypot(sample.point.x - event.clientX, sample.point.y - event.clientY) <= 22 ? sample.system : null;
     }
-    function projected(system, rect) {
+    function projected(system, rect, decorative = false) {
       if (!system) return null;
-      const given = options.projectSystem?.(system, { scope, canvas: stage(), rect });
-      const point = typeof options.projectSystem === 'function' ? given : anchors.get(system.id);
+      const projector = decorative && typeof options.projectDecorationSystem === 'function' ? options.projectDecorationSystem : options.projectSystem;
+      const given = projector?.(system, { scope, canvas: stage(), rect });
+      const point = typeof projector === 'function' ? given : anchors.get(system.id);
       countVisual(pointValid(point) ? 'projectionAvailableChecks' : 'projectionUnavailableChecks');
       return pointValid(point) ? { x: point.x - rect.left, y: point.y - rect.top, visible: point.visible } : null;
     }
@@ -266,7 +267,12 @@
       if (!gesture && !items.length) { hideSVG(overlay, true, 'no-routes'); if (markers) markers.hidden = true; return; }
       sampleHover(rows);
       const byId = new Map(rows.map(s => [s.id, s]));
-      const segments = items.map(route => ({ route, from: projected(byId.get(route.originId), rect), to: projected(byId.get(route.destinationId), rect) })).filter(s => pointValid(s.from) && pointValid(s.to));
+      const segments = items.map(route => {
+        const from = projected(byId.get(route.originId), rect, true), to = projected(byId.get(route.destinationId), rect, true);
+        const verifiedFrom = projected(byId.get(route.originId), rect), verifiedTo = projected(byId.get(route.destinationId), rect);
+        return { route, from, to, verified: !!(pointValid(verifiedFrom) && pointValid(verifiedTo)
+          && JSON.stringify([from, to]) === JSON.stringify([verifiedFrom, verifiedTo])) };
+      }).filter(s => pointValid(s.from) && pointValid(s.to));
       // A screen-space gesture preview expresses intent, not a verified route.
       // Persisted routes above continue to require a current camera projection.
       if (gesture && gesture.scope === scope) segments.push({ route: { id: 'draft' }, from: { x: gesture.sourceX - rect.left, y: gesture.sourceY - rect.top }, to: { x: gesture.x - rect.left, y: gesture.y - rect.top }, preview: true });
@@ -348,7 +354,7 @@
         const name = clean(segment.route.name) || `Ruta ${index + 1}`;
         node.setAttribute('aria-label', `Abrir resumen y configuración: ${name}`);
         node.title = `Abrir resumen y configuración: ${name}. No envía naves.`;
-        node.disabled = false;
+        node.disabled = segment.verified === false;
         node.style.left = `${x}px`; node.style.top = `${y}px`;
       }
       for (const [id, node] of markerNodes) if (!keep.has(id)) { node.remove(); markerNodes.delete(id); }
@@ -658,7 +664,7 @@
       listen(window, 'keyup', event => { if (event.key === 'Control') { cancelGesture(); drawOverlay(); } }, true);
       for (const name of ['wheel', 'resize', 'scroll', 'blur', 'pointercancel', 'pagehide', 'popstate', 'hashchange']) listen(window, name, event => {
         // Scrolling Helper content cannot move the native map. Avoid clearing
-        // a settled arrow until the next 80 ms frame just for that UI event.
+        // a settled arrow until the next frame just for that UI event.
         // Retargeted Shadow DOM events are identified by the owner, not names.
         let helper = helperContains(event.target);
         try { helper ||= options.isHelperEvent?.(event) === true; } catch (_) { /* Unknown events still invalidate. */ }
@@ -676,6 +682,11 @@
       listen(window, 'pointerleave', event => { if (gesture && event.target === stage()) { cancelGesture(); invalidateMap(); } }, true);
       listen(window, 'pointerout', event => { if (gesture && (event.relatedTarget === null || !inside(event))) { cancelGesture(); invalidateMap(); } }, true);
       listen(document, 'visibilitychange', () => { cancelGesture(); invalidateMap(); });
+      const unsubscribeProjection = options.subscribeProjection?.(() => {
+        if (destroyed) return;
+        countVisual('projectionNotifications'); mapCache = null; drawOverlay();
+      });
+      if (typeof unsubscribeProjection === 'function') listeners.push(unsubscribeProjection);
       const tick = () => {
         if (destroyed) return;
         countVisual('rafCallbacks'); intervalVisual('rafCallbacks');

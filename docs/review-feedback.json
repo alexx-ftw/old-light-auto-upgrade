@@ -3968,6 +3968,91 @@
         "Verify browser unavailable is explicit and required CI fails closed; no npm dependency or network/game actions.",
         "Inspect projection/census safety and unchanged cache100ms limits; distinguish reference-scene fix from unresolved native scene/transport flicker."
       ]
+    },
+    {
+      "id": "reinforcement-render-order-camera-transport",
+      "feedback": "La revisión de1.17.21 reprodujo10.29px de desfase al registrar renderer después de overlay. El orden favorable y una cámara fresca sustituida no cubrían producción: con observer/MessagePort reales también aparecen frames ocultos.",
+      "beforeFail": {
+        "revision": "a83bc0c6428b8a090ef67ff51bedd849c309e46d",
+        "command": "QA_REINFORCEMENT_PANEL_SOURCE=/workspace/oldlight-transfer/1.17.21-panel-baseline.js QA_REINFORCEMENT_MAP_SOURCE=/workspace/oldlight-transfer/1.17.21-map-baseline.js node --test tests/reinforcement-overlay-browser.test.cjs",
+        "observedFailure": "Mismo harness/matriz falla6/6 con bytes previos; pan oculto en primera reproducción válida, después111/168ocultos y9.75px con orden invertidoCanvas; Pixi180ms154/163ocultos.",
+        "evidence": "docs/1.17.22-camera-render-order-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-overlay-browser.test.cjs",
+          "name": "browser overlay remains visible and aligned during offline pan inertia zoom reversal and census updates"
+        },
+        {
+          "file": "tests/reinforcement-overlay-browser.test.cjs",
+          "name": "browser overlay remains visible and aligned during offline pan inertia zoom reversal and census updates [after/0/canvas]"
+        },
+        {
+          "file": "tests/reinforcement-overlay-browser.test.cjs",
+          "name": "browser overlay remains visible and aligned during offline pan inertia zoom reversal and census updates [before/45/pixi]"
+        },
+        {
+          "file": "tests/reinforcement-overlay-browser.test.cjs",
+          "name": "browser overlay remains visible and aligned during offline pan inertia zoom reversal and census updates [after/45/pixi]"
+        },
+        {
+          "file": "tests/reinforcement-overlay-browser.test.cjs",
+          "name": "browser overlay remains visible and aligned during offline pan inertia zoom reversal and census updates [before/180/pixi]"
+        },
+        {
+          "file": "tests/reinforcement-overlay-browser.test.cjs",
+          "name": "browser overlay remains visible and aligned during offline pan inertia zoom reversal and census updates [after/180/pixi]"
+        },
+        {
+          "file": "tests/reinforcement-map.test.cjs",
+          "name": "synchronous decoration follows pending camera without granting authoritative projection or hit tests"
+        },
+        {
+          "file": "tests/reinforcement-map.test.cjs",
+          "name": "decorative observations reject malformed stale reordered geometry and revoked identity without fallback"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Renderer before/after overlay; real MessagePort0/45/180ms; native project or bounds/unproject",
+          "expected": "Every valid sampled frame visible and both vector endpoints aligned within1px; executed scene/overlay/notification/port counters, no game/network actions.",
+          "regression": {
+            "file": "tests/reinforcement-overlay-browser.test.cjs",
+            "name": "browser overlay remains visible and aligned during offline pan inertia zoom reversal and census updates [after/180/pixi]"
+          }
+        },
+        {
+          "scenario": "Pending transport preserves decoration but never authorizes projection/hit-test or route markers",
+          "expected": "Fresh decoration aligns immediately while authority remains null/disabled; confirmed fresh recovery restores usable markers.",
+          "regression": {
+            "file": "tests/reinforcement-map.test.cjs",
+            "name": "synchronous decoration follows pending camera without granting authoritative projection or hit tests"
+          }
+        },
+        {
+          "scenario": "Malformed reordered stale geometry, revoked scope/canvas/viewport/navigation, explicit camera/census loss",
+          "expected": "No stale fallback; invalid presentation is revoked and subscriptions cleaned at stop.",
+          "regression": {
+            "file": "tests/reinforcement-map.test.cjs",
+            "name": "decorative observations reject malformed stale reordered geometry and revoked identity without fallback"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Full native galaxy bootstrap, isolated userscript world, installed version and Eros result",
+          "reason": "Public renderer code obtained read-only but native startup opens authenticated client; synthetic Pixi reference uses real transport in oneJSrealm. Need an offline native-scene entrypoint with compatible synthetic world and matched dependencygraph."
+        },
+        {
+          "scope": "Every-frame raster movie, mobile/background/context loss, thousands of routes, arbitrary transport loss",
+          "reason": "Computed visibility/vector geometry on actual browser frames plus PNGs; these additional environments/performance and compositor paths not certified; independent bounded jitter20/320ms recovers at120frames, not38."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Independently vary both renderer registration orders and camera movement, actual MessagePort delay and native project/unproject path; inspect before/after frame evidence and sensitivity, not only favorable CI.",
+        "Audit synchronous detached-target decoration validation and lifecycle; projectSystem/status/hitTest and pending route markers must retain authoritative MessagePort guards.",
+        "Challenge same-world fixture and static dependency provenance; distinguish Pixi reference and exact camera methods from missing full native scene and actual Eros outcome; inspect CPU work per notification."
+      ]
     }
   ]
 }

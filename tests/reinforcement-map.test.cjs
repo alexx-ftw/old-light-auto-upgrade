@@ -237,11 +237,11 @@ function bridgeHarness({ injectionFailure = false, rootAvailable = true } = {}) 
   const parent = { appendChild(node) { node.isConnected = true; } }, document = geo.document;
   Object.assign(document, { documentElement: rootAvailable ? parent : null, head: null,
     createElement() {
-      const node = { isConnected: false, attributes: new Map(), listeners: new Set(),
+      const node = { isConnected: false, attributes: new Map(), listeners: new Map(),
         remove() { this.isConnected = false; },
         getAttribute(name) { return this.attributes.get(name) ?? null; }, setAttribute(name, value) { this.attributes.set(name, String(value)); }, removeAttribute(name) { this.attributes.delete(name); },
-        addEventListener(type, fn) { this.listeners.add(fn); }, removeEventListener(type, fn) { this.listeners.delete(fn); },
-        dispatchEvent(event) { event.target = this; handoffs.push({ connected: this.isConnected, event }); for (const fn of [...this.listeners]) fn(event); },
+        addEventListener(type, fn) { if (!this.listeners.has(type)) this.listeners.set(type, new Set()); this.listeners.get(type).add(fn); }, removeEventListener(type, fn) { this.listeners.get(type)?.delete(fn); if (!this.listeners.get(type)?.size) this.listeners.delete(type); },
+        dispatchEvent(event) { event.target = this; handoffs.push({ connected: this.isConnected, event }); for (const fn of [...(this.listeners.get(event.type) || [])]) fn(event); },
       }; nodes.push(node); return node;
     },
   });
@@ -253,7 +253,7 @@ function bridgeHarness({ injectionFailure = false, rootAvailable = true } = {}) 
   for (const key of ['GM_getValue', 'GM_setValue', 'GM_xmlhttpRequest', 'WebSocket', 'fetch', 'localStorage']) {
     Object.defineProperty(realm, key, { get() { throw new Error('Must not use ' + key); } });
   }
-  page = vm.createContext({ document, MessageChannel, onStop: () => { stopped++; }, MessageEvent: class { constructor(type, options) { this.type = type; Object.assign(this, options); } } });
+  page = vm.createContext({ document, MessageChannel, onStop: () => { stopped++; }, Event: class { constructor(type) { this.type = type; } }, MessageEvent: class { constructor(type, options) { this.type = type; Object.assign(this, options); } } });
   const observerSource = 'globalThis.observerReason="";globalThis.OldLightReinforcementMap={installPageObserver(options){globalThis.observerOptions=options;return{status(){return{reason:globalThis.observerReason};},stop(){onStop();}};}};';
   const map = M.create({ realm, document, now: () => time, observerSource,
     addElement(container, tag, attributes) {
@@ -274,7 +274,7 @@ function bridgeHarness({ injectionFailure = false, rootAvailable = true } = {}) 
 test('detached one-shot MessageChannel bridge keeps private data and privileged APIs outside page code', () => {
   const h = bridgeHarness(); assert.equal(h.handoffs.length, 1); assert.equal(h.handoffs[0].connected, false);
   assert.equal(h.handoffs[0].event.bubbles, false); assert.equal(h.handoffs[0].event.composed, false);
-  assert.equal(h.handoffs[0].event.ports[0], h.channels[0].port2); assert.equal(h.nodes[0].listeners.size, 0);
+  assert.equal(h.handoffs[0].event.ports[0], h.channels[0].port2); assert.equal(h.nodes[0].listeners.size, 1);
   assert.equal(/GM_|localStorage|sessionStorage|new WebSocket|window\.postMessage/.test(h.scripts[0]), false);
   assert.equal(h.map.projectSystem({ q: 0, r: 0 }, { scope }), null);
   const value = sample(); value.token = 'MUST_NOT_SURVIVE'; value.camera.name = 'MUST_NOT_SURVIVE';
@@ -557,4 +557,36 @@ test('moving camera has a measured revoked delivery window while static camera h
     b.deliver(queued.shift()); assert.ok(b.map.projectSystem(system, { scope }));
   }
   h.observer.stop(); b.map.stop();
+});
+
+
+test('synchronous decoration follows pending camera without granting authoritative projection or hit tests', () => {
+  const h = bridgeHarness(), system = { q: 0, r: 0 }, args = { scope, canvas: h.stage, rect: h.rect };
+  let notifications = 0; const remove = h.map.subscribeProjection(() => notifications++);
+  h.pending(sample());
+  assert.equal(notifications, 1); assert.ok(h.map.projectDecorationSystem(system, args));
+  assert.equal(h.map.projectSystem(system, args), null);
+  assert.equal(h.map.hitTestSystem({ x: 519, y: 385 }, [system]), null);
+  h.deliver(sample()); assert.ok(h.map.projectSystem(system, args));
+  const next = sample(2); next.camera.x = 200; h.pending(next);
+  assert.equal(notifications, 2); assert.ok(h.map.projectDecorationSystem(system, args).x < 519);
+  assert.equal(h.map.projectSystem(system, args), null); assert.equal(h.map.status().available, false);
+  h.pending(null); assert.equal(h.map.projectDecorationSystem(system, args), null);
+  remove(); h.pending(sample(3)); assert.equal(notifications, 3);
+  h.map.stop(); assert.equal(h.map.projectDecorationSystem(system, args), null); assert.equal(h.nodes[0].listeners.size, 0);
+});
+
+test('decorative observations reject malformed stale reordered geometry and revoked identity without fallback', () => {
+  const system = { q: 0, r: 0 };
+  for (const invalid of [sample(1), sample(0), sample(2, { galaxy: 'other' }), sample(2, { observedAt: NOW + 1 }), sample(2, { observedAt: NOW - 1501 }), { ...sample(2), camera: { ...sample().camera, zoom: 0 } }]) {
+    const h = bridgeHarness(); h.pending(sample()); assert.ok(h.map.projectDecorationSystem(system, { scope }));
+    h.pending(invalid); assert.equal(h.map.projectDecorationSystem(system, { scope }), null); h.map.stop();
+  }
+  for (const mutate of [h => h.advance(1501), h => h.rect.width++, h => { h.document.stages = [{ ...h.stage }]; }, h => { h.realm.location.pathname = '/play'; }, h => { h.document.hidden = true; }]) {
+    const h = bridgeHarness(); h.pending(sample()); assert.ok(h.map.projectDecorationSystem(system, { scope })); mutate(h);
+    assert.equal(h.map.projectDecorationSystem(system, { scope }), null); h.map.stop();
+  }
+  const h = bridgeHarness(); h.pending(sample()); assert.ok(h.map.projectDecorationSystem(system, { scope }));
+  assert.equal(h.map.projectDecorationSystem(system, { scope: 'alpha/new-account' }), null);
+  assert.equal(h.map.projectDecorationSystem(system, { scope }), null); h.map.stop();
 });

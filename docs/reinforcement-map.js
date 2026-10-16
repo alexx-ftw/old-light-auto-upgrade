@@ -337,10 +337,50 @@
   }
   function create({ realm = globalThis, document = realm.document, addElement, observerSource, now = Date.now, getScope } = {}) {
     const eventName = 'oldlight-reinforcement-map-bootstrap', pendingAttribute = 'data-oldlight-map-pending';
+    const projectionEvent = eventName + '-projection', projectionAttribute = pendingAttribute + '-projection';
+    const projectionListeners = new Set();
+    let decoration = null, decorationCanvas = null, decorationScope = '', decorationRevision = 0;
     let stopped = false, failed = false, installed = false, reason = 'awaiting-native-camera', current = null, currentCanvas = null, geometry = null;
     let container = null, port = null, ackTimer = null, watcher = null, lastRevision = 0, boundScope = '';
     let channel;
     try { channel = 'oldlight_map_' + realm.crypto.randomUUID().replace(/-/g, ''); } catch (_) { failed = true; reason = 'camera-channel-unavailable'; }
+    // Synchronous detached-target delivery is presentation-only. A new native
+    // camera observation reaches SVG before paint regardless of rAF registration
+    // or MessagePort latency. It never settles projectSystem or hitTestSystem.
+    function notifyProjection() {
+      if (stopped || failed) return;
+      const value = validateSnapshot(container?.getAttribute(projectionAttribute));
+      decoration = null; decorationCanvas = null;
+      try {
+        const view = viewport(document);
+        if (value && value.revision > decorationRevision && value.galaxy === galaxyAt(realm)
+          && value.observedAt <= now() && now() - value.observedAt <= LIMITS.staleMs && view
+          && equalRect(value.viewport, view.rect) && matchesProjection(view, value.projection || value.viewport)
+          && container.getAttribute(pendingAttribute) === stamp(value)) {
+          decorationRevision = value.revision; decoration = value; decorationCanvas = view.canvas;
+        }
+      } catch (_) { /* Invalid observations revoke presentation. */ }
+      for (const callback of projectionListeners) { try { callback(); } catch (_) {} }
+    }
+    function decorative({ canvas, rect, scope } = {}) {
+      const value = decoration;
+      if (stopped || failed || !installed || !value) return null;
+      if (scope) {
+        if (scope.split('/')[0] !== value.galaxy || (decorationScope && scope !== decorationScope)) {
+          decorationScope = scope; decoration = null; return null;
+        }
+        decorationScope = scope;
+      }
+      if (value.galaxy !== galaxyAt(realm) || value.observedAt > now() || now() - value.observedAt > LIMITS.staleMs) return null;
+      try {
+        const view = viewport(document);
+        if (!view || view.canvas !== decorationCanvas || (canvas && canvas !== view.canvas)
+          || !equalRect(value.viewport, view.rect) || (rect && !equalRect(rect, view.rect))
+          || !matchesProjection(view, value.projection || value.viewport)
+          || container?.getAttribute(pendingAttribute) !== stamp(value)) return null;
+        return value;
+      } catch (_) { return null; }
+    }
     function cleanupBootstrap() {
       watcher?.disconnect(); watcher = null;
       if (ackTimer !== null) { realm.clearTimeout(ackTimer); ackTimer = null; }
@@ -379,11 +419,11 @@
     function inject() {
       if (stopped || failed || installed || container) return;
       const parent = document.documentElement || document.head; if (!parent) return;
-      container = document.createElement('div'); container.hidden = true; container.addEventListener(eventName, handshake);
+      container = document.createElement('div'); container.hidden = true; container.addEventListener(eventName, handshake); container.addEventListener(projectionEvent, notifyProjection);
       const source = typeof observerSource === 'string'
         ? observerSource + '\nconst api=globalThis.OldLightReinforcementMap;'
         : 'const api=(' + mapFactory.toString() + ')();';
-      const textContent = `(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected)return;target.remove();${source}\nconst channel=${JSON.stringify(channel)},attribute=${JSON.stringify(pendingAttribute)},stamp=${stamp.toString()};const pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;const cleanup=()=>{try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();};pipe.port1.addEventListener('message',event=>{if(event.data==='stop')cleanup();});try{handle=api.installPageObserver({onPending:value=>{if(value)target.setAttribute(attribute,stamp(value));else {target.removeAttribute(attribute);const status=handle?.status?.(),reason=status?.reason;if(ready&&reason)send(JSON.stringify({version:1,type:'status',reason,geometry:status.geometry}));}},emit:value=>{const data=JSON.stringify(value);if(ready)send(data);else pending=data;}});target.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);handle.ready?.then(()=>{const status=handle?.status?.(),reason=status?.reason;if(reason)send(JSON.stringify({version:1,type:'status',reason,geometry:status.geometry}));});}catch(_){cleanup();}})();`;
+      const textContent = `(()=>{const target=document.currentScript?.parentNode;if(!target||!target.isConnected)return;target.remove();${source}\nconst channel=${JSON.stringify(channel)},attribute=${JSON.stringify(pendingAttribute)},stamp=${stamp.toString()};const pipe=new MessageChannel();const send=pipe.port1.postMessage.bind(pipe.port1);pipe.port1.start();let ready=false,pending=null,handle=null;const cleanup=()=>{try{handle?.stop();}catch(_){}pipe.port1.close();pipe.port2.close();};pipe.port1.addEventListener('message',event=>{if(event.data==='stop')cleanup();});try{handle=api.installPageObserver({onPending:value=>{if(value){target.setAttribute(attribute,stamp(value));target.setAttribute(${JSON.stringify(projectionAttribute)},JSON.stringify(value));target.dispatchEvent(new Event(${JSON.stringify(projectionEvent)}));}else {target.removeAttribute(attribute);target.removeAttribute(${JSON.stringify(projectionAttribute)});target.dispatchEvent(new Event(${JSON.stringify(projectionEvent)}));const status=handle?.status?.(),reason=status?.reason;if(ready&&reason)send(JSON.stringify({version:1,type:'status',reason,geometry:status.geometry}));}},emit:value=>{const data=JSON.stringify(value);if(ready)send(data);else pending=data;}});target.dispatchEvent(new MessageEvent(${JSON.stringify(eventName)},{data:channel,ports:[pipe.port2],bubbles:false,composed:false}));ready=true;if(pending!==null)send(pending);handle.ready?.then(()=>{const status=handle?.status?.(),reason=status?.reason;if(reason)send(JSON.stringify({version:1,type:'status',reason,geometry:status.geometry}));});}catch(_){cleanup();}})();`;
       try {
         parent.appendChild(container);
         ackTimer = realm.setTimeout(() => { ackTimer = null; if (!installed && !stopped) fail('camera-injection-unavailable'); }, 2000);
@@ -417,6 +457,11 @@
       }
     }
     return Object.freeze({
+      projectDecorationSystem(system, options = {}) { const value = decorative(options); return value ? projectPoint(system, value) : null; },
+      subscribeProjection(callback) {
+        if (typeof callback !== 'function' || stopped || failed) return () => {};
+        projectionListeners.add(callback); return () => projectionListeners.delete(callback);
+      },
       projectSystem(system, options = {}) { const value = settled(options); return value ? projectPoint(system, value) : null; },
       hitTestSystem(point, rows) {
         if (!point || !finite(point.x) || !finite(point.y) || !Array.isArray(rows) || rows.length > LIMITS.systems) return null;
@@ -439,6 +484,7 @@
       status() { const valid = !!settled(); return { installed, observed: !!current, available: valid, reason: valid ? '' : reason || 'camera-observation-pending', geometry: valid ? null : geometry }; },
       stop() {
         if (stopped) return; stopped = true; cleanupBootstrap();
+        container?.removeEventListener(projectionEvent, notifyProjection); projectionListeners.clear(); decoration = null; decorationCanvas = null;
         try { port?.postMessage('stop'); } catch (_) {}
         port?.removeEventListener('message', receive); port?.close(); port = null; installed = false; clear('stopped');
       },
