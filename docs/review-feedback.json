@@ -3336,7 +3336,7 @@
     },
     {
       "id": "reinforcement-helper-scroll-flicker",
-      "feedback": "La flecha sigue parpadeando en la sesión, versión pendiente. Reproducción adicional: scroll del propio Helper vacía SVG entre frames de80ms aunque cámara/censo sigan válidos.",
+      "feedback": "La flecha sigue parpadeando en la sesión, versión afectada confirmada1.17.14. Reproducción adicional: scroll del propio Helper vacía SVG entre frames de80ms aunque cámara/censo sigan válidos.",
       "beforeFail": {
         "revision": "0274df01af57b6942c95dedef5107ebc7c057ec2",
         "command": "node --test /tmp/oldlight-arrow-11715-before/tests/reinforcement-panel.test.cjs",
@@ -3409,8 +3409,8 @@
       ],
       "qaGaps": [
         {
-          "scope": "Actual installed version, live flicker cause and browser compositor",
-          "reason": "Version and event context are missing. Simulated DOM/rAF reproduction does not prove actual scroll events or screen painting in Brave/Violentmonkey."
+          "scope": "Live flicker cause, user result on1.17.15 and browser compositor",
+          "reason": "Installed version is confirmed1.17.14; event context and user outcome on1.17.15 remain unconfirmed. Simulated DOM/rAF does not establish actual painting."
         }
       ],
       "independentReviewCriteria": [
@@ -3418,7 +3418,57 @@
         "Verify production Shadow DOM callback, Helper minimization and marker events without broadening unknown/map event handling.",
         "Demand current census and camera on the helper event; retain gesture cancellation and no stale hover fallback.",
         "Keep100ms pending-decoration limit, invalid scope/session/canvas hiding and all game action guards unchanged.",
-        "State actual installed version and session mechanism are unconfirmed; never infer success in the real game from offline tests."
+        "State actual installed version and session mechanism are unconfirmed; never infer success in the real game from offline tests.",
+        "Count executed rAF callbacks within the actual fixture dispatcher; deliberately drop them and require the same temporal assertions to fail. Follow docs/overlay-validation-process.md."
+      ]
+    },
+    {
+      "id": "overlay-temporal-clock-sensitivity",
+      "feedback": "Un bucle de observaciones podía dar evidencia temporal verde sin ejecutar callbacks rAF; el Map de un probeWIP fue sobrescrito. Se requieren contadores ejecutados y un control de sensibilidad persistentes.",
+      "beforeFail": {
+        "revision": "599f18422c72af974d2a44d1dc2d8d587658dbcd",
+        "command": "node --test --test-name-pattern='helper scroll and wheel preserve continuous|temporal census gaps tooltip' /tmp/oldlight-overlay-process-before-dropped-raf/tests/reinforcement-panel.test.cjs",
+        "observedFailure": "Falso positivo reproducido: los2tests temporales anteriores pasan aunque la fixture no encola callbacks. Con la misma alteración y contadores finales fallan2/2por0!==120y0!==240; sin alteración150/150paneltests pasan. No es un bug nuevo de producción.",
+        "evidence": "docs/overlay-validation-process.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "helper scroll and wheel preserve continuous arrow DOM across frames census updates pointer and editor activity"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "temporal census gaps tooltip changes and zoom preserve only valid decoration and revoke prolonged gaps"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Temporal loop records state but no rAF callbacks execute",
+          "expected": "Explicit executed callback count fails, preventing a temporal success claim.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "helper scroll and wheel preserve continuous arrow DOM across frames census updates pointer and editor activity"
+          }
+        },
+        {
+          "scenario": "Census/tooltip/camera temporal matrix executes normally",
+          "expected": "240actual callbacks and240visible valid frames; invalid/prolonged data still hide.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "temporal census gaps tooltip changes and zoom preserve only valid decoration and revoke prolonged gaps"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "All possible fixture false positives and real browser painting",
+          "reason": "Sensitivity covers dropped rAF execution specifically; independent review and actual browser evidence remain separate requirements."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Inspect increment in the callback dispatcher rather than frame registration; rerun disabled-callback mutation.",
+        "Keep old and final mutation identical apart from test assertions/counter; record false-green prior result and required failure after.",
+        "Require fresh adversarial review and full final gate; do not call conditional simulated flicker fix confirmed in live session."
       ]
     }
   ]

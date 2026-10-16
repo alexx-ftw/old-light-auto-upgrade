@@ -14,6 +14,12 @@ El encargo debe incluir commit base y candidato, diff, comportamiento solicitado
 6. **Comprobar utilidad y degradación.** No basta impedir una acción peligrosa: verificar que el camino permitido sigue siendo alcanzable. Si falta una dependencia, comprobar un fallback válido y fresco si existe, o un estado visible con motivo y siguiente paso seguro. No aceptar un callejón sin salida silencioso ni inventar datos para desbloquearlo. Mantener las barreras de seguridad y permisos.
 7. **Cerrar contra el árbol final.** Tras cualquier corrección, revisar su diff, repetir las reproducciones afectadas y obtener el gate del commit final. No trasladar una aprobación de bytes anteriores. Indicar expresamente lo que sigue sin comprobarse.
 
+## Revisión adversarial del overlay
+
+Ante parpadeo o cambios de flechas, aplicar el [procedimiento temporal](overlay-validation-process.md). El encargo debe incluir reproducción anterior al cambio, versión instalada/publicada por separado y serie evento → antes de frame → callback ejecutado → después. Derivar un probe propio y comprobar sensibilidad al eliminar callbacks. Verificar el dispatcher real del harness: contar vueltas o usar un Map que producción no consume puede dar un falso positivo.
+
+Exigir continuidad de visibilidad/identidad y controles negativos de cámara/censo/gesto; no confundir dos snapshots correctos con pintura continua. Una revisión de otro árbol o un probe cuyo reloj no se ejecutó no se hereda como evidencia. La revisión final debe indicar expresamente si hubo navegador/compositor real y confirmación del usuario.
+
 ## Checklist para gestos y estado asíncrono
 
 Aplicar al gesto Ctrl y a cambios equivalentes; justificar lo que no aplique.
@@ -100,3 +106,5 @@ Parpadeo1.17.13: un hueco autoritativo de publicación puede convertirse en ocul
 | Drive pide conectar repetidamente; [reproducción1.17.14](1.17.14-drive-recovery-validation.md) | Probar reload implica que una pestaña ya abierta descubre una autorización nueva; cuenta recordada implica permiso vigente | A+B sin autorización → login explícitoB → volver aA sin reload; comprobar nuevoID, mismoID retirado, foco/visibilidad, almacenamiento fallido y fecha absoluta; seguir listeners y teardown reales | Recuperación multitab demostrada offline; no prueba causa de captura. Expirar exige gesto de usuario en el modelo Google actual y no se elude. |
 
 | «The arrow keeps flickering», versión pendiente; [reproducción1.17.15](1.17.15-arrow-scroll-validation.md) | Estabilidad de snapshots o corregir un hueco de100ms implica continuidad visual; todo scroll mueve el mapa | Emitir scroll/wheel del Helper cada16ms frente a rAF80ms y observar nodos/visibilidad entre eventos. Contrastar hostShadowDOM real, minimizado, tooltip, censos/zoom y revocación; repetir en mapa/gesto activo | ScrollHelper reproduce16/20frames ocultos offline; no acredita el evento real ni pintura del compositor. Versión/contexto faltan. |
+
+| Refuerzo de proceso tras informe confirmado en1.17.14; [procedimiento](overlay-validation-process.md) | Que un loop temporal realmente ejecuta rAF y que resolver un mecanismo cierra el incidente | Suprimir callbacks: las pruebas deben fallar; exigir120/240callbacks ejecutados, muestras antes/después y revisión adversarial del dispatcher real | El probe final1.17.15 sí contó120callbacks; los anteriores WIP sin ejecución no son evidencia de frames. Resultado real de1.17.15 pendiente. |

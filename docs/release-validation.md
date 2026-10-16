@@ -72,6 +72,12 @@ node --test --test-name-pattern='CLI fails closed on missing or malformed feedba
 
 El caso esperaba que el CLI rechazara un manifiesto ausente. El validador anterior devolvió éxito y el test falló con `0 !== 1`. Ese filtro sirve únicamente para el experimento antes/después; no es una validación de publicación. Con el validador corregido se comprueban además JSON malformado, referencias inexistentes, casos no ejecutados, nombres ambiguos, suites y falsas afirmaciones impresas. La aprobación actual solo queda establecida por el gate completo del árbol final.
 
+## Informes de parpadeo y cambios del overlay
+
+Aplicar el [procedimiento temporal del overlay](overlay-validation-process.md) antes de modificar comportamiento: reproducción base/candidata con el mismo harness, estados entre eventos y frames, callbacks ejecutados contados y control de sensibilidad del reloj. Requiere revisión independiente fresca del árbol final y controles negativos de censo/cámara/gestos. Una suite verde sin esos controles no cierra un informe de parpadeo.
+
+Registrar versión instalada confirmada separada de la publicada. Describir por separado simulación DOM, pintura del navegador y resultado del usuario; los dos últimos pueden seguir pendientes tras publicar una corrección condicional. El gate comprueba ejecución y enlaces del manifiesto, no la veracidad causal de esa revisión.
+
 ## Lo que requiere revisión antes de publicar
 
 Un resultado offline satisfactorio no significa «listo para publicar» por sí solo:

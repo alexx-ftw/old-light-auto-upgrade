@@ -51,7 +51,7 @@ const byButton = (root, name) => all(root).find(n => n.tagName === 'BUTTON' && n
 function harness(extra = {}) {
   const document = new Document(), window = document.defaultView, container = document.createElement('main'), canvas = document.createElement('canvas'); canvas.id = 'stage';
   document.body.append(canvas, container);
-  const frames = new Map(); let frameId = 0;
+  const frames = new Map(); let frameId = 0, framesExecuted = 0;
   window.requestAnimationFrame = callback => { frames.set(++frameId, callback); return frameId; };
   window.cancelAnimationFrame = id => frames.delete(id);
   let scope = SCOPE, clock = 1000, routes = [], calls = [], serial = 0, timers = new Map(), timerSerial = 0, failure = null;
@@ -69,7 +69,8 @@ function harness(extra = {}) {
     get error() { return container.querySelector('.oldlight-route-error').textContent; },
     get status() { return container.querySelector('.oldlight-route-status').textContent; },
     advance: ms => { clock += ms; },
-    frame: ms => { clock += ms; const tasks = [...frames.values()]; frames.clear(); for (const fn of tasks) fn(clock - 1000); },
+    get framesExecuted() { return framesExecuted; },
+    frame: ms => { clock += ms; const tasks = [...frames.values()]; frames.clear(); for (const fn of tasks) { framesExecuted++; fn(clock - 1000); } },
     tick: () => { for (const [id, fn] of [...timers]) { timers.delete(id); fn(); } },
     gesture: (type, x, y, extra = {}) => window.dispatch(type, { target: canvas, clientX: x, clientY: y, ctrlKey: true, pointerType: 'mouse', pointerId: 1, ...extra }),
     hover: (name, x, y) => {
@@ -800,6 +801,7 @@ test('helper scroll and wheel preserve continuous arrow DOM across frames census
     states.push(overlay.style.display !== 'none' && overlay.querySelector('line') === line);
     assert.ok(layer.querySelector('button') === marker, 'Marker keeps identity across helper events');
   }
+  assert.equal(h.framesExecuted, 120, 'A temporal claim requires executed rAF callbacks, not just requested frames');
   assert.equal(states.length, 240); assert.ok(states.every(Boolean), 'No hidden frame or SVG replacement while verified geometry stays equal');
   assert.equal(replacements, 0); assert.equal(h.calls.filter(call => call[0] === 'save').length, 1);
   h.app.destroy();
@@ -862,6 +864,7 @@ test('temporal census gaps tooltip changes and zoom preserve only valid decorati
     assert.notEqual(overlay.style.display, 'none', `Valid geometry or bounded pending delivery remains visible at frame ${i}`);
     visible++;
   }
+  assert.equal(h.framesExecuted, 240, 'Every requested simulation step must execute its queued rAF callback');
   assert.equal(visible, 240);
   pending = true; h.world = null; h.app.render(); h.advance(101); h.app.render();
   assert.equal(overlay.style.display, 'none', 'A prolonged unsettled census still removes decoration');

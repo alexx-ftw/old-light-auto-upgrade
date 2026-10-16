@@ -7,7 +7,7 @@ Userscript para [Old Light](https://oldlight.io/play) que atiende primero el Res
 
 El scroll o la rueda dentro del Helper ya no vacían la flecha y esperan al siguiente frame del mapa para reconstruirla. Ese ciclo reproducía parpadeo aun con censo y cámara constantes. Ahora esos eventos vuelven a comprobar ambos y mantienen el dibujo cuando siguen siendo válidos, incluido el evento retargeteado por Shadow DOM.
 
-El zoom/scroll ajeno al Helper, un gesto activo, la cámara no disponible y los censos inválidos siguen retirando el dibujo. El límite decorativo de100ms para entregas pendientes no se amplía. La simulación comprueba continuidad por frame, identidad del SVG, puntero flotante, editor, tooltip, revisiones de censo y cámara. Esto demuestra un mecanismo adicional; la versión instalada y la causa del caso real siguen pendientes. [Reproducción y límites](docs/1.17.15-arrow-scroll-validation.md).
+El zoom/scroll ajeno al Helper, un gesto activo, la cámara no disponible y los censos inválidos siguen retirando el dibujo. El límite decorativo de100ms para entregas pendientes no se amplía. La simulación comprueba continuidad por frame, identidad del SVG, puntero flotante, editor, tooltip, revisiones de censo y cámara. Esto demuestra un mecanismo adicional; la versión afectada se ha confirmado como1.17.14 y el resultado real de1.17.15 sigue pendiente. [Reproducción y límites](docs/1.17.15-arrow-scroll-validation.md). El [procedimiento de revisión temporal](docs/overlay-validation-process.md) exige reproducción previa, callbacks ejecutados contados, controles adversariales y cierre contra el commit final.
 
 ## Recuperar Drive al volver a la pestaña (1.17.14)
 
