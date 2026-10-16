@@ -11,6 +11,8 @@ En **Flota → Rutas de refuerzo → Ver diagnóstico local de flechas**, un cli
 
 El propietario confirmó1.17.14 y que el mapa quieto no parpadea; no consta instalación ni resultado real posterior. La simulación reproduce un intervalo revocado mientras llega la cámara nueva durante movimiento, y se conserva esa protección. El diagnóstico permite contrastar qué motivos ocurren realmente antes de proponer otro cambio de dibujo. [Pruebas, reproducción y límites](docs/1.17.16-local-overlay-diagnostics-validation.md).
 
+Guías: [consultar el diagnóstico y el motivo sin enviar](docs/1.17.16-read-only-diagnostics.md) · [preparación del rename compatible y recurso pendiente](docs/rename-migration-plan.md). El empaquetador es offline; no activa el cambio de nombre ni otro sitio.
+
 ## Flechas estables al desplazar el Helper (1.17.15)
 
 El scroll o la rueda dentro del Helper ya no vacían la flecha y esperan al siguiente frame del mapa para reconstruirla. Ese ciclo reproducía parpadeo aun con censo y cámara constantes. Ahora esos eventos vuelven a comprobar ambos y mantienen el dibujo cuando siguen siendo válidos, incluido el evento retargeteado por Shadow DOM.

@@ -3545,6 +3545,59 @@
         "Verify preparation is not reported as a confirmed send and visible cause exists for actionable denials.",
         "Keep all reservations, ownership, ally and native confirmation guards; do not clear pending/review tickets."
       ]
+    },
+    {
+      "id": "rename-compat-immutable-assets",
+      "feedback": "La revisión del empaquetador offline encontró fuentes symlink externas y dependencias HTML omitidas; el paquete no acreditaba sus bytes por el árbol declarado. No se desplegó ni renombró.",
+      "beforeFail": {
+        "revision": "9151c24040e674b16e4992726cf6526e8cdda2be",
+        "command": "node --test --test-name-pattern='rejects committed symlink|detects alternate HTML' /tmp/oldlight-rename-compat-before-review/tests/rename-compat-preparation.test.cjs",
+        "observedFailure": "Mismo harness final sobre CLI anterior:2tests fallan porque acepta el symlink y el script con src espaciado. Los probes independientes también demuestran inclusión de bytes fuera del árbol y omisión de dependencia.",
+        "evidence": "docs/rename-migration-plan.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/rename-compat-preparation.test.cjs",
+          "name": "compatibility preparation rejects committed symlink assets instead of packaging external bytes"
+        },
+        {
+          "file": "tests/rename-compat-preparation.test.cjs",
+          "name": "compatibility preparation detects alternate HTML dependency syntax and CSS imports"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Committed symlink source asset",
+          "expected": "Reject before output; read only regular blobs from captured immutable commit.",
+          "regression": {
+            "file": "tests/rename-compat-preparation.test.cjs",
+            "name": "compatibility preparation rejects committed symlink assets instead of packaging external bytes"
+          }
+        },
+        {
+          "scenario": "Unknown script dependency with alternate attribute syntax or CSS import",
+          "expected": "Fail closed and require dependency review.",
+          "regression": {
+            "file": "tests/rename-compat-preparation.test.cjs",
+            "name": "compatibility preparation detects alternate HTML dependency syntax and CSS imports"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Actual old Pages hosting and renamed-repo distribution",
+          "reason": "Additional user-site resource is not authorized yet; no external hosting, rename or real OAuth/game operation has been performed."
+        },
+        {
+          "scope": "All possible dynamic dependencies or markup/CSS/JavaScript syntax",
+          "reason": "Audited asset inventory and conservative guards are not a general dependency parser; manual review remains required."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Derive symlink and alternate-syntax probes using the same CLI and test harness, and verify source bytes belong to declared commit/tree.",
+        "Inspect output collision/realpath boundaries and exact single-path transformation; no credentials, OAuth origin/scope, storage/protocol identity or network changes.",
+        "Do not confuse offline package creation with served old-URL continuity or rename permission for an additional repository."
+      ]
     }
   ]
 }
