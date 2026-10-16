@@ -6,7 +6,7 @@
   const PROTOCOL = 'old-light-drive-v1';
   const GAME_ORIGIN = 'https://oldlight.io';
   const HELPER_ORIGIN = 'https://alexx-ftw.github.io';
-  const HELPER_PATH = '/old-light-auto-upgrade/drive.html';
+  const HELPER_PATH = '/old-light-helper/drive.html';
   const SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
   const APP = 'old-light-auto-upgrade';
   const COPY_FORMAT = 'old-light-auto-upgrade-drive-copy';

@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.18
+// @version      1.17.19
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
-// @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
-// @supportURL   https://github.com/alexx-ftw/old-light-auto-upgrade/issues
-// @updateURL    https://raw.githubusercontent.com/alexx-ftw/old-light-auto-upgrade/main/old-light-auto-upgrade.meta.js
-// @downloadURL  https://raw.githubusercontent.com/alexx-ftw/old-light-auto-upgrade/main/old-light-auto-upgrade.user.js
+// @homepageURL  https://github.com/alexx-ftw/old-light-helper
+// @supportURL   https://github.com/alexx-ftw/old-light-helper/issues
+// @updateURL    https://raw.githubusercontent.com/alexx-ftw/old-light-helper/main/old-light-auto-upgrade.meta.js
+// @downloadURL  https://raw.githubusercontent.com/alexx-ftw/old-light-helper/main/old-light-auto-upgrade.user.js
 // @run-at       document-start
 // @inject-into  content
 // @grant        GM_xmlhttpRequest
@@ -5526,8 +5526,8 @@ return Object.freeze({ encode });
   // BEGIN PRIVATE UPDATE CHECKER
   // Metadata is data only. The only executable download is opened in the manager.
   function createUpdateChecker(options) {
-    const META_URL = 'https://raw.githubusercontent.com/alexx-ftw/old-light-auto-upgrade/main/old-light-auto-upgrade.meta.js';
-    const INSTALL_URL = 'https://raw.githubusercontent.com/alexx-ftw/old-light-auto-upgrade/main/old-light-auto-upgrade.user.js';
+    const META_URL = 'https://raw.githubusercontent.com/alexx-ftw/old-light-helper/main/old-light-auto-upgrade.meta.js';
+    const INSTALL_URL = 'https://raw.githubusercontent.com/alexx-ftw/old-light-helper/main/old-light-auto-upgrade.user.js';
     const MARKER = 'old-light-helper:update-installer-offered:v1';
     const versionParts = value => typeof value === 'string' && /^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/.test(value)
       ? value.split('.').map(Number) : null;
@@ -5631,7 +5631,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.18';
+  const SCRIPT_VERSION = '1.17.19';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -6227,6 +6227,7 @@ return Object.freeze({ encode });
         automaticMinimumReceipts: normalizeAutomaticMinimumReceipts(value?.automaticMinimumReceipts),
         shipOrder: normalizeOrder(value?.shipOrder, DEFAULT_SHIP_ORDER),
         countAway: value?.countAway === true,
+        creditProtection: Object.fromEntries(SHIPS.map(([id]) => [id, value?.creditProtection?.[id] !== false])),
         shiftPresetShortcut: value?.shiftPresetShortcut !== false,
         presetCatalog: normalizePresetCatalog(value?.presetCatalog),
         fleetExpanded: value?.fleetExpanded === true,
@@ -6739,6 +6740,75 @@ return Object.freeze({ encode });
         waitMs: activeTimes.length && activeTimes.every(value => value !== null) ? Math.min(...activeTimes) : null } };
   }
 
+  function installShipCreditToggle(container, id, name) {
+    const label = document.createElement('label');
+    label.style.gridColumn = '1 / -1';
+    const input = document.createElement('input'); input.type = 'checkbox';
+    input.dataset.creditProtection = id;
+    input.checked = settings.creditProtection[id];
+    label.append(input, document.createTextNode(` Proteger créditos al producir ${name} automáticamente en este navegador (incluye colas; sin datos, espera)`));
+    input.addEventListener('change', () => {
+      const previous = settings;
+      settings = normalizeSettings({ ...settings, creditProtection: { ...settings.creditProtection, [id]: input.checked } });
+      if (!saveSettings()) {
+        settings = previous; input.checked = settings.creditProtection[id];
+        presentationFailure('No se pudo guardar la protección de créditos. Se conserva el ajuste anterior.');
+      }
+      schedule();
+    });
+    container.append(label); return input;
+  }
+
+  function projectShipCredits(world, scope, originId, type, quantity, now = Date.now()) {
+    const unknown = () => ({ allowed: false, message: 'Protección de créditos: faltan datos económicos y de colas actuales. Esperando un censo completo.' });
+    const amount = n => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= Number.MAX_SAFE_INTEGER;
+    const count = n => Number.isSafeInteger(n) && n >= 0;
+    const types = ['probe', 'marauder', 'sentinel', 'vanguard'];
+    try {
+      if (!types.includes(type) || !count(quantity) || quantity < 1 || quantity > 50000 || !world?.connected || !world.complete
+          || !scope || world.scope !== scope || !Number.isSafeInteger(world.observedAt)
+          || world.observedAt > now || now - world.observedAt > 120000 || !Array.isArray(world.systems)
+          || !world.systems.some(system => system.id === originId)
+          || !amount(world.credits?.incomePerDay) || !amount(world.credits?.upkeepPerDay)) return unknown();
+      const rates = new Map();
+      for (const system of world.systems) {
+        if (!system.shipyard) {
+          if (system.buildings?.find(building => building.type === 'shipyard')?.level === 0) continue;
+          return unknown();
+        }
+        if (!Array.isArray(system.shipyard.types) || !Array.isArray(system.shipyard.queue)) return unknown();
+        for (const ship of system.shipyard.types) {
+          const rate = ship.stats?.upkeepPerDay;
+          if (!types.includes(ship.type) || !amount(rate) || (rates.has(ship.type) && rates.get(ship.type) !== rate)) return unknown();
+          rates.set(ship.type, rate);
+        }
+      }
+      if (!rates.has(type)) return unknown();
+      let committed = 0;
+      for (const system of world.systems) for (const job of system.shipyard?.queue || []) {
+        if (!types.includes(job.type) || !['recruit', 'scrap'].includes(job.kind)
+            || !count(job.quantityRemaining) || !count(job.quantityTotal) || job.quantityRemaining > job.quantityTotal) return unknown();
+        if (job.kind !== 'recruit') continue;
+        if (!rates.has(job.type)) return unknown();
+        committed += rates.get(job.type) * job.quantityRemaining;
+        if (!amount(committed)) return unknown();
+      }
+      const projected = world.credits.incomePerDay - world.credits.upkeepPerDay - committed - rates.get(type) * quantity;
+      if (!Number.isFinite(projected) || Math.abs(projected) > Number.MAX_SAFE_INTEGER) return unknown();
+      return { allowed: projected >= 0, projected,
+        message: projected < 0 ? `Protección de créditos: balance diario proyectado ${Math.floor(projected).toLocaleString()} después de las colas y este lote. Producción automática detenida.` : '' };
+    } catch (_) { return unknown(); }
+  }
+
+  function shipCreditPermission(type, quantity) {
+    if (settings.creditProtection?.[type] === false) return { allowed: true, message: '' };
+    try {
+      const context = missionContext();
+      if (context.selectionCount !== 1) return { allowed: false, message: 'Protección de créditos: selecciona un origen propio verificado.' };
+      return projectShipCredits(globalThis.OldLightEmpireBridge?.snapshot?.(), context.scope, context.originId, type, quantity);
+    } catch (_) { return { allowed: false, message: 'Protección de créditos: no se pudo verificar el balance diario.' }; }
+  }
+
   function prepareShip(row, deficit) {
     if (row.row.classList.contains('ship-row-locked') ||
         row.button.classList.contains('b-upgrade-error') ||
@@ -7225,6 +7295,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.19', title: 'Protección de créditos y nuevo repositorio', changes: [
+        'Protección por tipo de nave en Flota: detiene producción automática si el balance diario proyectado tras colas y lote queda negativo; sin datos, espera.',
+        'Los controles quedan guardados por navegador y en las copias; no cancelan colas existentes ni cambian pedidos manuales.',
+        'Migración directa a old-light-helper: actualiza para abrir Drive en la URL nueva. No se conserva la ruta Pages antigua ni se cambian permisos OAuth.',
+      ] },
       { version: '1.17.18', title: 'Confirmar el guardado de preferencias de Drive', changes: [
         'Los cambios de preferencias de Drive solo se activan y confirman después de releer los valores guardados.',
         'Una escritura rechazada o ignorada conserva la configuración activa y muestra el error existente para poder reintentar.',
@@ -7993,7 +8068,8 @@ return Object.freeze({ encode });
         input.setAttribute('aria-describedby', status.id);
         item.append(drag, position, label, input, actions, counts, status);
         ui.fleetChoices.append(item);
-        ui.shipItems.set(id, { item, position, input, up, down, counts, countValues, drag });
+        const creditProtection = installShipCreditToggle(item, id, name);
+        ui.shipItems.set(id, { item, position, input, up, down, counts, countValues, drag, creditProtection });
         installNumericInput(id, input, status);
       }
       ui.countAway.addEventListener('change', () => {
@@ -8164,6 +8240,8 @@ return Object.freeze({ encode });
         || SHIPS.some(([id]) => !Number.isInteger(next.shipMinimums[id])
           || next.shipMinimums[id] < 0 || next.shipMinimums[id] > MAX_SHIP_MINIMUM)
         || !Number.isInteger(next.depotFillPercent) || next.depotFillPercent < 1 || next.depotFillPercent > 100
+        || (next.creditProtection !== undefined && (!object(next.creditProtection)
+          || Object.keys(next.creditProtection).some(id => !DEFAULT_SHIP_ORDER.includes(id) || typeof next.creditProtection[id] !== 'boolean')))
         || (next.numericDrafts !== undefined && !validNumericDrafts(next.numericDrafts))
         || (next.automaticMinimumReceipts !== undefined && !validAutomaticMinimumReceipts(next.automaticMinimumReceipts))
         || (next.presetCatalog !== undefined && !validPresetCatalog(next.presetCatalog))
@@ -8829,6 +8907,7 @@ return Object.freeze({ encode });
       setText(controls.position, String(index + 1));
       controls.up.disabled = index === 0;
       controls.down.disabled = index === settings.shipOrder.length - 1;
+      if (controls.creditProtection) controls.creditProtection.checked = settings.creditProtection[id];
       const counts = fleetCounts(id);
       for (const [kind, value] of controls.countValues) setText(value, counts ? counts[kind].toLocaleString() : '?');
       controls.counts.title = counts
@@ -9219,6 +9298,10 @@ return Object.freeze({ encode });
       ? empireController.captureOrderBoundary(empireAdapter.readActive()?.context) : null;
     if (empireController?.isEnabled() && !empireBoundary) {
       show('Revalidando el estado imperial antes del pedido.'); return;
+    }
+    if (candidate.kind === 'ship') {
+      const credit = shipCreditPermission(candidate.id, candidate.quantity);
+      if (!credit.allowed) { show(credit.message, true); return; }
     }
     // Registra la petición ANTES del clic: el juego puede actualizarse de forma síncrona.
     const request = { ...candidate, system: activeSystem, systemName: text(document.querySelector('[data-field="nameplate-name"]')),
@@ -16609,7 +16692,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
   const PROTOCOL = 'old-light-drive-v1';
   const GAME_ORIGIN = 'https://oldlight.io';
   const HELPER_ORIGIN = 'https://alexx-ftw.github.io';
-  const HELPER_PATH = '/old-light-auto-upgrade/drive.html';
+  const HELPER_PATH = '/old-light-helper/drive.html';
   const SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
   const APP = 'old-light-auto-upgrade';
   const COPY_FORMAT = 'old-light-auto-upgrade-drive-copy';
@@ -17828,7 +17911,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       && GM_info.scriptHandler === 'Violentmonkey' && GM_info.injectInto === 'content');
     const localRuntimeFactory = isolatedContext && setAuthorization && (options.createRuntime ||
       (typeof createLocalDriveRuntime === 'function' ? createLocalDriveRuntime : null));
-    const HELPER_URL = 'https://alexx-ftw.github.io/old-light-auto-upgrade/drive.html';
+    const HELPER_URL = 'https://alexx-ftw.github.io/old-light-helper/drive.html';
     const HELPER_ORIGIN = 'https://alexx-ftw.github.io';
     const MAX_BYTES = 1024 * 1024;
     const ROUTING_KEY = 'old-light-drive:tab-link:v1';

@@ -331,7 +331,7 @@ test('all persisted settings have an explicit shared or local classification', (
   const helpers = source.slice(source.indexOf('  function normalizeOrder('), source.indexOf('  function text(node)'));
   const ctx = vm.createContext({});
   vm.runInContext(constants + helpers + '\nthis.defaults = normalizeSettings({});', ctx);
-  const knownLocal = ['expanded', 'minimized', 'panelPosition', 'panelWidth', 'uiSections', 'activeTab',
+  const knownLocal = ['creditProtection', 'expanded', 'minimized', 'panelPosition', 'panelWidth', 'uiSections', 'activeTab',
     'conditionsExpanded', 'automaticMinimumReceipts', 'fleetExpanded', 'numericDrafts'];
   const knownShared = ['enabled', 'excluded', 'order', 'shipMinimums', 'shipOrder', 'countAway',
     'shiftPresetShortcut', 'presetCatalog', 'depotFillPercent'];

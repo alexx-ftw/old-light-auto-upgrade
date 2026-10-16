@@ -8,7 +8,7 @@ const source = fs.readFileSync(path.join(__dirname, '../old-light-auto-upgrade.u
 const block = source.split('  // BEGIN PRIVATE UPDATE CHECKER\n')[1]?.split('  // END PRIVATE UPDATE CHECKER')[0];
 const factory = vm.runInNewContext(block + ';createUpdateChecker', {});
 const currentMeta = fs.readFileSync(path.join(__dirname, '../old-light-auto-upgrade.meta.js'), 'utf8');
-const META = 'https://raw.githubusercontent.com/alexx-ftw/old-light-auto-upgrade/main/old-light-auto-upgrade.meta.js';
+const META = 'https://raw.githubusercontent.com/alexx-ftw/old-light-helper/main/old-light-auto-upgrade.meta.js';
 const marker = 'old-light-helper:update-installer-offered:v1';
 const response = version => ({status:200, finalUrl:META, responseText:currentMeta.replace(/(@version\s+)\S+/, `$1${version}`)});
 function harness(extra={}) {

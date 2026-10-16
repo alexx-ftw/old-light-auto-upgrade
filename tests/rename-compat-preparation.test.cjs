@@ -8,6 +8,8 @@ function fixture(t) {
   fs.mkdirSync(path.join(repo, 'docs'), { recursive: true });
   fs.copyFileSync(path.join(root, 'prepare-rename-compat.cjs'), path.join(repo, 'prepare-rename-compat.cjs'));
   for (const file of assets) fs.copyFileSync(path.join(root, 'docs', file), path.join(repo, 'docs', file));
+  const legacyFile=path.join(repo,'docs/drive.js');
+  fs.writeFileSync(legacyFile,fs.readFileSync(legacyFile,'utf8').replace("const HELPER_PATH = '/old-light-helper/drive.html';","const HELPER_PATH = '/old-light-auto-upgrade/drive.html';"));
   const git = args => execFileSync('git', args, { cwd: repo, stdio: 'pipe' });
   git(['init', '-q']); git(['add', '.']); git(['-c', 'user.name=Offline Test', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture']);
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));

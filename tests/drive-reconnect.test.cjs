@@ -74,7 +74,7 @@ function setup({ storedRoute, storageFailure = false } = {}) {
       getElementById: id => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); }, createElement: node });
     const nonce = game.api.testing.session().nonce;
     const ctx = vm.createContext({ ...common, ...time, window, document,
-      location: { origin: DRIVE, pathname: '/old-light-auto-upgrade/drive.html', hash: '#bridge=' + nonce, search: '' }, history: { replaceState() {} },
+      location: { origin: DRIVE, pathname: '/old-light-helper/drive.html', hash: '#bridge=' + nonce, search: '' }, history: { replaceState() {} },
       navigator: {}, fetch() { throw Error('Network must not be used in reconnect tests'); } });
     const instrumented = companionSource.replace('  beginBootstrap();', `
       globalThis.testing = {

@@ -3760,6 +3760,88 @@
         "Derive silent no-op/false/readback mismatch cases and ensure revision/config notifications remain unadvanced before confirmation.",
         "Check strict unhandled rejection handling, valid synchronous success, retry and module recreation; distinguish configuration from credential persistence."
       ]
+    },
+    {
+      "id": "ship-daily-credit-production-protection",
+      "feedback": "El propietario solicita toggles para detener producción automática si el balance diario proyectado tras lotes/colas será negativo. La versión anterior no implementa esta protección. Nuevo reporte de parpadeo sin versión/diagnóstico sigue abierto.",
+      "beforeFail": {
+        "revision": "c2859e62e808ba1035f654165dd0e1f74b351052",
+        "command": "QA_SHIP_CREDIT_SOURCE=/workspace/oldlight-transfer/ship-credit-baseline.user.js node --test tests/ship-credit-protection.test.cjs",
+        "observedFailure": "Mismo harness rechaza ausencia de la proyección y frontera final/control solicitados; no es una reproducción de causa del parpadeo.",
+        "evidence": "docs/1.17.19-credit-protection-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/ship-credit-protection.test.cjs",
+          "name": "daily credit protection includes complete batches, all-system recruit queues and never credits future scrap"
+        },
+        {
+          "file": "tests/ship-credit-protection.test.cjs",
+          "name": "protected production fails closed on unknown stale inconsistent or changed-account economics"
+        },
+        {
+          "file": "tests/ship-credit-protection.test.cjs",
+          "name": "production boundary blocks clicks with projected negative credits and permits opt-out or affordable orders"
+        },
+        {
+          "file": "tests/ship-credit-protection.test.cjs",
+          "name": "credit toggles default protected, persist real changes and restore the prior choice on quota failure"
+        },
+        {
+          "file": "tests/ship-credit-protection.test.cjs",
+          "name": "credit choices remain local during shared journal overlay to preserve older client compatibility"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Pending recruitment across systems plus whole proposed batch",
+          "expected": "Negative blocks; zero or positive permits; no future scrap credit.",
+          "regression": {
+            "file": "tests/ship-credit-protection.test.cjs",
+            "name": "daily credit protection includes complete batches, all-system recruit queues and never credits future scrap"
+          }
+        },
+        {
+          "scenario": "Missing/stale/mismatched economic census",
+          "expected": "Protected type waits without native production click.",
+          "regression": {
+            "file": "tests/ship-credit-protection.test.cjs",
+            "name": "protected production fails closed on unknown stale inconsistent or changed-account economics"
+          }
+        },
+        {
+          "scenario": "Protection disabled explicitly for one type",
+          "expected": "Retain other barriers but skip that economic guard.",
+          "regression": {
+            "file": "tests/ship-credit-protection.test.cjs",
+            "name": "production boundary blocks clicks with projected negative credits and permits opt-out or affordable orders"
+          }
+        },
+        {
+          "scenario": "Local quota failure",
+          "expected": "Restore checkbox/active previous value and allow retry.",
+          "regression": {
+            "file": "tests/ship-credit-protection.test.cjs",
+            "name": "credit toggles default protected, persist real changes and restore the prior choice on quota failure"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Live game, browser paint and actual Google authorization after rename",
+          "reason": "Synthetic/static verification only; no game or Google operation."
+        },
+        {
+          "scope": "Exact native accounting of queues and actual user flicker cause",
+          "reason": "Queue maintenance reserved conservatively; installed version/diagnostic unknown; no overlay fix claimed."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Trace all automatic production through final credit guard after native input; derive allowed/blocked lots, queued recruitment and unknown values.",
+        "Validate defaults, persistence/backup and strict older-journal compatibility without new telemetry or credentials.",
+        "Inspect direct rename same identity/history, canonical public URLs, unchanged installer namespace/storage/OAuth and explicitly accepted old Pages break.",
+        "Question temporal movement probe and callback sensitivity; do not approve a claim of real flicker resolution."
+      ]
     }
   ]
 }

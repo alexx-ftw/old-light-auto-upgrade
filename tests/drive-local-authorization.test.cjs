@@ -427,7 +427,7 @@ test('a private bootstrap keeps its nonce out of sessionStorage, public ready me
   assert.ok(ready.length > 0);
   assert.ok(ready.every(item => item.data.private === true && !Object.hasOwn(item.data, 'nonce')));
   assert.doesNotMatch(JSON.stringify(ready), new RegExp(nonce));
-  assert.equal(popup.history[2], '/old-light-auto-upgrade/drive.html');
+  assert.equal(popup.history[2], '/old-light-helper/drive.html');
   assertNoToken(tab.popup.url); assertNoToken(env.publicMessages);
 });
 
