@@ -121,3 +121,6 @@ test('disappeared queued claim becomes uncertain and never requeues a possibly a
 test('removed manually resolved uncertain objective suppresses future delayed reports from legacy retries',()=>{
  const h=harness();h.add();h.c.tick();h.c.tick();const r=h.report(100,{item:{verdict:'Defeat'}});h.pending[0].status='uncertain';h.c.tick();const o=h.c.list()[0];h.c.acknowledge(o.id);h.c.remove(o.id);h.at+=10000;r.item.takenAt=h.at;assert.equal(h.c.observeReport(r),true);assert.equal(h.c.list().length,0);assert.doesNotThrow(()=>h.add());
 });
+test('terminal managed and removed targets suppress malformed list dates despite a legacy-compatible detail timestamp',()=>{
+ const h=harness();h.add();h.c.tick();h.c.tick();h.send();const r=h.report(100,{item:{verdict:'Defeat'}});r.detail.route.from.name='Origin';r.detail.route.to.name='Target';r.detail.createdAt=r.item.takenAt;r.item.takenAt='invalid';const o=h.c.list()[0];h.c.cancel(o.id);assert.equal(h.c.observeReport(r),true);assert.equal(h.c.list()[0].status,'cancelled');const valid=structuredClone(r);valid.item.takenAt=valid.detail.createdAt;h.c.observeReport(valid);h.c.remove(o.id);assert.equal(h.c.observeReport(r),true);
+});

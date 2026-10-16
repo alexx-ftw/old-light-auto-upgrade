@@ -4300,6 +4300,42 @@
         "Ejercer guardar→encolar→sending→sent→cancelar/cerrar→retirar→reporte tardío y reemplazar cola antes de reconciliación.",
         "Comprobar recuperación legítima, reservas/defensa/propiedad/aliados y que la UI no eluda las guardas."
       ]
+    },
+    {
+      "id": "conquest-terminal-report-parser-fallback",
+      "feedback": "Un destino terminal de conquista devolvía false ante fecha de lista inválida aunque el parser legacy aceptaba fecha de detalle válida y creaba otro reintento. Hallazgo independiente en candidata local no publicada.",
+      "beforeFail": {
+        "revision": "e83024bdfdeda876e21c0ab37543e0fa56896be0",
+        "command": "QA_CONQUEST_CONTROLLER_SOURCE=/workspace/oldlight-transfer/conquest-terminal-before-controller.cjs node --test --test-name-pattern='terminal managed and removed targets' tests/conquest-core.test.cjs",
+        "observedFailure": "false !== true en supresión de reporte terminal; probe independiente con ambos controladores produce legacyAccepted true y una campaña legacy. Sin pedidos reales.",
+        "evidence": "docs/1.17.25-conquest-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/conquest-core.test.cjs",
+          "name": "terminal managed and removed targets suppress malformed list dates despite a legacy-compatible detail timestamp"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Destino cancelled con fecha de lista inválida y detalle válido; después consumir reporte corregido, retirar y repetir reporte malformado.",
+          "expected": "Siempre managed true; conservar terminal y barrera histórica sin pasar reporte a legacy.",
+          "regression": {
+            "file": "tests/conquest-core.test.cjs",
+            "name": "terminal managed and removed targets suppress malformed list dates despite a legacy-compatible detail timestamp"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Reportes reales",
+          "reason": "Formato sintético con controladores productivos; no sesión real."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Ejecutar ambos parsers con la misma ruta y nombres válidos; demostrar que legacy acepta el formato pero no recibe el reporte gestionado.",
+        "Contrastar objetivo activo, terminal, retirado y destino ajeno; datos inválidos no autorizan pedidos ni reabren terminales."
+      ]
     }
   ]
 }

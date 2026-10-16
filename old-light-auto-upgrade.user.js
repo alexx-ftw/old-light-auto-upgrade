@@ -2291,8 +2291,8 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
    const target=get(get(get(value,'detail'),'route'),'to'),s=get(value,'scope');
    const known=s===context()?.scope&&config.objectives.find(o=>o.scope===s&&samePoint(o.target,target));
    if(known){const raw=get(get(value,'item'),'takenAt')??get(get(value,'detail'),'createdAt'),date=typeof raw==='string'?Date.parse(raw):raw;if(Number.isSafeInteger(date)&&date<known.createdAt)return true;}
-   if(known&&!['captured','cancelled'].includes(known.status)){stop(known.id,'paused','Un reporte del objetivo no se puede verificar. Revisión necesaria.');return true;}
-   return false;
+   if(known){if(!['captured','cancelled'].includes(known.status))stop(known.id,'paused','Un reporte del objetivo no se puede verificar. Revisión necesaria.');return true;}
+   return s===context()?.scope&&(config.tombstones||[]).some(t=>t.scope===s&&samePoint(t.target,target));
   }
   if(report.scope!==context()?.scope)return false;
   let o=config.objectives.find(o=>o.scope===report.scope&&samePoint(o.target,report.target));if(!o)return (config.tombstones||[]).some(t=>t.scope===report.scope&&samePoint(t.target,report.target));
