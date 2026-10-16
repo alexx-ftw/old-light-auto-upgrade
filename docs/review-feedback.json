@@ -4861,6 +4861,51 @@
         "Verificar inventario completo, resumen global obligatorio, fallos y limpieza, sin skips/retries/warmup.",
         "No atribuir diferencias de runner/DBus/carga sin medición causal."
       ]
+    },
+    {
+      "id": "overlay-self-mutation-microtask-starvation",
+      "feedback": "El overlay reescribe atributos ya iguales en lightDOM observados globalmente; con ImperioOFF realimenta microtasks sin ceder al cargar, incluso sin rutas/objetivos.",
+      "beforeFail": {
+        "revision": "1f157cb4ab008ea079a97e1f2f98e5ea5141bb52",
+        "command": "QA_REINFORCEMENT_PANEL_SOURCE=/workspace/oldlight-transfer/reinforcement-panel-loop-before.js node --test tests/reinforcement-observer-loop.test.cjs",
+        "observedFailure": "cutoff=true tras2000hiddenmutations/steps; timer yframes0 al corte. ControlidempotenciaDOM elimina cadena con mismoobserver/scheduler.",
+        "evidence": "docs/1.17.28-observer-loop-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-observer-loop.test.cjs",
+          "name": "production document observer and scheduler keep timers and frames alive without interaction for empty routes invalid camera and visible route markers"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Carga sininteracción,ceroobjetivos/rutas,ImperioOFF,cámara inválida",
+          "expected": "No corte; temporizador yframes avanzan sin ciclohidden.",
+          "regression": {
+            "file": "tests/reinforcement-observer-loop.test.cjs",
+            "name": "production document observer and scheduler keep timers and frames alive without interaction for empty routes invalid camera and visible route markers"
+          }
+        },
+        {
+          "scenario": "Ruta visible,coordenadas fraccionarias,cámara válida/invalidada eImperioON",
+          "expected": "Sin cicloaria/title/style; sigue respondiendo a mutación nativa nueva.",
+          "regression": {
+            "file": "tests/reinforcement-observer-loop.test.cjs",
+            "name": "production document observer and scheduler keep timers and frames alive without interaction for empty routes invalid camera and visible route markers"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Sesión real instalada",
+          "reason": "No partida ni cuenta reales; fixture ejecuta solo entrada de step antes de pasos de juego. Eros aún debe confirmar versióncorregida."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Contrastar cero timer/rAF ANTES del corte, no después. RevisarcontrolDOM yextracción exacta deobserver/scheduler.",
+        "Revisar idempotencia de todos los atributoslightDOM, floats ycallbacks; preservar autoridad fresca yobservación de cambios nativos.",
+        "No atribuir aConquista: blobpanelidéntico.24/.27."
+      ]
     }
   ]
 }

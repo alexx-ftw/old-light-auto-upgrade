@@ -97,8 +97,10 @@
     const svg = tag => document.createElementNS(SVG, tag);
     const attr = (node, key, value) => { const s = String(value); if (node.getAttribute(key) !== s) node.setAttribute(key, s); };
     const write = (node, value) => { if (node && node.textContent !== value) node.textContent = value; };
+    const setHidden = (node, value) => { if (node && node.hidden !== value) node.hidden = value; };
+    const setDisabled = (node, value) => { if (node.disabled !== value) node.disabled = value; };
     // SVGElement.hidden is not a reliable reflected property in browsers.
-    const hideSVG = (node, hidden, reason = 'initial') => { if (node === overlay) recordVisual(hidden, reason); node.hidden = hidden; node.style.display = hidden ? 'none' : ''; };
+    const hideSVG = (node, hidden, reason = 'initial') => { if (node === overlay) recordVisual(hidden, reason); setHidden(node, hidden); const display = hidden ? 'none' : ''; if (node.style.display !== display) node.style.display = display; };
     const call = (name, ...args) => { if (typeof options[name] !== 'function') throw new Error('El guardado de rutas no está disponible.'); return options[name](...args); };
     const listen = (target, name, callback, capture = false) => {
       if (!target?.addEventListener) return;
@@ -141,7 +143,7 @@
       lastPaint = null; visualGapAt = null;
       anchors.clear(); hoverSample = null; pointerSample = null; overlaySignature = '';
       if (overlay) { countVisual('svgClearRequests'); if (overlay.children?.length) countVisual('svgClears'); overlay.replaceChildren(); hideSVG(overlay, true, reason); }
-      if (markers) { markers.hidden = true; markers.replaceChildren(); markerNodes.clear(); }
+      if (markers) { setHidden(markers, true); markers.replaceChildren(); markerNodes.clear(); }
     }
     function cancelGesture() {
       const previous = gesture; gesture = null;
@@ -257,14 +259,14 @@
       const unavailable = (!current() && !gesture) ? 'scope-unavailable' : blocked() ? 'ui-blocked'
         : !rect || rect.width <= 0 || rect.height <= 0 || canvas.hidden ? 'viewport-unavailable'
           : !placeOverlay(canvas) ? 'placement-unavailable' : '';
-      if (unavailable) { hideSVG(overlay, true, unavailable); if (markers) markers.hidden = true; return; }
+      if (unavailable) { hideSVG(overlay, true, unavailable); if (markers) setHidden(markers, true); return; }
       const at = now();
       if (!mapCache || mapCache.scope !== scope || at < mapCache.at || at - mapCache.at >= 500) {
         const items = routes();
         mapCache = { scope, at, items, rows: (gesture || items.length) ? systems() : [] };
       }
       const { rows, items } = mapCache;
-      if (!gesture && !items.length) { hideSVG(overlay, true, 'no-routes'); if (markers) markers.hidden = true; return; }
+      if (!gesture && !items.length) { hideSVG(overlay, true, 'no-routes'); if (markers) setHidden(markers, true); return; }
       sampleHover(rows);
       const byId = new Map(rows.map(s => [s.id, s]));
       const segments = items.map(route => {
@@ -317,7 +319,7 @@
       const geometry = items.map(route => ({ route, from: projected(byId.get(route.originId), rect), to: projected(byId.get(route.destinationId), rect) }))
         .filter(segment => pointValid(segment.from) && pointValid(segment.to));
       if (JSON.stringify(geometry.map(segment => [segment.route.id, segment.from, segment.to])) !== lastPaint.geometry) return deny();
-      for (const node of markerNodes.values()) node.disabled = true;
+      for (const node of markerNodes.values()) setDisabled(node, true);
       attr(overlay, 'data-census-pending', 'true');
       return true;
     }
@@ -353,7 +355,7 @@
             const route = routes().find(item => item.id === id), rows = systems(), rect = stage()?.getBoundingClientRect?.();
             if (!route || !rect || !pointValid(projected(rows.find(row => row.id === route.originId), rect))
               || !pointValid(projected(rows.find(row => row.id === route.destinationId), rect))) {
-              node.disabled = true; mapCache = null; drawOverlay(); return;
+              setDisabled(node, true); mapCache = null; drawOverlay(); return;
             }
             openRoute(id);
           });
@@ -362,13 +364,15 @@
           markers.append(node); markerNodes.set(id, node);
         }
         const name = clean(segment.route.name) || `Ruta ${index + 1}`;
-        node.setAttribute('aria-label', `Abrir resumen y configuración: ${name}`);
-        node.title = `Abrir resumen y configuración: ${name}. No envía naves.`;
-        node.disabled = segment.verified === false;
-        node.style.left = `${x}px`; node.style.top = `${y}px`;
+        attr(node, 'aria-label', `Abrir resumen y configuración: ${name}`);
+        const title = `Abrir resumen y configuración: ${name}. No envía naves.`;
+        if (node.title !== title) node.title = title;
+        setDisabled(node, segment.verified === false);
+        if (node.style.left !== `${x}px`) node.style.left = `${x}px`;
+        if (node.style.top !== `${y}px`) node.style.top = `${y}px`;
       }
       for (const [id, node] of markerNodes) if (!keep.has(id)) { node.remove(); markerNodes.delete(id); }
-      markers.hidden = keep.size === 0;
+      setHidden(markers, keep.size === 0);
     }
     function showEditor(originId, destinationId, route = null, unresolved = false) {
       observeScope(getScope()); if (!current() || busy) return;
@@ -447,7 +451,7 @@
     }
     function updateDisabled() {
       if (!root) return;
-      for (const node of root.querySelectorAll?.('button, input, select') || []) { if (node.dataset.localDiagnostic !== 'true') node.disabled = busy || node.dataset.routeBlocked === 'true'; }
+      for (const node of root.querySelectorAll?.('button, input, select') || []) { if (node.dataset.localDiagnostic !== 'true') setDisabled(node, busy || node.dataset.routeBlocked === 'true'); }
     }
     function render() {
       if (!root || destroyed) return;
@@ -757,7 +761,7 @@
       (document.body || container).append(gestureNotice);
       markers = el('div'); markers.setAttribute('aria-label', 'Accesos a rutas de refuerzo'); markers.setAttribute('role', 'group');
       options.onControlRoot?.(markers);
-      markers.className = 'oldlight-route-markers'; markers.hidden = true;
+      markers.className = 'oldlight-route-markers'; setHidden(markers, true);
       Object.assign(markers.style, { position: 'fixed', inset: '0', pointerEvents: 'none', zIndex: '0' });
       overlay = svg('svg'); overlay.classList?.add('oldlight-route-overlay'); attr(overlay, 'aria-hidden', 'true');
       // The panel may live in Helper's ShadowRoot, but the arrow belongs beside
