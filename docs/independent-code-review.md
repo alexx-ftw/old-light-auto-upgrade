@@ -190,3 +190,7 @@ Un render estable no es inocuo si escribe atributos observados aunque el valor c
 ## Refutar un hueco de diagnóstico antes de añadir infraestructura
 
 El experimento de transporte stderr sobre b0ed476 refutó que agrupación/fragmentación de escrituras pierda resúmenes en el CLI real de Node24: ya retiene tres líneas válidas. Una llamada directa a un parser con dosJSON concatenados no representa por sí sola ese transporte. Se retiró buffering innecesario y se añadió cobertura de integración de mensajes válidos, oversize, incompletos y campos privados sintéticos. Exigir evidencia del límite real antes de programar una corrección y no inventar beforeFail para un test que ya pasa. Ver [contrato probado](browser-summary-transport-validation.md).
+
+## Política y valor inicial de métricas locales
+
+Que el panel y el adaptador coincidan no garantiza que la política publicada diga lo mismo. Contrastar las tres superficies con elección ausente y elecciones explícitas true/false, y exigir que renderizar no escriba consentimiento. La [regresión](privacy-metrics-default-validation.md) falla con la frase anterior; corregir transparencia no resuelve por sí mismo la aclaración pendiente sobre el valor inicial ni autoriza cambiar recogida de datos.

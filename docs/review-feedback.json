@@ -4922,6 +4922,51 @@
         "Revisar idempotencia de todos los atributoslightDOM, floats ycallbacks; preservar autoridad fresca yobservación de cambios nativos.",
         "No atribuir aConquista: blobpanelidéntico.24/.27."
       ]
+    },
+    {
+      "id": "privacy-local-metrics-default-consistency",
+      "feedback": "La política describe métricas desactivadas inicialmente pero adaptador y panel activan cuando falta elección guardada.",
+      "beforeFail": {
+        "revision": "997a641b84b3d197cc17f322512e38a3f8de0dad",
+        "command": "node --test --test-name-pattern='Privacy policy and rendered metrics panel' tests/metrics-integration.test.cjs",
+        "observedFailure": "El caso nuevo falla al exigir que la política describa activación por defecto sin elección guardada.",
+        "evidence": "docs/privacy-metrics-default-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/metrics-integration.test.cjs",
+          "name": "Privacy policy and rendered metrics panel agree with adapter defaults and saved choices"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "No existe elección guardada",
+          "expected": "Política y panel describen activación, checkbox y adaptador activos sin crear consentimiento.",
+          "regression": {
+            "file": "tests/metrics-integration.test.cjs",
+            "name": "Privacy policy and rendered metrics panel agree with adapter defaults and saved choices"
+          }
+        },
+        {
+          "scenario": "Elección explícita false o true",
+          "expected": "Checkbox y adaptador respetan el valor sin modificar el registro guardado.",
+          "regression": {
+            "file": "tests/metrics-integration.test.cjs",
+            "name": "Privacy policy and rendered metrics panel agree with adapter defaults and saved choices"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Publicación y sesión real",
+          "reason": "Solo preparación local; CI remoto bloqueado y aclaración del valor inicial pendiente. No se usa la partida real."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Verificar que el test falla con la política anterior y usa adaptador y panel reales.",
+        "Confirmar ausencia de cambios en userscript, telemetría y elecciones previas.",
+        "No presentar preparación local como publicación o validación remota."
+      ]
     }
   ]
 }

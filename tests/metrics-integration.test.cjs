@@ -275,3 +275,25 @@ test('Imperial consent text describes fixed local startup categories and report 
   h.action('metrics-toggle').fire('change');
   assert.deepEqual(JSON.parse(h.nodes.find(node => node.id === 'oldlight-metrics-report').value).days, []);
 });
+
+
+test('Privacy policy and rendered metrics panel agree with adapter defaults and saved choices', () => {
+  const privacy = fs.readFileSync(path.join(__dirname, '..', 'docs/privacy.html'), 'utf8');
+  const section = privacy.match(/<section aria-labelledby="metrics-heading">([\s\S]*?)<\/section>/)?.[1];
+  assert.ok(section, 'local metrics policy section exists');
+  assert.match(section, /activad[ao]s? por defecto si no hay una elección guardada/i);
+  assert.match(section, /Respeta cualquier desactivación anterior/i);
+  assert.doesNotMatch(section, /desactivad[ao]s? inicialmente|desactivad[ao]s? por defecto/i);
+  for (const enabled of [undefined, false, true]) {
+    const raw = enabled === undefined ? undefined : JSON.stringify({ enabled, generation: '00000000-0000-4000-8000-000000000002' });
+    const storage = new Map(raw === undefined ? [] : [[consentKey, raw]]);
+    const h = panelHarness({ storage });
+    const expected = enabled !== false;
+    assert.equal(h.metrics.isEnabled(), expected, 'adapter respects absent and explicit choices');
+    assert.equal(h.action('metrics-toggle').checked, expected, 'rendered checkbox agrees with adapter');
+    const text = h.nodes.map(node => node.textContent).join(' ');
+    assert.match(text, /Activado por defecto si no hay una elección guardada/);
+    assert.match(text, /Respeta cualquier desactivación anterior/);
+    assert.equal(storage.get(consentKey), raw, 'render does not initialize or rewrite consent');
+  }
+});
