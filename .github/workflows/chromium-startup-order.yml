@@ -18,8 +18,8 @@ jobs:
           node-version: '24'
       - name: Verify exact baseline suite and production sources
         run: |
-          git diff --exit-code 1f157cb4ab008ea079a97e1f2f98e5ea5141bb52 HEAD -- tests/ old-light-auto-upgrade.user.js old-light-auto-upgrade.meta.js docs/conquest-core.js docs/conquest-controller.js docs/conquest-panel.js validate-release.cjs
-          test "$(git ls-files '*.test.cjs' | wc -l)" -eq 112
+          git diff --exit-code 997a641b84b3d197cc17f322512e38a3f8de0dad HEAD -- tests/ old-light-auto-upgrade.user.js old-light-auto-upgrade.meta.js docs/conquest-core.js docs/conquest-controller.js docs/conquest-panel.js validate-release.cjs
+          test "$(git ls-files '*.test.cjs' | wc -l)" -eq 113
           stat -Lc 'LAUNCHER_BYTES=%s' /usr/bin/chromium
           getconf CLK_TCK
           node --version
