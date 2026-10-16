@@ -4122,6 +4122,50 @@
         "Audit exact public source transformation and every asset hash; unknown requests or missing cache must fail, with no account/network/authenticated boot. Distinguish actual two-world camera pipe from synthetic census adapter.",
         "Probe authoritative expiry and click-before-redraw against immutable base, verify reentrancy/lifecycle, unchangedTTL/stamp/scope guards, zero orders and positive fresh recovery. Do not use early fixture failures as product bugs or claim Eros incident fixed."
       ]
+    },
+    {
+      "id": "ship-credit-protection-layout",
+      "feedback": "La etiqueta larga de protección ocupa la misma fila grid que nombre, cantidad y controles de Probe.",
+      "beforeFail": {
+        "revision": "547b37047baf5d25cab9ed39dd54981edf48b69d",
+        "command": "QA_PROBE_LAYOUT_SOURCE=/workspace/oldlight-transfer/credit-layout-baseline-23.user.js node --test tests/ship-credit-layout.test.cjs",
+        "observedFailure": "El mismo harness final falla por overlap y protection not separate con CSS/constructor23 en ShadowRoot real.",
+        "evidence": "docs/1.17.24-credit-layout-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/ship-credit-layout.test.cjs",
+          "name": "ship credit protection has its own responsive row without overlapping fleet controls in real Chromium"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Tarjetas320/375/665/1000px con cantidad60 y cuatro tipos",
+          "expected": "Nombre, cantidad, drag, botones, estado y protección no se superponen; ayuda envuelve sin overflow.",
+          "regression": {
+            "file": "tests/ship-credit-layout.test.cjs",
+            "name": "ship credit protection has its own responsive row without overlapping fleet controls in real Chromium"
+          }
+        },
+        {
+          "scenario": "Cambiar protección de Probe",
+          "expected": "Persiste una vez y conserva protección de otros tipos.",
+          "regression": {
+            "file": "tests/ship-credit-layout.test.cjs",
+            "name": "ship credit protection has its own responsive row without overlapping fleet controls in real Chromium"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Instalación real de Eros y otros navegadores",
+          "reason": "Validación offline Chromium; no se accede a la partida ni se recuperó imagen Slack original."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Revisar especificidad CSS, fila de autoguardado y separación responsive real.",
+        "Derivar un caso propio de ayuda larga, reordenado o zoom y comprobar toggle legítimo/rollback."
+      ]
     }
   ]
 }

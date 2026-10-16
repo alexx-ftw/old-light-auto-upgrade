@@ -142,3 +142,7 @@ El probe independiente1.17.22 añade ambos órdenes con jitter20/320ms y recuper
 ## Lección1.17.23: geometría alineada no es autoridad vigente
 
 La escena pública nativa con mundos aislados y GPU detectó marcador visible/activo tras caducidad de cámara entre callbacks; la referencia rápida previa no cruzaba ese límite. El control autoritativo negaba datos, pero no notificaba su pérdida y el clic confiaba en disabled pintado. [Reproducción](1.17.23-native-galaxy-validation.md):0notificaciones donde se esperaba1 y apertura extra con cámara ya inválida. El revisor debe probar reloj/framelargo, paquetes reordenados, activación sin repintado y recuperación, sin ampliar1500ms. Cuestionar centroides raster frente a anillos/oclusiones y no atribuir fallos del fixture al producto. Contrastar transformación exacta de assets y ausencia de red; el mundo sintético compatible no equivale a cuenta ni partida reales.
+
+## Tarjetas de flota y protección de créditos1.17.24
+
+La hipótesis de que gridColumn1/-1 crea una fila nueva falló: grid-row1 heredado de label permite solapamiento. Revisar geometría de todos los controles con CSS y ShadowRoot reales, cardinalidad, ayuda larga y fila de estado, más allá de comprobar texto o lógica de créditos. Ver docs/1.17.24-credit-layout-validation.md; la confirmación instalada sigue pendiente.

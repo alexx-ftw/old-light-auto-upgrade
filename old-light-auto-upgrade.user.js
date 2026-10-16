@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.23
+// @version      1.17.24
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -5716,7 +5716,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.23';
+  const SCRIPT_VERSION = '1.17.24';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -6827,11 +6827,17 @@ return Object.freeze({ encode });
 
   function installShipCreditToggle(container, id, name) {
     const label = document.createElement('label');
-    label.style.gridColumn = '1 / -1';
+    const protection = document.createElement('div');
+    protection.className = 'ship-credit-protection';
+    const help = document.createElement('small');
+    help.className = 'ship-credit-help';
+    help.id = `ship-credit-help-${id}`;
+    help.textContent = `Producción automática de ${name} en este navegador. Incluye colas; sin datos actuales, espera.`;
     const input = document.createElement('input'); input.type = 'checkbox';
     input.dataset.creditProtection = id;
+    input.setAttribute('aria-describedby', help.id);
     input.checked = settings.creditProtection[id];
-    label.append(input, document.createTextNode(` Proteger créditos al producir ${name} automáticamente en este navegador (incluye colas; sin datos, espera)`));
+    label.append(input, document.createTextNode(' Proteger créditos'));
     input.addEventListener('change', () => {
       const previous = settings;
       settings = normalizeSettings({ ...settings, creditProtection: { ...settings.creditProtection, [id]: input.checked } });
@@ -6841,7 +6847,8 @@ return Object.freeze({ encode });
       }
       schedule();
     });
-    container.append(label); return input;
+    protection.append(label, help);
+    container.append(protection); return input;
   }
 
   function projectShipCredits(world, scope, originId, type, quantity, now = Date.now()) {
@@ -7380,6 +7387,10 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.24', title: 'Protección de créditos legible en las tarjetas de flota', changes: [
+        'Proteger créditos ocupa una fila propia; la ayuda se muestra aparte y envuelve en paneles estrechos.',
+        'Nombre, arrastre, cantidad y botones conservan su espacio. El ajuste y sus guardas de producción no cambian.',
+      ] },
       { version: '1.17.23', title: 'Escena nativa offline y marcadores con cámara vigente', changes: [
         'La cámara caducada o revocada actualiza de inmediato el estado de los marcadores; cada clic comprueba de nuevo sus dos extremos.',
         'La batería usa la rejilla GPU, cámara, controlador y ticker nativos en un mundo sintético, con el Helper aislado y MessagePort real.',
@@ -7805,6 +7816,14 @@ return Object.freeze({ encode });
           .fleet-row > input { grid-column:4; grid-row:1; width:70px; min-width:0; min-height:34px; padding:5px 7px;
             border:1px solid var(--ol-border-strong); border-radius:6px; background:var(--ol-bg); color:var(--ol-text); font-variant-numeric:tabular-nums; }
           .fleet-row > .priority-actions { grid-column:4; grid-row:2; justify-content:flex-end; }
+          .fleet-row > .numeric-autosave { grid-row:3; }
+          .ship-credit-protection { grid-column:1 / -1; grid-row:4; min-width:0; padding-top:7px;
+            border-top:1px solid var(--ol-border); display:grid; gap:4px; }
+          .ship-credit-protection > label { display:flex; align-items:center; gap:6px; min-width:0;
+            font-size:12px; font-weight:500; }
+          .ship-credit-protection input { flex:0 0 auto; margin:0; }
+          .ship-credit-help { display:block; min-width:0; overflow-wrap:anywhere; font-size:11px;
+            line-height:1.45; color:var(--ol-muted); }
           .fleet-counts { grid-column:2 / 4; grid-row:2; display:flex; gap:6px; flex-wrap:wrap; font-size:11px; color:var(--ol-muted); }
           .fleet-stat { display:inline-flex; align-items:baseline; gap:3px; }
           .fleet-stat b { color:var(--ol-text); font-weight:600; font-variant-numeric:tabular-nums; }

@@ -34,7 +34,7 @@ test('production boundary blocks clicks with projected negative credits and perm
 test('credit toggles default protected, persist real changes and restore the prior choice on quota failure',()=>{
  let raw=null,fail=false;const nodes=[];
  const ctx=vm.createContext({localStorage:{getItem:()=>raw,setItem:(_key,value)=>{if(fail)throw Error('quota');raw=value;}},
-  document:{createElement:()=>{const n={style:{},dataset:{},append(){},addEventListener(_e,f){this.change=f;}};nodes.push(n);return n;},createTextNode:x=>x},schedule(){},presentationFailure(){}});
+  document:{createElement:()=>{const n={style:{},dataset:{},append(){},setAttribute(){},addEventListener(_e,f){this.change=f;}};nodes.push(n);return n;},createTextNode:x=>x},schedule(){},presentationFailure(){}});
  const constants=source.slice(source.indexOf('  const KEY ='),source.indexOf('  const upgradeEta ='));
  const helpers=source.slice(source.indexOf('  function normalizeOrder('),source.indexOf('  function text(node)'));
  const a=source.indexOf('  function installShipCreditToggle('),b=source.indexOf('  function projectShipCredits(',a);
