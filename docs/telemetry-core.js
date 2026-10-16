@@ -63,7 +63,7 @@
     const now = typeof options.now === 'function' ? options.now : Date.now;
     const later = typeof options.setTimeout === 'function' ? options.setTimeout : setTimeout;
     const cancel = typeof options.clearTimeout === 'function' ? options.clearTimeout : clearTimeout;
-    let counts = {}, buckets = {}, generation = null, timer = null, active = null, destroyed = false;
+    let counts = {}, buckets = {}, generation = null, timer = null, active = null, destroyed = false, suspended = false;
     let state = 'unconfigured', forcedOff = false, purging = false, requests = [], lastAttempt = -Infinity;
     let accepted = 0, dropped = 0, listener = null;
     const configured = () => !!target && typeof options.transport === 'function'
@@ -98,9 +98,9 @@
     }
     function permission() {
       if (purging) return null;
-      if (destroyed || forcedOff || !configured()) {
+      if (destroyed || suspended || forcedOff || !configured()) {
         purge(); generation = null;
-        if (!forcedOff) state = destroyed ? 'disabled' : 'unconfigured';
+        if (!forcedOff) state = destroyed || suspended ? 'disabled' : 'unconfigured';
         return null;
       }
       try {
@@ -133,7 +133,7 @@
     }
     function snapshot() { permission(); return payload(); }
     function setEnabled(enabled) {
-      if (typeof enabled !== 'boolean' || destroyed || purging) return false;
+      if (typeof enabled !== 'boolean' || destroyed || suspended || purging) return false;
       // Revocation takes effect locally before attempting any persistence.
       forcedOff = true; generation = null; state = 'disabled'; purge();
       if (!configured()) { state = 'unconfigured'; changed(); return false; }
@@ -219,6 +219,8 @@
     return Object.freeze({ record, duration, snapshot, setEnabled, flush, getStatus,
       isEnabled: () => !!permission(), sync() { permission(); changed(); },
       onChange(callback) { listener = typeof callback === 'function' ? callback : null; },
+      suspend() { suspended = true; purge(); generation = null; state = 'disabled'; changed(); },
+      resume() { if (!destroyed && !purging) { suspended = false; permission(); changed(); } },
       destroy() { destroyed = true; purge(); generation = null; state = 'disabled'; changed(); },
     });
   }

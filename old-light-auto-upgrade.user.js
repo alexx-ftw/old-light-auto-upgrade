@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.8
+// @version      1.17.10
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -16,6 +16,7 @@
 // @grant        GM.setValue
 // @grant        GM_openInTab
 // @grant        GM_addElement
+// @connect      eu.i.posthog.com
 // @connect      api.telegram.org
 // @connect      raw.githubusercontent.com
 // @noframes
@@ -4270,7 +4271,7 @@ return Object.freeze({create});
     const now = typeof options.now === 'function' ? options.now : Date.now;
     const later = typeof options.setTimeout === 'function' ? options.setTimeout : setTimeout;
     const cancel = typeof options.clearTimeout === 'function' ? options.clearTimeout : clearTimeout;
-    let counts = {}, buckets = {}, generation = null, timer = null, active = null, destroyed = false;
+    let counts = {}, buckets = {}, generation = null, timer = null, active = null, destroyed = false, suspended = false;
     let state = 'unconfigured', forcedOff = false, purging = false, requests = [], lastAttempt = -Infinity;
     let accepted = 0, dropped = 0, listener = null;
     const configured = () => !!target && typeof options.transport === 'function'
@@ -4305,9 +4306,9 @@ return Object.freeze({create});
     }
     function permission() {
       if (purging) return null;
-      if (destroyed || forcedOff || !configured()) {
+      if (destroyed || suspended || forcedOff || !configured()) {
         purge(); generation = null;
-        if (!forcedOff) state = destroyed ? 'disabled' : 'unconfigured';
+        if (!forcedOff) state = destroyed || suspended ? 'disabled' : 'unconfigured';
         return null;
       }
       try {
@@ -4340,7 +4341,7 @@ return Object.freeze({create});
     }
     function snapshot() { permission(); return payload(); }
     function setEnabled(enabled) {
-      if (typeof enabled !== 'boolean' || destroyed || purging) return false;
+      if (typeof enabled !== 'boolean' || destroyed || suspended || purging) return false;
       // Revocation takes effect locally before attempting any persistence.
       forcedOff = true; generation = null; state = 'disabled'; purge();
       if (!configured()) { state = 'unconfigured'; changed(); return false; }
@@ -4426,12 +4427,161 @@ return Object.freeze({create});
     return Object.freeze({ record, duration, snapshot, setEnabled, flush, getStatus,
       isEnabled: () => !!permission(), sync() { permission(); changed(); },
       onChange(callback) { listener = typeof callback === 'function' ? callback : null; },
+      suspend() { suspended = true; purge(); generation = null; state = 'disabled'; changed(); },
+      resume() { if (!destroyed && !purging) { suspended = false; permission(); changed(); } },
       destroy() { destroyed = true; purge(); generation = null; state = 'disabled'; changed(); },
     });
   }
   return Object.freeze({ create, EVENTS, BUCKETS, SCHEMA, POLICY, INTERVAL, TIMEOUT, WATCH, MAX_REQUESTS, MAX_COUNT, MAX_BYTES });
 });
 // END EMBEDDED TELEMETRY CORE
+
+// BEGIN EMBEDDED POSTHOG PAYLOAD
+/* Pure allowlisted aggregate encoder; no storage or network. */
+(function (root, factory) {
+  'use strict';
+  const api = factory(typeof module === 'object' && module && module.exports
+    ? require('./telemetry-core.js') : root.OldLightTelemetryCore);
+  if (typeof module === 'object' && module && module.exports) module.exports = api;
+  if (root) Object.defineProperty(root, 'OldLightTelemetryPostHogPayload', { configurable: true, value: api });
+})(typeof globalThis === 'object' ? globalThis : this, function (core) {
+'use strict';
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function fields(value, allowed) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || ![null, Object.prototype].includes(Object.getPrototypeOf(value))) throw new TypeError('Invalid aggregate');
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  for (const key of Reflect.ownKeys(descriptors)) {
+    if (typeof key !== 'string' || !allowed.includes(key) || !Object.hasOwn(descriptors[key], 'value')) throw new TypeError('Invalid aggregate');
+  }
+  return Object.fromEntries(Object.entries(descriptors).map(([key, descriptor]) => [key, descriptor.value]));
+}
+function counters(value, allowed) {
+  const data = fields(value, allowed), clean = {};
+  for (const key of allowed) {
+    if (!Object.hasOwn(data, key)) continue;
+    const count = data[key];
+    if (!Number.isSafeInteger(count) || count < 0 || count > core.MAX_COUNT) throw new TypeError('Invalid counter');
+    if (count) clean[key] = count;
+  }
+  return clean;
+}
+function encode(report, randomUUID) {
+  const data = fields(report, ['schema', 'helper_version', 'counts', 'duration_buckets']);
+  if (data.schema !== core.SCHEMA || typeof data.helper_version !== 'string'
+    || !/^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(data.helper_version)) throw new TypeError('Invalid schema or version');
+  const durations = fields(data.duration_buckets, ['helper_step']);
+  const counts = counters(data.counts, core.EVENTS);
+  const buckets = counters(durations.helper_step, core.BUCKETS);
+  if (!Object.keys(counts).length && !Object.keys(buckets).length) throw new TypeError('Empty aggregate');
+  const id = randomUUID();
+  if (typeof id !== 'string' || !UUID.test(id) || id === '00000000-0000-4000-8000-000000000000') throw new TypeError('Invalid random identifier');
+  // One fresh anonymous identifier per batch; never read an account/install ID.
+  const event = { event: 'oldlight_helper.aggregate', distinct_id: id, properties: {
+    $process_person_profile: false, $geoip_disable: true, $ip: '0.0.0.0',
+    schema: data.schema, helper_version: data.helper_version, counts,
+    duration_buckets: { helper_step: buckets },
+  } };
+  const json = JSON.stringify(event);
+  if (json.length > core.MAX_BYTES) throw new TypeError('Oversized aggregate');
+  return json;
+}
+return Object.freeze({ encode });
+});
+// END EMBEDDED POSTHOG PAYLOAD
+
+// BEGIN EMBEDDED POSTHOG TRANSPORT
+/* Explicit single-request transport. The core owns consent and rate limits. */
+(function (root, factory) {
+  'use strict';
+  const commonJS = typeof module === 'object' && module && module.exports;
+  const api = factory(commonJS ? require('./telemetry-core.js') : root.OldLightTelemetryCore,
+    commonJS ? require('./telemetry-posthog-payload.js') : root.OldLightTelemetryPostHogPayload);
+  if (commonJS) module.exports = api;
+  if (root) Object.defineProperty(root, 'OldLightTelemetryPostHogTransport', { configurable: true, value: api });
+})(typeof globalThis === 'object' ? globalThis : this, function (core, payload) {
+  'use strict';
+  const ENDPOINT = 'https://eu.i.posthog.com/i/v0/e/';
+  const MAX_RESPONSE_BYTES = 4096;
+  const rejected = () => ({ accepted: false });
+  function create(options = {}) {
+    // These are trusted construction dependencies, never UI/storage/report data.
+    const { projectToken, request, randomUUID } = options;
+    if (typeof projectToken !== 'string' || !/^phc_[A-Za-z0-9_-]{16,200}$/.test(projectToken)
+      || typeof request !== 'function' || typeof randomUUID !== 'function') throw new TypeError('Invalid transport configuration');
+    if (options.synthetic !== undefined && typeof options.synthetic !== 'boolean') throw new TypeError('Invalid synthetic option');
+    const synthetic = options.synthetic === true;
+    const later = options.setTimeout || setTimeout, cancel = options.clearTimeout || clearTimeout;
+    let active = false;
+    return function transport(report, context = {}) {
+      if (active) return Promise.resolve(rejected());
+      let data, signal;
+      try {
+        signal = context.signal;
+        if (!signal || typeof signal.addEventListener !== 'function'
+          || typeof signal.removeEventListener !== 'function' || signal.aborted) return Promise.resolve(rejected());
+        const event = JSON.parse(payload.encode(report, randomUUID));
+        if (synthetic) event.properties.synthetic = true;
+        data = JSON.stringify({ api_key: projectToken, ...event });
+        if (data.length > core.MAX_BYTES) return Promise.resolve(rejected());
+      } catch (_) { return Promise.resolve(rejected()); }
+      active = true;
+      return new Promise(resolve => {
+        let settled = false, handle = null, timer = null, abortPending = false;
+        function finish(accepted) {
+          if (settled) return;
+          settled = true; active = false;
+          try { if (timer !== null) cancel(timer); } catch (_) { /* No data retained. */ }
+          try { signal.removeEventListener('abort', abort); } catch (_) { /* Settlement remains fail-closed. */ }
+          resolve({ accepted: accepted === true });
+        }
+        function abort() {
+          if (settled) return;
+          abortPending = true;
+          finish(false);
+          try { handle?.abort(); } catch (_) { /* Revocation still settles locally. */ }
+        }
+        function onload(response) {
+          try {
+            if (signal.aborted || !response || response.finalUrl !== ENDPOINT
+              || response.status < 200 || response.status >= 300 || !Number.isInteger(response.status)
+              || typeof response.responseText !== 'string' || response.responseText.length > MAX_RESPONSE_BYTES) return finish(false);
+            const body = JSON.parse(response.responseText);
+            // Capture can return HTTP 200 while quota-limited; never call that accepted.
+            // EU capture returns 'Ok'; legacy capture responses use numeric 1.
+            finish(!!body && !Array.isArray(body) && (body.status === 'Ok' || body.status === 1)
+              && (!Object.hasOwn(body, 'quota_limited') || (Array.isArray(body.quota_limited) && body.quota_limited.length === 0))
+              && !Object.hasOwn(body, 'error'));
+          } catch (_) { finish(false); }
+        }
+        try {
+          signal.addEventListener('abort', abort, { once: true });
+          if (signal.aborted || settled) return abort();
+          timer = later(abort, core.TIMEOUT);
+          if (signal.aborted || settled) return abort();
+          handle = request({
+            method: 'POST', url: ENDPOINT, data, anonymous: true, withCredentials: false,
+            // Empty privileged headers prevent sending the page's origin/referrer.
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json', Referer: '', Origin: '' },
+            responseType: 'text', timeout: core.TIMEOUT,
+            // Supported managers may block redirects. VM documents finalUrl only:
+            // its final URL is checked below; this is not a redirect-prevention guarantee.
+            redirect: 'error',
+            onload, onerror: () => finish(false), ontimeout: abort, onabort: () => finish(false),
+            onreadystatechange(response) {
+              if (response && ((response.status >= 300 && response.status < 400)
+                || (response.finalUrl && response.finalUrl !== ENDPOINT))) abort();
+            },
+          });
+          if (abortPending) { try { handle?.abort(); } catch (_) { /* Already settled. */ } }
+          else if (!handle || typeof handle.abort !== 'function') finish(false);
+        } catch (_) { abort(); }
+      });
+    };
+  }
+  return Object.freeze({ create, ENDPOINT });
+});
+// END EMBEDDED POSTHOG TRANSPORT
 
 // BEGIN EMBEDDED SYNC CORE
 (function (root, factory) {
@@ -5190,7 +5340,7 @@ return Object.freeze({create});
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.8';
+  const SCRIPT_VERSION = '1.17.10';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -5570,11 +5720,29 @@ return Object.freeze({create});
 
   // BEGIN REMOTE TELEMETRY INTEGRATION
   function createTelemetry() {
-    // Deliberately inert: no project, provider, token, consent store or transport
-    // has been verified/configured. Public installation never grants consent.
-    return globalThis.OldLightTelemetryCore.create({ version: SCRIPT_VERSION,
-      destination: null, transport: null,
-    });
+    const base = { version: SCRIPT_VERSION, destination: null, transport: null };
+    // Explicitly authorized permanent collection for this sole-owner build.
+    // Prior local/private choices are left untouched but do not control it.
+    // A future multiuser distribution must restore individual enrollment.
+    if (typeof GM_xmlhttpRequest !== 'function') return globalThis.OldLightTelemetryCore.create(base);
+    try {
+      const remote = globalThis.OldLightTelemetryCore.create({ version: SCRIPT_VERSION,
+        destination: { verified: true, id: 'posthog-eu-oldlight' },
+        transport: globalThis.OldLightTelemetryPostHogTransport.create({
+          projectToken: 'phc_ABai5ejEboc3RG5rnere35kppWJv5zFLuQxrjtuLJGdM',
+          request: GM_xmlhttpRequest, randomUUID: () => crypto.randomUUID(),
+        }),
+        AbortController, randomUUID: () => crypto.randomUUID(),
+        readConsent: () => ({ schema: 1, policy: 1, destinationId: 'posthog-eu-oldlight',
+          enabled: true, generation: '00000000-0000-4000-8000-000000000001' }),
+        writeConsent: () => false,
+      });
+      window.addEventListener('pagehide', event => {
+        if (event.persisted) remote.suspend(); else remote.destroy();
+      });
+      window.addEventListener('pageshow', event => { if (event.persisted) remote.resume(); });
+      return remote;
+    } catch (_) { return globalThis.OldLightTelemetryCore.create(base); }
   }
 
   function installTelemetryPanel(shadow, remote) {
@@ -5589,30 +5757,24 @@ return Object.freeze({create});
     box.setAttribute('aria-labelledby', heading.id);
     const status = el('p', '', 'backup-status'); status.dataset.field = 'telemetry-status';
     status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
-    const label = el('label', undefined, 'count-away');
-    const toggle = el('input'); toggle.type = 'checkbox'; toggle.dataset.action = 'telemetry-toggle';
-    label.append(toggle, el('span', 'Compartir uso, errores y rendimiento de esta instalación'));
     const details = el('details'); details.dataset.field = 'telemetry-details';
-    details.append(el('summary', 'Qué se mediría y cómo se controla'));
-    details.append(el('p', 'Esta versión solo prepara el adaptador: PostHog no está conectado y no se envía telemetría. Falta verificar y configurar el destino. Las métricas locales conservan su propio interruptor.', 'hint'));
+    details.append(el('summary', 'Qué se comparte y límites'));
+    details.append(el('p', 'Destino configurado: PostHog EU, proyecto OldLight Helper. Esta distribución de uso exclusivo del propietario mantiene los agregados activos mientras se ejecuta el helper, por su autorización expresa. No incluye interruptor de telemetría y sustituye elecciones remotas anteriores. Las métricas locales conservan su propio interruptor.', 'hint'));
     details.append(el('p', 'Solo categorías fijas de uso y errores del helper, su versión y recuentos por intervalos de duración del bucle. No se incluyen cuentas, jugadores, sistemas, coordenadas, flotas, mensajes, direcciones web, trazas ni credenciales. No se graban sesiones ni se capturan clics generales.', 'hint'));
-    details.append(el('p', 'El permiso de compartir será propio de esta instalación y del destino verificado. No se deduce del permiso local, no viaja por Drive o copias y no se aplica a otras personas. Desactivar vacía la cola y detiene los siguientes envíos; no puede retirar datos ya entregados. El proveedor podría ver información técnica de la conexión.', 'hint'));
+    details.append(el('p', 'La autorización de esta distribución individual no se deduce de ajustes, métricas locales o Drive y no debe extenderse a otras personas. Deshabilitar o desinstalar el userscript en el gestor detiene futuras ejecuciones; no retira datos ya entregados. Cada lote lleva un identificador aleatorio nuevo, sin perfil personal ni geolocalización solicitada. El proveedor puede ver información técnica de la conexión, como la IP de origen; los indicadores enviados no ocultan la conexión de red.', 'hint'));
     details.append(el('p', 'Cola solo en memoria y sin historial anterior: lotes como máximo cada cinco minutos por pestaña, hasta doce intentos por hora. Los fallos no se reintentan automáticamente. La aceptación del transporte no confirma que los datos hayan aparecido en el proveedor.', 'hint'));
     const preview = el('textarea'); preview.readOnly = true; preview.rows = 5;
     preview.setAttribute('aria-label', 'Agregado pendiente de telemetría en JSON');
     preview.dataset.field = 'telemetry-preview'; preview.style.cssText = 'width:100%;max-width:100%;box-sizing:border-box;resize:vertical';
     details.append(preview);
-    const clear = el('button', 'Vaciar y desactivar'); clear.type = 'button'; clear.dataset.action = 'telemetry-clear';
-    details.append(clear); box.append(heading, status, label, details);
+    box.append(heading, status, details);
     shadow.querySelector('[data-page="data"]').append(box);
     function refresh() {
       const current = remote.getStatus();
-      toggle.disabled = !current.configured; toggle.checked = current.enabled;
-      clear.disabled = !current.configured;
       const messages = {
         unconfigured: 'Sin configurar. No se recopila ni se envía telemetría compartida.',
         disabled: 'Desactivada. No se recopila ni se envía telemetría compartida.',
-        ready: 'Activada para el destino configurado. Agregados pendientes en memoria.',
+        ready: 'Siempre activa en esta distribución individual. Agregados pendientes en memoria.',
         sending: 'Envío en curso al destino configurado.',
         accepted: 'El transporte aceptó el último lote; recepción en el proveedor sin verificar.',
         send_failed: 'El último envío no se confirmó y se descartó; no se reintentará.',
@@ -5624,14 +5786,6 @@ return Object.freeze({create});
       status.textContent = messages[current.state] || 'Telemetría no disponible.';
       if (details.open) preview.value = JSON.stringify(remote.snapshot(), null, 2);
     }
-    toggle.addEventListener('change', event => {
-      if (event.isTrusted && !toggle.disabled) remote.setEnabled(toggle.checked);
-      refresh();
-    });
-    clear.addEventListener('click', event => {
-      if (event.isTrusted && !clear.disabled) remote.setEnabled(false);
-      refresh();
-    });
     details.addEventListener('toggle', () => { if (details.open) refresh(); else preview.value = ''; });
     remote.onChange(refresh); refresh();
   }
@@ -6775,6 +6929,16 @@ return Object.freeze({create});
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.10', title: 'Telemetría permanente del propietario', changes: [
+        'Agregados de uso, errores y duración siempre activos mientras se ejecuta esta distribución del único propietario.',
+        'Sin interruptor de telemetría; se sustituyen elecciones anteriores por autorización expresa del propietario.',
+        'Sin nuevos datos, credenciales, grabaciones ni cambios en los límites de envío.',
+      ] },
+      { version: '1.17.9', title: 'Telemetría agregada en PostHog', changes: [
+        'Destino PostHog EU configurado para contadores fijos de uso, errores y duración.',
+        'Actívala una vez en Datos → Telemetría compartida; no graba sesiones ni contenido del juego.',
+        'Permiso privado por instalación, revocación entre pestañas y envíos limitados sin reintentos.',
+      ] },
       { version: '1.17.8', title: 'Rutas estables y diagnósticos locales', changes: [
         'Las rutas esperan datos de propiedad antes de preparar el envío. Los envíos inciertos y las revisiones ya pendientes siguen requiriendo comprobación.',
         'Activa uso, errores y rendimiento locales si no hay elección guardada; respeta el rechazo previo y permite borrar y desactivar.',

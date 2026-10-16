@@ -11,7 +11,7 @@ const observer = require('../docs/empire-observer.js');
 const root = path.join(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'old-light-auto-upgrade.user.js'), 'utf8');
 
-test('early observation retains content isolation and only the approved observer and update-installer grants', () => {
+test('early observation retains content isolation and only the approved observer, update-installer and telemetry grants', () => {
   const meta = fs.readFileSync(path.join(root, 'old-light-auto-upgrade.meta.js'), 'utf8');
   for (const text of [source, meta]) {
     assert.match(text, /@run-at\s+document-start/); assert.match(text, /@inject-into\s+content/);

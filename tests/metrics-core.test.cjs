@@ -391,6 +391,8 @@ function build(source) {
         readFileSync(file) {
           if (file.endsWith('metrics-core.js')) return 'const testMetricsCore = true;\n';
           if (file.endsWith('telemetry-core.js')) return 'const testTelemetryCore = true;\n';
+          if (file.endsWith('telemetry-posthog-payload.js')) return 'const testPostHogPayload = true;\n';
+          if (file.endsWith('telemetry-posthog-transport.js')) return 'const testPostHogTransport = true;\n';
           return source;
         },
         writeFileSync(file, content) { assert.equal(file, '/project/old-light-auto-upgrade.user.js'); written = content; },

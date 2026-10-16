@@ -2010,7 +2010,7 @@
     },
     {
       "id": "telemetry-offline-consent-boundary",
-      "feedback": "Se pidió telemetría compartida activada para la instalación del propietario. No se verificó aún el destino ni se accedió a esa instalación. Preparar el adaptador sin simular una conexión, heredar consentimiento local o activar a otros usuarios.",
+      "feedback": "Se pidió telemetría compartida activada para la instalación del propietario. No se verificó aún el destino ni se accedió a esa instalación. Preparar el adaptador sin simular una conexión, heredar consentimiento local o activar a otros usuarios. Actualización 1.17.10: destino verificado y autorización expresa del único propietario para funcionamiento permanente sin interruptor; el caso sin adaptador sigue inerte y las pruebas genéricas de revocación se conservan.",
       "beforeFail": {
         "revision": "d2cad77d4c4caf7b4b598397da075b35f6e146b8",
         "command": "git show d2cad77d4c4caf7b4b598397da075b35f6e146b8:old-light-auto-upgrade.user.js | node -e \"let s='';process.stdin.on('data',b=>s+=b);process.stdin.on('end',()=>require('node:assert/strict').ok(s.includes('function createTelemetry()')));\"",
@@ -2020,7 +2020,7 @@
       "regressions": [
         {
           "file": "tests/telemetry-integration.test.cjs",
-          "name": "telemetry public installation remains inert despite local opt-in and attempted remote toggle"
+          "name": "missing request adapter stays unconfigured despite local collection"
         },
         {
           "file": "tests/telemetry-core.test.cjs",
@@ -2052,20 +2052,24 @@
         },
         {
           "file": "tests/telemetry-integration.test.cjs",
-          "name": "telemetry fake clicks cannot change configured consent and local metrics remain separate"
+          "name": "owner telemetry panel is compact, transparent, and has no disable controls"
         },
         {
           "file": "tests/telemetry-integration.test.cjs",
           "name": "performance clock is not read with local opt-out and inactive remote collection"
+        },
+        {
+          "file": "tests/telemetry-integration.test.cjs",
+          "name": "local metrics preference remains independent and remote payload stays exactly allowlisted"
         }
       ],
       "boundaries": [
         {
-          "scenario": "Instalación pública sin destino, aun con permiso local activo y clic de activación remoto.",
-          "expected": "Cero red, timers, acceso privado o cola remota; panel deshabilitado y transparente.",
+          "scenario": "Adaptador de red ausente, aun con métricas locales activas.",
+          "expected": "Cero envíos remotos; panel sin controles de activación y estado Sin configurar.",
           "regression": {
             "file": "tests/telemetry-integration.test.cjs",
-            "name": "telemetry public installation remains inert despite local opt-in and attempted remote toggle"
+            "name": "missing request adapter stays unconfigured despite local collection"
           }
         },
         {

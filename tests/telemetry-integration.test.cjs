@@ -15,8 +15,8 @@ function slice(begin, end) {
   return source.slice(start, stop);
 }
 const integration = slice('  // BEGIN REMOTE TELEMETRY INTEGRATION', '  // END REMOTE TELEMETRY INTEGRATION');
-function harness() {
-  const nodes = [], storage = new Map(); let network = 0, clockReads = 0;
+function harness(options = {}) {
+  const nodes = [], storage = options.storage || new Map(); let network = 0, clockReads = 0;
   function element(tag) {
     const handlers = new Map();
     const node = { tagName: tag.toUpperCase(), textContent: '', children: [], dataset: {}, attributes: {}, style: {},
@@ -31,18 +31,59 @@ function harness() {
   const page = element('div'), shadow = element('div'); shadow.querySelector = () => page;
   const forbidden = () => { network++; throw new Error('Forbidden remote IO'); };
   const context = vm.createContext({ SCRIPT_VERSION: '1.16.7', crypto, document: { createElement: element },
-    setTimeout: forbidden, clearTimeout() {}, fetch: forbidden, GM_xmlhttpRequest: forbidden,
+    setTimeout: forbidden, clearTimeout() {}, fetch: forbidden, GM_xmlhttpRequest: undefined,
     GM_getValue: forbidden, GM_setValue: forbidden,
     performance: { now() { clockReads++; return clockReads * 10; } },
-    localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
+    localStorage: { getItem(key) { if (options.originReadThrows) throw new Error('origin storage'); return storage.get(key) ?? null; }, setItem(key, value) { if (options.originWriteThrows) throw new Error('origin storage'); storage.set(key, value); }, removeItem: key => storage.delete(key) },
   });
-  vm.runInContext(coreSource + localSource + integration
+  const privateStorage = options.privateStorage || new Map(options.configured && !options.fresh ? [[consentKey, JSON.stringify(consent(false))]] : []), listeners = new Map(), timers = new Map(), requests = [], windowHandlers = new Map();
+  let listenerID = 0, timerID = 0, aborted = 0, privateReads = 0, privateWrites = 0;
+  if (options.configured) {
+    Object.assign(context, {
+      AbortController,
+      setTimeout(fn) { timers.set(++timerID, fn); return timerID; }, clearTimeout(id) { timers.delete(id); },
+      privateHas: key => privateStorage.has(key),
+      privateRead(key) {
+        privateReads++;
+        options.onRead?.({ key, count: privateReads, privateStorage, storage, listeners });
+        if (options.readMode === 'throw') throw new Error('storage');
+        return privateStorage.has(key) ? privateStorage.get(key) : undefined;
+      },
+      privateWrite(key, value) {
+        privateWrites++;
+        options.onWrite?.({ key, value, privateStorage, storage, listeners });
+        if (options.writeMode === 'throw') throw new Error('storage');
+        if (options.writeMode === 'async') return Promise.resolve();
+        if (options.writeMode !== 'noop') privateStorage.set(key, value);
+      },
+      GM_addValueChangeListener(key, fn) { listeners.set(++listenerID, { key, fn }); return listenerID; },
+      GM_removeValueChangeListener(id) { listeners.delete(id); },
+      GM_xmlhttpRequest(details) { network++; requests.push(details); return { abort() { aborted++; } }; },
+      window: { addEventListener(name, fn) { windowHandlers.set(name, fn); } },
+    });
+    vm.runInContext(`GM_getValue = (key, fallback) => { const raw = privateRead(key); return raw === undefined ? (privateHas(key) ? undefined : fallback) : JSON.parse(raw); };
+      GM_setValue = (key, value) => privateWrite(key, JSON.stringify(value));`, context);
+    if (options.readMode === 'async') context.GM_getValue = () => Promise.resolve(null);
+    if (options.missing) context[options.missing] = undefined;
+    if (options.missing === 'GM_xmlhttpRequest') context.GM_xmlhttpRequest = undefined;
+  }
+  const providerSources = ['telemetry-posthog-payload.js', 'telemetry-posthog-transport.js']
+    .map(file => fs.readFileSync(path.join(root, 'docs', file), 'utf8')).join('\n');
+  vm.runInContext(coreSource + providerSources + localSource + integration
     + slice('  function createLocalMetrics(', '  function installMetricsPanel(')
     + '\nthis.remote = createTelemetry(); this.local = createLocalMetrics(remote); this.mount = shadow => installTelemetryPanel(shadow, remote);', context);
   context.mount(shadow);
-  return { context, nodes, page, storage, remote: context.remote, local: context.local,
+  return { context, nodes, page, storage, privateStorage, requests, timers, listeners, windowEvent: (name, event) => windowHandlers.get(name)?.(event), aborted: () => aborted,
+    notify(value) {
+      const encoded = JSON.stringify(value);
+      for (const { key, fn } of listeners.values()) {
+        privateStorage.set(key, encoded);
+        context.changedValue = encoded;
+        fn(key, null, vm.runInContext('JSON.parse(changedValue)', context), true);
+      }
+    }, remote: context.remote, local: context.local,
     action: name => nodes.find(node => node.dataset.action === name), field: name => nodes.find(node => node.dataset.field === name),
-    network: () => network, clockReads: () => clockReads };
+    privateWrites: () => privateWrites, privateReads: () => privateReads, network: () => network, clockReads: () => clockReads };
 }
 
 test('telemetry exact core is embedded once and initialization wires the optional adapter', () => {
@@ -51,64 +92,6 @@ test('telemetry exact core is embedded once and initialization wires the optiona
   assert.equal(slice(start, end).slice(start.length), coreSource.trim() + '\n');
   assert.match(source, /const telemetry = createTelemetry\(\);\s+const metrics = createLocalMetrics\(telemetry\);/);
   assert.match(source, /installMetricsPanel\(shadow\);\s+installTelemetryPanel\(shadow, telemetry\);/);
-});
-
-test('telemetry released integration contains no destination, token, network or private storage adapter', () => {
-  const factory = slice('  function createTelemetry()', '  function installTelemetryPanel(');
-  assert.match(factory, /destination: null, transport: null/);
-  assert.doesNotMatch(factory, /https?:|phc_|api_key|projectToken|GM_getValue|GM_setValue|localStorage|readConsent|writeConsent|fetch/);
-  const metadata = source.slice(0, source.indexOf('// ==/UserScript=='));
-  assert.deepEqual([...metadata.matchAll(/^\/\/ @connect\s+(.*)$/gm)].map(match => match[1]), ['api.telegram.org', 'raw.githubusercontent.com']);
-});
-
-test('telemetry public installation remains inert despite local opt-in and attempted remote toggle', async () => {
-  const h = harness();
-  assert.equal(h.local.setEnabled(true), true);
-  h.local.record('helper.loaded'); h.local.observeDriveStatus('connected'); h.local.observeEmpireStatus('missing_init');
-  h.action('telemetry-toggle').checked = true; h.action('telemetry-toggle').fire('change');
-  assert.equal(h.action('telemetry-toggle').disabled, true); assert.equal(h.action('telemetry-toggle').checked, false);
-  assert.equal(h.remote.isEnabled(), false); assert.equal(await h.remote.flush(), false);
-  assert.equal(h.remote.getStatus().queued, 0); assert.equal(h.network(), 0);
-  assert.ok(h.local.getStatus().total > 0);
-  assert.deepEqual([...h.storage.keys()].sort(), ['old-light-auto-upgrade:metrics-consent:v1', 'old-light-auto-upgrade:metrics:v1']);
-});
-
-test('telemetry panel is compact, details closed, destination block visible and no fictitious active state', () => {
-  const h = harness();
-  assert.match(h.field('telemetry-status').textContent, /Sin configurar.*No se recopila ni se envía/);
-  const details = h.field('telemetry-details'); assert.equal(details.tagName, 'DETAILS'); assert.equal(details.open, false);
-  assert.equal(details.children[0].tagName, 'SUMMARY');
-  assert.equal(h.field('telemetry-preview').value, '');
-  assert.equal(h.action('telemetry-clear').disabled, true);
-  assert.equal(h.field('remote-telemetry').children.length, 4);
-  const text = h.nodes.map(node => node.textContent).join(' ');
-  for (const phrase of [/PostHog no está conectado/, /propio de esta instalación/, /No se deduce del permiso local/, /no se aplica a otras personas/, /No se graban sesiones/, /no puede retirar datos ya entregados/]) assert.match(text, phrase);
-});
-
-test('telemetry details preview opens and clears across repeated dismissal without changing consent', () => {
-  const h = harness(), details = h.field('telemetry-details'), preview = h.field('telemetry-preview');
-  for (let i = 0; i < 3; i++) {
-    details.open = true; details.fire('toggle');
-    assert.deepEqual(JSON.parse(preview.value), { schema: 1, helper_version: '1.16.7', counts: {}, duration_buckets: { helper_step: {} } });
-    details.open = false; details.fire('toggle'); assert.equal(preview.value, '');
-  }
-  assert.equal(h.storage.size, 0); assert.equal(h.network(), 0);
-});
-
-test('telemetry fake clicks cannot change configured consent and local metrics remain separate', () => {
-  const h = harness(); let enabled = false, changes = 0, callback;
-  const fake = { getStatus: () => ({ configured: true, enabled, state: enabled ? 'ready' : 'disabled' }),
-    setEnabled(value) { changes++; enabled = value; callback?.(); }, snapshot: () => ({ counts: {} }), onChange(fn) { callback = fn; } };
-  const shadow = { querySelector: () => h.page };
-  h.context.fake = fake; h.context.shadow = shadow;
-  vm.runInContext('installTelemetryPanel(shadow, fake);', h.context);
-  const toggle = h.nodes.filter(node => node.dataset.action === 'telemetry-toggle').at(-1);
-  const clear = h.nodes.filter(node => node.dataset.action === 'telemetry-clear').at(-1);
-  toggle.checked = true; toggle.fire('change', { isTrusted: false }); assert.equal(changes, 0); assert.equal(toggle.checked, false);
-  toggle.checked = true; toggle.fire('change'); assert.equal(changes, 1); assert.equal(enabled, true);
-  clear.fire('click', { isTrusted: false }); assert.equal(changes, 1);
-  clear.fire('click'); assert.equal(changes, 2); assert.equal(enabled, false);
-  assert.equal(h.local.isEnabled(), true); assert.equal(h.storage.size, 0);
 });
 
 test('performance clock is not read with local opt-out and inactive remote collection', () => {
@@ -153,4 +136,161 @@ test('local duration samples stay local with independent remote collection enabl
     assert.equal(durations.length, enabled ? 1 : 0);
     assert.equal(h.network(), 0);
   }
+});
+
+const consentKey = 'old-light-auto-upgrade:remote-consent:posthog-eu:v1';
+const fenceKey = 'old-light-auto-upgrade:remote-revocation:v1';
+const consent = enabled => ({ schema: 1, policy: 1, destinationId: 'posthog-eu-oldlight', enabled,
+  generation: '12345678-1234-4234-8234-123456789abc' });
+
+test('sole-owner factory has fixed EU destination and no persisted consent dependency', () => {
+  const factory = slice('  function createTelemetry()', '  function installTelemetryPanel(');
+  assert.match(factory, /destination: null, transport: null/);
+  assert.match(factory, /id: 'posthog-eu-oldlight'/);
+  assert.doesNotMatch(factory, /GM_getValue|GM_setValue|GM_addValueChangeListener|GM_removeValueChangeListener|localStorage|fetch\(/);
+  const metadata = source.slice(0, source.indexOf('// ==\/UserScript=='));
+  assert.deepEqual([...metadata.matchAll(/^\/\/ @connect\s+(.*)$/gm)].map(match => match[1]).sort(), ['api.telegram.org', 'eu.i.posthog.com', 'raw.githubusercontent.com']);
+});
+
+test('missing request adapter stays unconfigured despite local collection', async () => {
+  const h = harness();
+  h.local.setEnabled(true); h.local.record('helper.loaded');
+  assert.equal(h.remote.isEnabled(), false);
+  assert.equal(h.remote.getStatus().configured, false);
+  assert.equal(await h.remote.flush(), false);
+  assert.equal(h.network(), 0);
+  assert.equal(h.action('telemetry-toggle'), undefined);
+  assert.equal(h.action('telemetry-clear'), undefined);
+  assert.match(h.field('telemetry-status').textContent, /Sin configurar/);
+});
+
+test('owner telemetry panel is compact, transparent, and has no disable controls', () => {
+  const h = harness({ configured: true });
+  assert.equal(h.remote.isEnabled(), true);
+  assert.equal(h.action('telemetry-toggle'), undefined);
+  assert.equal(h.action('telemetry-clear'), undefined);
+  assert.equal(h.nodes.some(node => node.tagName === 'INPUT' || node.tagName === 'BUTTON'), false);
+  const details = h.field('telemetry-details');
+  assert.equal(details.tagName, 'DETAILS'); assert.equal(details.open, false);
+  assert.equal(details.children[0].tagName, 'SUMMARY');
+  assert.equal(h.field('remote-telemetry').children.length, 3);
+  assert.equal(h.field('telemetry-preview').value, '');
+  const text = h.nodes.map(node => node.textContent).join(' ');
+  assert.match(text, /PostHog EU/);
+  assert.match(text, /siempre|permanente/i);
+  assert.match(text, /No se graban sesiones/);
+  assert.match(text, /IP de origen/);
+  assert.doesNotMatch(text, /puedes desactivar aquí|Una desactivación previa siempre se conserva|Vaciar y desactivar/);
+});
+
+test('preview opens and clears repeatedly without changing permanent collection', () => {
+  const h = harness({ configured: true }), details = h.field('telemetry-details'), preview = h.field('telemetry-preview');
+  for (let i = 0; i < 3; i++) {
+    details.open = true; details.fire('toggle');
+    assert.deepEqual(JSON.parse(preview.value), { schema: 1, helper_version: '1.16.7', counts: {}, duration_buckets: { helper_step: {} } });
+    details.open = false; details.fire('toggle'); assert.equal(preview.value, '');
+    assert.equal(h.remote.isEnabled(), true);
+  }
+  assert.equal(h.privateWrites(), 0); assert.equal(h.privateReads(), 0); assert.equal(h.network(), 0);
+});
+
+for (const raw of [undefined, null, false, true, 'oldlight-private-consent-absent-a', 'oldlight-private-consent-absent-b', {}, consent(false), consent(true)]) {
+  test('explicit permanent-owner authorization supersedes saved state without modifying bytes: ' + JSON.stringify(raw), () => {
+    const privateStorage = new Map([[consentKey, JSON.stringify(raw)]]);
+    const storage = new Map([[fenceKey, 'disabled']]);
+    const privateBefore = [...privateStorage], before = [...storage];
+    const h = harness({ configured: true, privateStorage, storage });
+    assert.equal(h.remote.isEnabled(), true);
+    assert.equal(h.privateReads(), 0); assert.equal(h.privateWrites(), 0);
+    assert.deepEqual([...privateStorage], privateBefore); assert.deepEqual([...storage], before);
+    const reloaded = harness({ configured: true, privateStorage, storage });
+    assert.equal(reloaded.remote.isEnabled(), true);
+    assert.equal(reloaded.remote.getStatus().queued, 0);
+    assert.equal(reloaded.network(), 0);
+  });
+}
+
+test('fresh owner installation is enabled without persistent reads or writes and does not send empty data', async () => {
+  const h = harness({ configured: true, fresh: true });
+  assert.equal(h.remote.isEnabled(), true);
+  assert.equal(h.privateStorage.size, 0); assert.equal(h.storage.size, 0);
+  assert.equal(h.privateReads(), 0); assert.equal(h.privateWrites(), 0);
+  assert.equal(await h.remote.flush(), false); assert.equal(h.network(), 0);
+});
+
+for (const missing of ['GM_getValue', 'GM_setValue', 'GM_addValueChangeListener', 'GM_removeValueChangeListener']) {
+  test('permanent owner collection requires no private storage API: ' + missing, () => {
+    const h = harness({ configured: true, missing });
+    assert.equal(h.remote.isEnabled(), true); assert.equal(h.remote.getStatus().configured, true);
+    assert.equal(h.privateReads(), 0); assert.equal(h.privateWrites(), 0); assert.equal(h.listeners.size, 0);
+  });
+}
+for (const options of [{ readMode: 'throw' }, { readMode: 'async' }, { writeMode: 'throw' }, { writeMode: 'async' }, { originReadThrows: true }, { originWriteThrows: true }]) {
+  test('consent storage failures do not affect permanent owner configuration: ' + JSON.stringify(options), () => {
+    const h = harness({ configured: true, ...options });
+    assert.equal(h.remote.isEnabled(), true);
+    assert.equal(h.privateReads(), 0); assert.equal(h.privateWrites(), 0); assert.equal(h.network(), 0);
+  });
+}
+
+test('local metrics preference remains independent and remote payload stays exactly allowlisted', async () => {
+  const h = harness({ configured: true }); h.local.setEnabled(false);
+  assert.equal(h.local.isEnabled(), false); assert.equal(h.remote.isEnabled(), true);
+  h.local.record('helper.loaded'); h.local.observeHelperEvent('request.sent', 'PRIVATE_SYSTEM');
+  h.local.finishTiming(h.local.startTiming());
+  const pending = h.remote.flush(); assert.equal(h.requests.length, 1);
+  const payload = JSON.parse(h.requests[0].data);
+  assert.deepEqual(Object.keys(payload).sort(), ['api_key', 'distinct_id', 'event', 'properties']);
+  assert.deepEqual(Object.keys(payload.properties).sort(), ['$geoip_disable', '$ip', '$process_person_profile', 'counts', 'duration_buckets', 'helper_version', 'schema']);
+  assert.equal(payload.event, 'oldlight_helper.aggregate');
+  assert.equal(payload.properties.$process_person_profile, false);
+  assert.equal(payload.properties.$geoip_disable, true); assert.equal(payload.properties.$ip, '0.0.0.0');
+  assert.deepEqual(payload.properties.counts, { 'helper.loaded': 1, 'automation.sent': 1 });
+  assert.deepEqual(payload.properties.duration_buckets, { helper_step: { '4_16ms': 1 } });
+  assert.doesNotMatch(h.requests[0].data, /PRIVATE_SYSTEM|remote-consent|generation|owner/);
+  h.requests[0].onload({ status: 200, finalUrl: 'https://eu.i.posthog.com/i/v0/e/', responseText: '{"status":1}' });
+  assert.equal(await pending, true); h.remote.destroy();
+});
+
+test('remote configuration and permission do not enter local metrics or backup serialization', () => {
+  const h = harness({ configured: true }); h.local.setEnabled(true); h.local.record('helper.loaded');
+  for (const [key, value] of h.storage) assert.doesNotMatch(key + value, /remote-consent|posthog-eu|destinationId/);
+  assert.doesNotMatch(JSON.stringify(h.local.snapshot()), /remote-consent|posthog-eu|destinationId/);
+  assert.equal(h.privateWrites(), 0); h.remote.destroy();
+});
+
+test('BFcache suspension aborts pending requests and resume starts a fresh empty collection', async () => {
+  const h = harness({ configured: true }); h.local.record('helper.loaded');
+  const pending = h.remote.flush(); h.local.record('drive.connected');
+  h.windowEvent('pagehide', { persisted: true });
+  assert.equal(await pending, false); assert.equal(h.aborted(), 1);
+  assert.equal(h.remote.getStatus().queued, 0); assert.equal(h.remote.isEnabled(), false);
+  h.local.record('helper.loaded'); assert.equal(h.remote.getStatus().queued, 0);
+  h.windowEvent('pageshow', { persisted: true });
+  assert.equal(h.remote.isEnabled(), true); assert.equal(h.remote.getStatus().queued, 0);
+  h.requests[0].onload({ status: 200, finalUrl: 'https://eu.i.posthog.com/i/v0/e/', responseText: '{"status":1}' });
+  assert.equal(h.remote.getStatus().accepted, 0); assert.equal(h.requests.length, 1);
+});
+
+test('normal pagehide destroys collection and pageshow cannot revive it', async () => {
+  const h = harness({ configured: true }); h.local.record('helper.loaded');
+  const pending = h.remote.flush(); h.windowEvent('pagehide', { persisted: false });
+  assert.equal(await pending, false); assert.equal(h.aborted(), 1);
+  assert.equal(h.remote.isEnabled(), false); assert.equal(h.remote.getStatus().queued, 0); assert.equal(h.timers.size, 0);
+  h.windowEvent('pageshow', { persisted: true }); assert.equal(h.remote.isEnabled(), false);
+});
+
+test('permanent collection still rejects unknown event fields and failed transport never retries automatically', async () => {
+  const h = harness({ configured: true });
+  assert.equal(h.remote.record('unapproved.private.event'), false);
+  assert.equal(h.remote.duration('private.duration', 20), false);
+  assert.equal(h.remote.duration('helper.step', Infinity), false);
+  assert.equal(h.remote.getStatus().queued, 0);
+  h.local.record('helper.loaded');
+  const pending = h.remote.flush(); assert.equal(h.requests.length, 1);
+  h.requests[0].onerror({ error: 'network failure' });
+  assert.equal(await pending, false); assert.equal(h.remote.getStatus().accepted, 0);
+  assert.equal(h.remote.getStatus().queued, 0); assert.equal(h.timers.size, 0);
+  assert.equal(await h.remote.flush(), false); assert.equal(h.requests.length, 1);
+  assert.match(h.field('telemetry-status').textContent, /no se confirmó|fall|descart/i);
 });

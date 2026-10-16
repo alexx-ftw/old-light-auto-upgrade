@@ -39,5 +39,19 @@ if (remoteBegins.length === 1 && remoteEnds.length === 1 && remoteBegins[0].inde
   const insertion = source.indexOf(end) + end.length;
   source = source.slice(0, insertion) + '\n\n' + remoteEmbedded + source.slice(insertion);
 } else throw new Error('Embedded telemetry markers are incomplete, duplicated, reversed, or inside metadata.');
+// Provider adapter is bundled separately from the provider-independent collector.
+for (const [label, filename] of [['POSTHOG PAYLOAD', 'telemetry-posthog-payload.js'], ['POSTHOG TRANSPORT', 'telemetry-posthog-transport.js']]) {
+  const first = '// BEGIN EMBEDDED ' + label, last = '// END EMBEDDED ' + label;
+  const moduleSource = fs.readFileSync(path.join(__dirname, 'docs', filename), 'utf8').trim();
+  const starts = occurrences(first), ends = occurrences(last);
+  const block = first + '\n' + moduleSource + '\n' + last;
+  if (starts.length === 1 && ends.length === 1 && starts[0].index >= offset && ends[0].index > starts[0].index) {
+    source = source.slice(0, starts[0].index) + block + source.slice(ends[0].index + ends[0][0].length);
+  } else if (!starts.length && !ends.length) {
+    const marker = label === 'POSTHOG PAYLOAD' ? remoteEnd : '// END EMBEDDED POSTHOG PAYLOAD';
+    const insertion = source.indexOf(marker) + marker.length;
+    source = source.slice(0, insertion) + '\n\n' + block + source.slice(insertion);
+  } else throw new Error('Provider adapter markers are invalid: ' + label);
+}
 fs.writeFileSync(file, source);
-console.log('Embedded local metrics core into the userscript.');
+console.log('Embedded metrics and explicit telemetry adapters into the userscript.');

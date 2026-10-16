@@ -36,6 +36,13 @@
       <p>La protección se comprueba en los envíos automáticos del Helper. No cancela flotas ya enviadas, no controla órdenes manuales ni garantiza ausencia de combate si cambia la propiedad durante el viaje. Actualizar el Helper no protege automáticamente a ninguna persona concreta.</p>
     </section>
 
+    <section aria-labelledby="telemetry-heading">
+      <h2 id="telemetry-heading">Telemetría agregada del propietario</h2>
+      <p>La distribución de uso exclusivo del propietario 1.17.10 mantiene activos los agregados hacia OldLight Helper en PostHog EU mientras se ejecuta el helper, por su autorización expresa. Datos → Telemetría compartida muestra el estado y los límites, sin interruptor de desactivación. Esta autorización sustituye elecciones remotas anteriores, cuyos valores almacenados no se leen ni se modifican. Las métricas locales conservan su interruptor independiente. Una futura distribución multiusuario debe requerir inscripción explícita.</p>
+      <p>Solo se envían versión del helper, categorías fijas de uso y errores y recuentos por intervalos de duración. No se incluyen identidades, mensajes, sistemas, coordenadas, flotas, URLs, trazas ni credenciales. No hay SDK, captura general de clics ni grabaciones. Cada lote lleva un identificador aleatorio nuevo; se solicita no crear perfiles ni calcular geolocalización. PostHog puede ver la IP y otros datos técnicos de la conexión.</p>
+      <p>La cola está solo en memoria, con un máximo de un lote cada cinco minutos y doce intentos por hora y pestaña. No se reintentan fallos. Salir de la página descarta la cola y aborta solicitudes en curso cuando es posible; volver desde la caché reanuda sin recuperar historial. Desactivar o desinstalar el userscript en el gestor detiene futuras ejecuciones, pero no elimina lo ya recibido. La respuesta del transporte no prueba por sí sola la aparición del evento en el proyecto.</p>
+      <p>La clave de ingestión publicada es de solo escritura; no permite consultar el proyecto. Al ser pública, terceros pueden introducir eventos falsos. El transporte rechaza respuestas cuyo destino final no coincide; Violentmonkey no documenta una garantía de bloqueo de redirecciones antes del envío. Consulta la <a href="https://posthog.com/privacy" target="_blank" rel="noopener noreferrer">privacidad de PostHog</a>.</p>
+    </section>
     <section aria-labelledby="google-heading">
       <h2 id="google-heading">Conexión con Google Drive</h2>
       <p>Google Drive es opcional. Al iniciar sesión, se solicita únicamente el permiso <code>drive.appdata</code> para crear, actualizar, listar y leer las copias y los ajustes sincronizados en <code>appDataFolder</code>, el espacio privado de datos de esta aplicación en tu cuenta.</p>
