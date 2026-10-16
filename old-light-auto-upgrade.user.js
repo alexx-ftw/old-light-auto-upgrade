@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.16
+// @version      1.17.17
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -5631,7 +5631,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.16';
+  const SCRIPT_VERSION = '1.17.17';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -6236,11 +6236,16 @@ return Object.freeze({ encode });
       };
   }
 
-  function readSettings() {
+  function readSettings(previous = null) {
     try {
-      return normalizeSettings(JSON.parse(localStorage.getItem(KEY) || '{}'));
+      const raw = localStorage.getItem(KEY);
+      const saved = raw === null ? {} : JSON.parse(raw);
+      if (!saved || typeof saved !== 'object' || Array.isArray(saved)) throw new TypeError('Invalid settings root');
+      return normalizeSettings(saved);
     } catch {
-      return normalizeSettings({});
+      // Unavailable or corrupt storage must not activate default automation or
+      // erase the current session's exclusions/minimums. Leave stored bytes alone.
+      return normalizeSettings({ ...previous, enabled: false });
     }
   }
 
@@ -7220,6 +7225,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.17', title: 'Conservar ajustes cuando falla la lectura', changes: [
+        'Si los ajustes guardados no se pueden leer o su raíz es inválida, la automatización queda pausada en lugar de activarse con valores iniciales.',
+        'Una pestaña abierta conserva sus exclusiones, mínimos y demás ajustes en memoria; una lectura válida posterior recupera la configuración guardada.',
+        'La lectura fallida no sobrescribe el almacenamiento; una instalación nueva sin ajustes mantiene su comportamiento inicial.',
+      ] },
       { version: '1.17.16', title: 'Diagnóstico local de flechas y respuesta de envío', changes: [
         'Diagnóstico local bajo demanda con motivos de ocultación, transiciones y cadencias agregadas; sin IDs, nombres, coordenadas ni envío remoto.',
         'Enviar ahora muestra fuera de la lista desplazada el bloqueo o la preparación en cola, sin presentarla como envío confirmado.',
@@ -18984,7 +18994,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     ui?.cancelPriorityDrag?.();
     ui?.cancelPanelDrag?.();
     ui?.cancelResize?.();
-    settings = readSettings();
+    settings = readSettings(settings);
     restoreNumericInputs();
     if (settings.enabled) { error = ''; unconfirmed = 0; }
     schedule();

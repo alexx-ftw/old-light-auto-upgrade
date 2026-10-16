@@ -3598,6 +3598,75 @@
         "Inspect output collision/realpath boundaries and exact single-path transformation; no credentials, OAuth origin/scope, storage/protocol identity or network changes.",
         "Do not confuse offline package creation with served old-URL continuity or rename permission for an additional repository."
       ]
+    },
+    {
+      "id": "settings-read-failure-preserves-paused-session",
+      "feedback": "La revisión offline reproduce que un fallo de lectura o una raíz inválida activa valores iniciales y borra exclusiones/mínimos de una pestaña en memoria. No es una causa atribuida al usuario.",
+      "beforeFail": {
+        "revision": "372ff11995ff5a4dbc22c78fb170f363ec96773f",
+        "command": "QA_SETTINGS_READ_SOURCE=/workspace/oldlight-transfer/settings-read-baseline.user.js node --test tests/settings-read-recovery.test.cjs",
+        "observedFailure": "Mismo harness: 9 fallos, 2 aprobados. Los errores devuelven enabled:true y el evento real pierde las exclusiones y mínimos activos.",
+        "evidence": "docs/1.17.17-settings-read-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/settings-read-recovery.test.cjs",
+          "name": "storage read failure starts paused and writes nothing"
+        },
+        {
+          "file": "tests/settings-read-recovery.test.cjs",
+          "name": "a failed cross-tab read pauses while preserving current exclusions and active minimums"
+        },
+        {
+          "file": "tests/settings-read-recovery.test.cjs",
+          "name": "a missing first-run configuration retains the existing enabled default"
+        },
+        {
+          "file": "tests/settings-read-recovery.test.cjs",
+          "name": "a later valid cross-tab configuration recovers its explicit enabled choice and values"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Read denied or malformed root during an open session",
+          "expected": "Pause without writes and preserve current settings values.",
+          "regression": {
+            "file": "tests/settings-read-recovery.test.cjs",
+            "name": "a failed cross-tab read pauses while preserving current exclusions and active minimums"
+          }
+        },
+        {
+          "scenario": "Missing first-run data",
+          "expected": "Keep existing initial enabled behavior.",
+          "regression": {
+            "file": "tests/settings-read-recovery.test.cjs",
+            "name": "a missing first-run configuration retains the existing enabled default"
+          }
+        },
+        {
+          "scenario": "Later valid cross-tab data",
+          "expected": "Recover persisted values and explicit enabled choice.",
+          "regression": {
+            "file": "tests/settings-read-recovery.test.cjs",
+            "name": "a later valid cross-tab configuration recovers its explicit enabled choice and values"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Real browser storage corruption and game behavior",
+          "reason": "Synthetic VM only; no live game or browser operation."
+        },
+        {
+          "scope": "Deep invalid fields or failed subsequent writes",
+          "reason": "Existing normalization and save behavior remain; this change covers root reads only."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Trace startup and real storage listener; distinguish missing data from malformed data and deny-read exceptions.",
+        "Derive adversarial recovery cases, including preserved excluded buildings and paused or enabled later valid configuration.",
+        "Ensure read failure causes zero writes, no new privilege or telemetry, and that session snapshots are preserved."
+      ]
     }
   ]
 }
