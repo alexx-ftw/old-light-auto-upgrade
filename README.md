@@ -5,7 +5,7 @@ Userscript para [Old Light](https://oldlight.io/play) que atiende primero el Res
 
 ## Reanudar la reunión de conquista ya enviada (1.17.26)
 
-Pausar y reanudar una campaña mientras su refuerzo de reunión está en tránsito conserva el envío registrado y espera su llegada/censo. Antes, Reanudar intentaba esperar un reporte de combate para un Send propio y fallaba la validación de configuración. No se repite la transferencia ni se considera que ya haya llegado. Los ataques enviados siguen esperando su reporte; las autorizaciones siguen locales. [Regresión y límites](docs/1.17.26-conquest-resume-validation.md).
+Pausar y reanudar una campaña mientras su refuerzo de reunión está en tránsito conserva el envío registrado y espera su llegada/censo. Antes, Reanudar intentaba esperar un reporte de combate para un Send propio y fallaba la validación de configuración. Antes de reanudar se reconcilia también una aceptación ya confirmada por la cola aunque el controlador aún no la hubiese registrado. Una cola desaparecida conserva incertidumbre. No se repite la transferencia ni se considera que ya haya llegado. Los ataques enviados siguen esperando su reporte; las autorizaciones siguen locales. [Regresión y límites](docs/1.17.26-conquest-resume-validation.md).
 
 ## Conquista por objetivos con reunión y una incursión por reporte (1.17.25)
 

@@ -156,3 +156,5 @@ La primera candidata final e83024b fue rechazada por discrepancia entre parsers:
 ## Conquista1.17.26: esperar la evidencia pertinente a cada misión
 
 La recuperación de una pausa no equivale siempre a esperar reporte: el mismo ticket sent puede ser Send propio de reunión o ataque. La validación impidió el estado inválido, pero dejó un recorrido legítimo sin recuperación. Exigir pausa→recarga→reanudar en ambas clases, mismo ticket y una única aceptación; llegada exige censo estacionado posterior, ataque exige reporte. Contrastar dueño cambiado y captura sin quitar las guardas. [Antes/después y límites de métricas](1.17.26-conquest-resume-validation.md).
+
+La primera candidata090058a falló en aceptación anterior al tick reconciliador: Reanudar no puede confiar solo en ticket.state. Exigir evidencia cruzada del trabajo de cola (mismo claim, fecha válida) antes de decidir la recuperación; comprobar el intervalo entre sent nativo y persistencia del controller, no solo un sent ya normalizado. Rechazar borrar evidencia con cola ausente/fecha inválida.

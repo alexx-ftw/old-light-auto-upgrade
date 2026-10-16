@@ -134,3 +134,10 @@ test('paused sent attack still resumes only to report waiting and cannot prepare
 test('resumed sent transfer keeps fresh ownership and capture guards without replaying the transfer',()=>{
  for(const kind of ['owner','capture']){const h=harness();const o=h.add({fleet:q(20),maxLosses:40});h.c.tick();h.c.tick();h.send();h.c.pause(o.id);h.c.resume(o.id);if(kind==='owner')h.targetOwner=uuid(91);else h.world.systems.push(system(90,10,1));h.c.tick();assert.equal(h.c.list()[0].status,kind==='owner'?'paused':'captured');assert.equal(h.calls.filter(c=>c.spec).length,1);assert.equal(h.c.list()[0].raids,0);}
 });
+test('resume reconciles accepted assembly transfers before counting arrival and preserves their exact queued claim',()=>{
+ const h=harness();const o=h.add({fleet:q(20),maxLosses:40});h.c.tick();h.c.tick();h.pending[0].status='sent';h.at+=10;h.pending[0].sentAt=h.at;const id=h.pending[0].id;h.c.pause(o.id);h.reload();h.c.resume(o.id);assert.equal(h.c.list()[0].status,'planning');assert.equal(h.c.list()[0].ticket.id,id);assert.equal(h.c.list()[0].ticket.state,'sent');assert.equal(h.c.list()[0].raids,0);for(let i=0;i<4;i++)h.c.tick();assert.equal(h.calls.filter(c=>c.spec).length,1);
+});
+test('resume refuses lost queued claims and malformed accepted timestamps instead of discarding send evidence',()=>{
+ const missing=harness();const o=missing.add();missing.c.tick();missing.c.tick();missing.pending[0].status='sending';missing.c.pause(o.id);missing.pending=[];assert.throws(()=>missing.c.resume(o.id),/incierto/);assert.equal(missing.c.list()[0].status,'uncertain');assert.ok(missing.c.list()[0].ticket);
+ const invalid=harness();const x=invalid.add();invalid.c.tick();invalid.c.tick();invalid.pending[0].status='sent';invalid.pending[0].sentAt=999999;invalid.c.pause(x.id);assert.throws(()=>invalid.c.resume(x.id),/fecha/);assert.equal(invalid.c.list()[0].status,'paused');assert.ok(invalid.c.list()[0].ticket);
+});

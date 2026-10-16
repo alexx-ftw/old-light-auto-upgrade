@@ -102,7 +102,15 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
  }
  const pause=idValue=>stop(idValue,'paused','Conquista pausada. No se retiran flotas ya enviadas.');
  const cancelObjective=idValue=>stop(idValue,'cancelled','Conquista cancelada. No se retiran flotas ya enviadas.');
- function resume(idValue){if(!load())fail(error);const o=current(idValue);if(!o||!['paused','limit'].includes(o.status))fail('Este objetivo no se puede reanudar.');
+ function resume(idValue){if(!load())fail(error);let o=current(idValue);if(!o||!['paused','limit'].includes(o.status))fail('Este objetivo no se puede reanudar.');
+  if(o.ticket){const j=jobs().find(j=>j.id===o.ticket.id);
+   if(j&&!matches(o,o.ticket,j))fail('La misión ya no coincide con el objetivo. Revisión necesaria.');
+   if(j?.status==='sent'&&o.ticket.state!=='sent'){
+    if(!Number.isSafeInteger(j.sentAt)||j.sentAt<o.ticket.createdAt||j.sentAt>clock())fail('La fecha de envío no se puede verificar.');
+    recordSent(o,o.ticket,j.sentAt);o=current(idValue);
+   }
+   if(!j&&['queued','uncertain'].includes(o.ticket.state)){stop(o.id,'uncertain','La misión guardada desapareció. Comprueba los envíos antes de cerrar la revisión; no se repetirá.');fail('Revisa primero el envío pendiente o incierto.');}
+  }
   if(o.ticket?.state==='sent')return change(o,o.ticket.kind==='attack'?{status:'awaiting_report',message:'Esperando el reporte de la incursión ya enviada.'}:{status:'planning',message:'Refuerzo ya enviado. Esperando llegada y censo confirmado antes de continuar.'});
   if(o.ticket){const j=jobs().find(j=>j.id===o.ticket.id);if(j&&['sending','uncertain'].includes(j.status))fail('Revisa primero el envío pendiente o incierto.');}
   return change(o,{status:'planning',ticket:null,barrierAt:clock(),message:'Revisando el plan con datos actuales.'});

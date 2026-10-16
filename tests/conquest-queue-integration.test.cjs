@@ -51,3 +51,6 @@ test('importing an empty production queue after acceptance before reconciliation
 test('imported paused conquest jobs without matching local objectives cannot activate',async()=>{
  const h=harness();h.add();h.coordinator.tick();h.coordinator.tick();const exported=clone(h.queue.exportConfig());const other=harness();other.queue.importConfig(exported);assert.equal(other.queue.list()[0].status,'paused');assert.equal(other.coordinator.canRunJob(clone(other.queue.list()[0])),false);await other.queue.tick();assert.equal(other.events.length,0);
 });
+test('pause and resume reconcile an accepted attack before dropping its queued ticket and never send a second raid without report',async()=>{
+ const h=harness();const o=h.add();h.coordinator.tick();h.coordinator.tick();await h.queue.tick();const id=h.queue.list()[0].id;assert.equal(h.stored.objectives[0].ticket.state,'queued');h.coordinator.pause(o.id);h.coordinator.resume(o.id);assert.equal(h.coordinator.list()[0].status,'awaiting_report');assert.equal(h.coordinator.list()[0].ticket.id,id);assert.equal(h.coordinator.list()[0].raids,1);h.clock=2000;h.world.observedAt=2000;for(let i=0;i<6;i++){h.coordinator.tick();await h.queue.tick();}assert.equal(h.events.length,1);assert.equal(h.coordinator.list()[0].raids,1);
+});

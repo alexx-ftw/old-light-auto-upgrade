@@ -4397,6 +4397,67 @@
         "Verificar ticket/cantidades/owner/reservas preservados, sin duplicar envío ni contar llegada por ETA.",
         "Contrastar llegada/censo legítimos, pérdida/cambio de propietario y captura; revisar UI real y validez del harness."
       ]
+    },
+    {
+      "id": "conquest-resume-accepted-unreconciled-claim",
+      "feedback": "Reanudar una pausa entre aceptación en cola y reconciliación borraba el ticket queued, permitiendo otra incursión sin reporte y sin contar la primera. Reproducido con cola productiva antes de publicar la candidata.",
+      "beforeFail": {
+        "revision": "090058a07590ace825d9b956cae1d06fc20e3ee1",
+        "command": "QA_CONQUEST_CONTROLLER_SOURCE=/workspace/oldlight-transfer/1.17.26-race-before-controller.cjs node --test --test-name-pattern='pause and resume reconcile an accepted attack' tests/conquest-queue-integration.test.cjs",
+        "observedFailure": "planning != awaiting_report tras Reanudar; probe independiente con censo posterior demuestra dos aceptaciones sintéticas sin reporte.",
+        "evidence": "docs/1.17.26-conquest-resume-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/conquest-queue-integration.test.cjs",
+          "name": "pause and resume reconcile an accepted attack before dropping its queued ticket and never send a second raid without report"
+        },
+        {
+          "file": "tests/conquest-core.test.cjs",
+          "name": "resume reconciles accepted assembly transfers before counting arrival and preserves their exact queued claim"
+        },
+        {
+          "file": "tests/conquest-core.test.cjs",
+          "name": "resume refuses lost queued claims and malformed accepted timestamps instead of discarding send evidence"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "pause and resume reconcile an accepted attack before dropping its queued ticket and never send a second raid without report",
+          "expected": "Conservar y reconciliar aceptación exacta sin duplicar; respetar clase de misión y rechazar evidencia incompleta.",
+          "regression": {
+            "file": "tests/conquest-queue-integration.test.cjs",
+            "name": "pause and resume reconcile an accepted attack before dropping its queued ticket and never send a second raid without report"
+          }
+        },
+        {
+          "scenario": "resume reconciles accepted assembly transfers before counting arrival and preserves their exact queued claim",
+          "expected": "Conservar y reconciliar aceptación exacta sin duplicar; respetar clase de misión y rechazar evidencia incompleta.",
+          "regression": {
+            "file": "tests/conquest-core.test.cjs",
+            "name": "resume reconciles accepted assembly transfers before counting arrival and preserves their exact queued claim"
+          }
+        },
+        {
+          "scenario": "resume refuses lost queued claims and malformed accepted timestamps instead of discarding send evidence",
+          "expected": "Conservar y reconciliar aceptación exacta sin duplicar; respetar clase de misión y rechazar evidencia incompleta.",
+          "regression": {
+            "file": "tests/conquest-core.test.cjs",
+            "name": "resume refuses lost queued claims and malformed accepted timestamps instead of discarding send evidence"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Envío real",
+          "reason": "Cola productiva con aceptación sintética; no partida."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Derivar el orden cola sent→pausa→recarga→reanudar antes del tick reconciliador y comprobar una aceptación total.",
+        "Contrastar timestamps/identidad/owner, cola desaparecida y fallo de persistencia sin liberar claim.",
+        "Verificar ataque contabilizado una vez y transferencia cero raids, con recuperación legítima tras censo."
+      ]
     }
   ]
 }
