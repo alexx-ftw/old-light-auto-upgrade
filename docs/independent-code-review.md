@@ -116,3 +116,7 @@ Parpadeo1.17.13: un hueco autoritativo de publicación puede convertirse en ocul
 ## Lectura de configuración fallida (1.17.17)
 
 La reproducción offline de [lectura de ajustes](1.17.17-settings-read-validation.md) refuta la hipótesis de que normalizar valores iniciales es un fallback inocuo: puede activar automatización y perder las exclusiones de la sesión. La revisión debe empezar con una configuración activa realista y hacer fallar tanto lectura como parseo desde el listener de producción; comprobar pausa, conservación y cero escrituras. Contrastar la ausencia legítima de datos y la recuperación posterior válida para no bloquear la primera instalación ni ignorar una elección explícita de otra pestaña. El alcance es la raíz guardada y su lectura; no acredita reparación profunda ni una incidencia real del usuario.
+
+## Confirmación de escritura de preferencias Drive (1.17.18)
+
+La [reproducción sintética](1.17.18-drive-config-write-validation.md) refuta que no lanzar una excepción equivalga a persistir: false y no-op activaban ajustes y mostraban éxito. La revisión debe atravesar el listener montado, hacer fallar escritura y lectura por separado, comprobar config/revisión/notificación/controles antes de confirmar y después de reintentar. Probar también rechazo asíncrono con política strict y éxito síncrono recuperable; un thenable rechazado por contrato aún necesita consumir su rechazo. No atribuir atomicidad ni cancelación a un gestor que escriba tarde: el parche no revierte datos posiblemente concurrentes ni cubre todas las escrituras del Helper.

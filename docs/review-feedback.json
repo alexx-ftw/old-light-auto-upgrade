@@ -3667,6 +3667,99 @@
         "Derive adversarial recovery cases, including preserved excluded buildings and paused or enabled later valid configuration.",
         "Ensure read failure causes zero writes, no new privilege or telemetry, and that session snapshots are preserved."
       ]
+    },
+    {
+      "id": "drive-config-write-confirmation",
+      "feedback": "Revisión sintética: preferencias Drive se activan y anuncian guardadas tras false, escritura ignorada o lectura no verificable; un setter Promise.reject deja rechazo global. Cuota y serialización ya tenían error correcto.",
+      "beforeFail": {
+        "revision": "c72677d1feb4024697fb9a77017e702961ced181",
+        "command": "QA_DRIVE_WRITE_SOURCE=/workspace/oldlight-transfer/drive-write-baseline.user.js node --test tests/drive-config-write-recovery.test.cjs",
+        "observedFailure": "Mismo harness, 4 fallos y 4 controles aprobados. Los fallos false/ignore/read-denied activan autoBackup y el rechazo no consumido termina el proceso hijo strict.",
+        "evidence": "docs/1.17.18-drive-config-write-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/drive-config-write-recovery.test.cjs",
+          "name": "Drive config quota does not confirm or activate an unverified save and can retry"
+        },
+        {
+          "file": "tests/drive-config-write-recovery.test.cjs",
+          "name": "Drive config serialization does not confirm or activate an unverified save and can retry"
+        },
+        {
+          "file": "tests/drive-config-write-recovery.test.cjs",
+          "name": "Drive config false does not confirm or activate an unverified save and can retry"
+        },
+        {
+          "file": "tests/drive-config-write-recovery.test.cjs",
+          "name": "Drive config ignore does not confirm or activate an unverified save and can retry"
+        },
+        {
+          "file": "tests/drive-config-write-recovery.test.cjs",
+          "name": "Drive config async-resolve does not confirm or activate an unverified save and can retry"
+        },
+        {
+          "file": "tests/drive-config-write-recovery.test.cjs",
+          "name": "Drive config read-denied does not confirm or activate an unverified save and can retry"
+        },
+        {
+          "file": "tests/drive-config-write-recovery.test.cjs",
+          "name": "Drive config rejected manager promise is consumed without an unhandled rejection or saved confirmation"
+        },
+        {
+          "file": "tests/drive-config-write-recovery.test.cjs",
+          "name": "confirmed synchronous Drive save survives module recreation"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "False or ignored GM write",
+          "expected": "Preserve active config and existing stored copy; restore controls and show error; retry succeeds.",
+          "regression": {
+            "file": "tests/drive-config-write-recovery.test.cjs",
+            "name": "Drive config ignore does not confirm or activate an unverified save and can retry"
+          }
+        },
+        {
+          "scenario": "Rejected unsupported async setter",
+          "expected": "No global unhandled rejection and no saved confirmation.",
+          "regression": {
+            "file": "tests/drive-config-write-recovery.test.cjs",
+            "name": "Drive config rejected manager promise is consumed without an unhandled rejection or saved confirmation"
+          }
+        },
+        {
+          "scenario": "Read unavailable after attempted write",
+          "expected": "Do not claim success or mutate active config before verifying.",
+          "regression": {
+            "file": "tests/drive-config-write-recovery.test.cjs",
+            "name": "Drive config read-denied does not confirm or activate an unverified save and can retry"
+          }
+        },
+        {
+          "scenario": "Confirmed synchronous save",
+          "expected": "Keep success reachable and recover from storage in recreated module.",
+          "regression": {
+            "file": "tests/drive-config-write-recovery.test.cjs",
+            "name": "confirmed synchronous Drive save survives module recreation"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Real manager persistence/DOM/browser",
+          "reason": "Synthetic storage/event fixture only, no live Google/game actions."
+        },
+        {
+          "scope": "Rollback of an external write that completes late or fails after mutation",
+          "reason": "Unsupported async write side effects cannot be cancelled by this guard; no overwrite of potentially concurrent persisted values."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Trace the actual mounted checkbox listener through storeConfig and failure presentation.",
+        "Derive silent no-op/false/readback mismatch cases and ensure revision/config notifications remain unadvanced before confirmation.",
+        "Check strict unhandled rejection handling, valid synchronous success, retry and module recreation; distinguish configuration from credential persistence."
+      ]
     }
   ]
 }

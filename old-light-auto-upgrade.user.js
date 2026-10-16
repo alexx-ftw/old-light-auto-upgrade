@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.17
+// @version      1.17.18
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -5631,7 +5631,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.17';
+  const SCRIPT_VERSION = '1.17.18';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -7225,6 +7225,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.18', title: 'Confirmar el guardado de preferencias de Drive', changes: [
+        'Los cambios de preferencias de Drive solo se activan y confirman después de releer los valores guardados.',
+        'Una escritura rechazada o ignorada conserva la configuración activa y muestra el error existente para poder reintentar.',
+        'Se consumen los rechazos del setter asíncrono no compatible sin confundir una promesa pendiente con un guardado confirmado.',
+      ] },
       { version: '1.17.17', title: 'Conservar ajustes cuando falla la lectura', changes: [
         'Si los ajustes guardados no se pueden leer o su raíz es inválida, la automatización queda pausada en lugar de activarse con valores iniciales.',
         'Una pestaña abierta conserva sus exclusiones, mínimos y demás ajustes en memoria; una lectura válida posterior recupera la configuración guardada.',
@@ -18136,8 +18141,14 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       if (!fromBackup && next.clientId !== config.clientId) next.accountHint = '';
       const written = gmSetValue(STORAGE_KEY, { ...next });
       if (written && typeof written.then === 'function') {
+        // This API requires synchronous persistence. Consume an unsupported
+        // manager rejection without treating a pending write as confirmed.
+        Promise.resolve(written).catch(() => {});
         throw new TypeError('createDriveBackup necesita GM_setValue síncrono.');
       }
+      if (written === false) throw new Error('storage_error');
+      const saved = validateConfig(gmGetValue(STORAGE_KEY, null));
+      if (Object.keys(next).some(key => saved[key] !== next[key])) throw new Error('storage_error');
       const changed = Object.keys(next).some(key => next[key] !== config[key]);
       if (!next.autoBackup) pendingBackup = null;
       if (next.clientId !== config.clientId) {
