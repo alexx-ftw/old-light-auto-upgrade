@@ -3013,6 +3013,76 @@
         "Verify stale census, reserve, competing mission and recovered uncertain ticket separately from legitimate ready route.",
         "Refreshing diagnosis must retain control identity/focus and distinguish local observation from confirmed game effects."
       ]
+    },
+    {
+      "id": "reinforcement-countdown-marker-send-now",
+      "feedback": "Se solicitan cuenta atrás hasta siguiente comprobación, acceso flotante a resumen/configuración y envío inmediato que omite solo el intervalo. Las funciones no existían en 1.17.11; no se atribuye la causa del no-envío real a esta carencia.",
+      "beforeFail": {
+        "revision": "e7fdf2567d72c98a59768aef7aa4160fdc0f8eae",
+        "command": "env -u NODE_PATH node --test --test-name-pattern='send now|countdown|floating route|multiple route markers' tests/reinforcement-core.test.cjs tests/reinforcement-panel.test.cjs (same new tests against baseline modules in isolated tree)",
+        "observedFailure": "TypeError: engine.sendNow is not a function; countdown text absent; floating markers unavailable. Feature expectations fail on baseline without changing harness.",
+        "evidence": "docs/1.17.12-route-actions-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-core.test.cjs",
+          "name": "send now bypasses only cooldown and queues capped available types with reserves"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "floating route control follows projections, opens summary and preserves repeated-open drafts"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "route countdown updates to expiry without replacing controls and pauses explicitly"
+        },
+        {
+          "file": "tests/reinforcement-core.test.cjs",
+          "name": "send now shares one durable ticket across same-origin routes, reload and concurrent clients"
+        },
+        {
+          "file": "tests/reinforcement-integration.test.cjs",
+          "name": "send now real queue bypasses cooldown once and freezes available capped fleet with reserve"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Manual send during automatic cooldown with partial fixed fleet",
+          "expected": "One ticket containing capped available configured types after reserve; no interval bypass for ordinary tick.",
+          "regression": {
+            "file": "tests/reinforcement-core.test.cjs",
+            "name": "send now bypasses only cooldown and queues capped available types with reserves"
+          }
+        },
+        {
+          "scenario": "Expiry, pause/resume and repeated rendering",
+          "expected": "Show next-check ETA and blockers without sending, reactivating or replacing focused controls.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "route countdown updates to expiry without replacing controls and pauses explicitly"
+          }
+        },
+        {
+          "scenario": "Camera projection changes, missing projection, repeated route opening and scope change",
+          "expected": "Reproject or hide markers, preserve unsaved same-route draft, revoke stale marker actions.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "floating route control follows projections, opens summary and preserves repeated-open drafts"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Real browser camera/zoom and native game send",
+          "reason": "Only simulated tests authorized; no live game action. Exact original no-send cause remains unknown."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Verify manual marker only bypasses timing; all fleet, owner, fresh census, transit, receipt, Web Locks, queue and native final guards remain enforced.",
+        "Challenge same-origin concurrent routes, another client, double click, reentrant pause/scope/leadership change and recovered sending claims.",
+        "Inspect marker layering/hit area, camera freshness, remount, keyboard activation, repeated opening and draft preservation.",
+        "Check timer boundary and interval edit policy against stored route and origin receipt; do not promise guaranteed dispatch."
+      ]
     }
   ]
 }

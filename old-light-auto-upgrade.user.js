@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.11
+// @version      1.17.12
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -86,6 +86,10 @@
       originId: systemId(get(value, 'originId')), destinationId: systemId(get(value, 'destinationId')),
       originName: text(get(value, 'originName'), 400), targetLabel: text(get(value, 'targetLabel'), 400),
       coordinate: point(get(value, 'coordinate')), quantities: amounts(get(value, 'quantities')) };
+    if (get(value, 'manual') !== undefined) {
+      if (get(value, 'manual') !== true) fail();
+      result.manual = true;
+    }
     if (result.originId !== route.originId || result.destinationId !== route.destinationId
       || !result.originName.trim() || !result.targetLabel.trim()) fail();
     return result;
@@ -279,10 +283,10 @@
       origins.add(originId);
       return origins.size <= MAX_RECEIPTS;
     }
-    function permits(state, route, world) {
+    function permits(state, route, world, manual = route.ticket?.manual === true) {
       const receipt = receiptFor(state, route.originId);
-      return Boolean(world && time() >= route.nextRunAt && (!receipt
-        || (time() >= receipt.nextRunAt && world.observedAt > receipt.lastSentAt)) && hasReceiptCapacity(state, route.originId)
+      return Boolean(world && (manual || time() >= route.nextRunAt) && (!receipt
+        || ((manual || time() >= receipt.nextRunAt) && world.observedAt > receipt.lastSentAt)) && hasReceiptCapacity(state, route.originId)
         && !state.routes.some(other => other.id !== route.id && other.originId === route.originId && (other.needsReview || other.ticket)));
     }
     function validSentAt(route, job) {
@@ -298,7 +302,7 @@
       liveTickets.delete(witnessKey(state.scope, route.ticket));
       return { state: recorded, route: next };
     }
-    function plan(route, world, requested = null, diagnostic = null) {
+    function plan(route, world, requested = null, diagnostic = null, manual = route.ticket?.manual === true) {
       const reject = (code, message) => { if (diagnostic) Object.assign(diagnostic, { code, message }); return null; };
       if (!world || (route.lastSentAt !== null && world.observedAt <= route.lastSentAt)) return reject('post-send-census', 'Esperando un censo posterior al último envío confirmado.');
       const origin = world.systems.get(route.originId), destination = world.systems.get(route.destinationId);
@@ -313,9 +317,10 @@
       const quantities = zeros();
       for (const type of SHIPS) {
         const rule = route.ships[type], available = Math.max(0, origin.fleet[type] - rule.reserve);
-        const desired = requested ? requested[type] : rule.mode === 'fixed' ? rule.amount : Math.min(MAX_QUANTITY, available);
+        const desired = requested ? requested[type] : rule.mode === 'fixed'
+          ? manual ? Math.min(rule.amount, available) : rule.amount : Math.min(MAX_QUANTITY, available);
         if (!Number.isSafeInteger(desired) || desired < 0 || desired > MAX_QUANTITY || desired > available
-          || (rule.mode === 'fixed' && desired !== rule.amount)) return reject('insufficient-ships', `Flota insuficiente para ${type}: disponibles ${available} tras reserva ${rule.reserve}; solicitadas ${desired}.`);
+          || (rule.mode === 'fixed' && (manual ? desired > rule.amount : desired !== rule.amount))) return reject('insufficient-ships', `Flota insuficiente para ${type}: disponibles ${available} tras reserva ${rule.reserve}; solicitadas ${desired}.`);
         quantities[type] = desired;
       }
       if (!SHIPS.some(type => quantities[type] > 0)) return reject('no-ships', 'Sin naves para enviar con estas reglas y reservas. Excedente usa las naves estacionadas menos la reserva; no produce naves.');
@@ -331,7 +336,8 @@
         const saved = load(scope), queueJobs = jobs(), proof = {};
         const world = worldFor(scope, false, proof);
         const result = (route, code, message) => ({ id: route.id, code, message, checkedAt,
-          lastSentAt: route.lastSentAt, nextRunAt: route.nextRunAt });
+          lastSentAt: route.lastSentAt,
+          nextRunAt: Math.max(route.nextRunAt, receiptFor(saved, route.originId)?.nextRunAt ?? 0) });
         return { checkedAt, routes: saved.routes.map(route => {
           const explain = (code, message) => result(route, code, message);
           if (route.needsReview) return explain('review', 'Ruta pendiente de revisión. Comprueba los movimientos; no se repetirá el envío.');
@@ -350,7 +356,7 @@
           }
           const receipt = receiptFor(saved, route.originId);
           const next = Math.max(route.nextRunAt, receipt?.nextRunAt ?? 0);
-          if (checkedAt < next) return explain('interval', `Esperando el intervalo guardado: ${Math.ceil((next - checkedAt) / 1000)} s. Reanudar no adelanta ese plazo.`);
+          if (!route.ticket?.manual && checkedAt < next) return explain('interval', `Esperando el intervalo guardado: ${Math.ceil((next - checkedAt) / 1000)} s. Reanudar no adelanta ese plazo.`);
           if (receipt && world.observedAt <= receipt.lastSentAt) return explain('post-send-census', 'Esperando un censo posterior al envío registrado para este origen.');
           if (!hasReceiptCapacity(saved, route.originId)) return explain('receipts', 'Registro de envíos lleno; esperando que caduquen comprobantes verificables.');
           if (saved.routes.some(other => other.id !== route.id && other.originId === route.originId && (other.needsReview || other.ticket))) return explain('origin-route', 'Otra ruta de este origen tiene un envío o revisión pendiente.');
@@ -607,7 +613,7 @@
         return result;
       } catch (_) { return []; }
     }
-    function tick() {
+    function prepare(manualId = null) {
       if (running) return { queued: [], error };
       running = true;
       try {
@@ -618,16 +624,17 @@
         const at = time(), queueJobs = jobs();
         if (!world) return { queued: [], error };
         const routes = saved.routes.filter(route => !route.paused && !route.needsReview && !route.ticket
-          && route.originId === ctx.originId && route.nextRunAt <= at).sort((a, b) => a.nextRunAt - b.nextRunAt || a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+          && route.originId === ctx.originId && (manualId ? route.id === manualId : route.nextRunAt <= at)).sort((a, b) => a.nextRunAt - b.nextRunAt || a.createdAt - b.createdAt || a.id.localeCompare(b.id));
         for (const route of routes) {
           if (queueJobs.some(job => job.scope === ctx.scope && job.originId === route.originId && (job.status !== 'sent' || job.needsReview))) break;
-          const ready = plan(route, world);
-          if (!ready || !permits(saved, route, world)) continue;
+          const manual = manualId !== null, ready = plan(route, world, null, null, manual);
+          if (!ready || !permits(saved, route, world, manual)) continue;
           const sequence = integer(saved.sequence + 1, 1);
           const ticket = { id: `route:${route.id}:${sequence}`, sequence, state: 'prepared', createdAt: at,
             originId: route.originId, destinationId: route.destinationId, originName: ready.origin.name.trim() || route.originId,
             targetLabel: ready.destination.name.trim() || route.destinationId,
             coordinate: { q: ready.destination.q, r: ready.destination.r }, quantities: ready.quantities };
+          if (manual) ticket.manual = true;
           const claimed = stamp({ ...route, sequence, ticket, status: 'queued', message: 'Guardando el refuerzo antes de crear la misión.' });
           saved = commit({ ...saved, sequence, routes: saved.routes.map(item => item.id === route.id ? claimed : item) });
           // A synchronous onChange hook may pause/delete the route or change the
@@ -658,7 +665,24 @@
       } catch (cause) { error = cause.message || 'No se pudo preparar el refuerzo.'; return { queued: [], error }; }
       finally { running = false; }
     }
-    return Object.freeze({ state, list, save, pause, resume, remove, acknowledgeRoute, tick, canRunJob, jobState, dueOrigins, diagnostics });
+    function tick() { return prepare(); }
+    function sendNow(id) {
+      const ctx = context(), saved = load(ctx.scope), route = find(saved, routeId(id));
+      if (running) fail('Ya se está preparando una ruta. No se repetirá.');
+      if (route.paused || route.needsReview) fail('La ruta está pausada o necesita revisión. No se reanudará para enviar ahora.');
+      if (route.ticket) fail('Esta ruta ya tiene un envío pendiente. No se repetirá.');
+      if (!ctx.canAct || !ctx.coordinated) fail('Envío bloqueado por el contexto actual o la coordinación de pestañas. Consulta el diagnóstico.');
+      if (ctx.originId !== route.originId) fail('Selecciona el sistema de origen verificado antes de enviar ahora.');
+      const world = worldFor(ctx.scope), detail = {};
+      if (!world) fail('No hay un censo propio reciente y válido.');
+      if (!plan(route, world, null, detail, true)) fail(detail.message);
+      if (!permits(saved, route, world, true)) fail('Otro envío, revisión o comprobante del origen impide preparar esta ruta.');
+      if (jobs().some(job => job.scope === ctx.scope && job.originId === route.originId && (job.status !== 'sent' || job.needsReview))) fail('Hay otra misión pendiente o por revisar en este origen.');
+      const result = prepare(id);
+      if (!result.queued.length) fail(result.error || 'El contexto cambió antes de crear la misión. No se ha confirmado su preparación; revisa la ruta y la cola.');
+      return result;
+    }
+    return Object.freeze({ state, list, save, pause, resume, remove, acknowledgeRoute, tick, sendNow, canRunJob, jobState, dueOrigins, diagnostics });
   }
   return Object.freeze({ create, SHIPS, MAX_AGE_MS, MAX_QUANTITY, MAX_ROUTES, MAX_RECEIPTS });
 });
@@ -1192,7 +1216,7 @@ return {create};
     const timer = options.setTimeout || window.setTimeout?.bind(window) || setTimeout;
     const clearTimer = options.clearTimeout || window.clearTimeout?.bind(window) || clearTimeout;
     const id = ++sequence, markerId = `oldlight-route-arrow-${id}`, miniMarkerId = markerId + '-mini';
-    let root, style, details, list, status, error, availability, editor, mini, overlay, origin, destination, interval, saveButton, mapHint;
+    let root, style, details, list, status, error, availability, editor, mini, overlay, markers, origin, destination, interval, saveButton, mapHint;
     let destroyed = false, scope = null, scopeEpoch = 0, editorScope = '', draftId = null, busy = false, operation = 0;
     let pointerSample = null, intent = null, gestureNotice = null;
     let gesture = null, releaseTimer = null, ignoreClick = null, anchors = new Map(), hoverSample = null;
@@ -1200,7 +1224,8 @@ return {create};
     let explicitEndpoints = false;
     let sourceError = '', mapCache = null;
     const readError = () => { try { return clean(options.getError?.() || ''); } catch (_) { return 'No se puede leer el estado de las rutas.'; } };
-    const fields = new Map(), listeners = [], diagnosticNodes = new Map();
+    const fields = new Map(), listeners = [], diagnosticNodes = new Map(), markerNodes = new Map();
+    const helperContains = node => root?.contains?.(node) || markers?.contains?.(node);
     const el = (tag, text, cls) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node; };
     const svg = tag => document.createElementNS(SVG, tag);
     const attr = (node, key, value) => { const s = String(value); if (node.getAttribute(key) !== s) node.setAttribute(key, s); };
@@ -1238,6 +1263,7 @@ return {create};
     function invalidateMap() {
       anchors.clear(); hoverSample = null; pointerSample = null; overlaySignature = '';
       if (overlay) { overlay.replaceChildren(); hideSVG(overlay, true); }
+      if (markers) { markers.hidden = true; markers.replaceChildren(); markerNodes.clear(); }
     }
     function cancelGesture() {
       const previous = gesture; gesture = null;
@@ -1336,6 +1362,9 @@ return {create};
       // HUD layers, not just positive-z panels. Reattach after native remounts.
       try {
         if (overlay.parentNode !== parent || canvas.nextSibling !== overlay) parent.insertBefore(overlay, canvas.nextSibling);
+        // A positioned zero-layer control paints above the unpositioned canvas,
+        // while its DOM position before the canvas keeps it below the native HUD.
+        if (markers && (markers.parentNode !== parent || markers.nextSibling !== canvas)) parent.insertBefore(markers, canvas);
         return true;
       } catch (_) { return false; }
     }
@@ -1343,14 +1372,14 @@ return {create};
       if (!overlay || destroyed) return;
       observeScope(getScope());
       const canvas = stage(), rect = canvas?.getBoundingClientRect?.();
-      if ((!current() && !gesture) || blocked() || !rect || rect.width <= 0 || rect.height <= 0 || canvas.hidden || !placeOverlay(canvas)) { hideSVG(overlay, true); return; }
+      if ((!current() && !gesture) || blocked() || !rect || rect.width <= 0 || rect.height <= 0 || canvas.hidden || !placeOverlay(canvas)) { hideSVG(overlay, true); if (markers) markers.hidden = true; return; }
       const at = now();
       if (!mapCache || mapCache.scope !== scope || at < mapCache.at || at - mapCache.at >= 500) {
         const items = routes();
         mapCache = { scope, at, items, rows: (gesture || items.length) ? systems() : [] };
       }
       const { rows, items } = mapCache;
-      if (!gesture && !items.length) { hideSVG(overlay, true); return; }
+      if (!gesture && !items.length) { hideSVG(overlay, true); if (markers) markers.hidden = true; return; }
       sampleHover(rows);
       const byId = new Map(rows.map(s => [s.id, s]));
       const segments = items.map(route => ({ route, from: projected(byId.get(route.originId), rect), to: projected(byId.get(route.destinationId), rect) })).filter(s => pointValid(s.from) && pointValid(s.to));
@@ -1362,11 +1391,50 @@ return {create};
       const signature = JSON.stringify([rect.left, rect.top, rect.width, rect.height,
         segments.map(s => [s.route.id, s.route.paused, s.from, s.to, !!s.preview])]);
       hideSVG(overlay, !segments.length);
+      drawMarkers(segments.filter(segment => !segment.preview), rect);
       if (signature === overlaySignature) return;
       overlaySignature = signature; overlay.replaceChildren();
       Object.assign(overlay.style, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
       attr(overlay, 'viewBox', `0 0 ${rect.width} ${rect.height}`); makeMarker(overlay, markerId);
       for (const segment of segments) addLine(overlay, segment.from, segment.to, segment.route, markerId, segment.preview);
+    }
+    function openRoute(id) {
+      observeScope(getScope()); if (!current() || busy) return;
+      const route = routes().find(item => item.id === id);
+      if (!route) { reportGesture('La ruta ya no existe en esta cuenta y galaxia.', true); return; }
+      if (!editor.hidden && editorScope === scope && draftId === id) {
+        // Repeated marker activation must not replace an unsaved draft.
+        details.open = true;
+        try { options.onOpen?.({ routeId: id, originId: route.originId, destinationId: route.destinationId }); }
+        catch (_) { reportGesture('No se pudo mostrar la configuración. Abre Flota y Misiones en el Helper.', true); return; }
+      } else showEditor(route.originId, route.destinationId, route);
+      const nodes = diagnosticNodes.get(id);
+      nodes?.reason?.scrollIntoView?.({ block: 'nearest' });
+    }
+    function drawMarkers(segments, rect) {
+      if (!markers) return;
+      const keep = new Set();
+      for (const [index, segment] of segments.entries()) {
+        const fraction = .45 + (index % 3) * .1;
+        const x = rect.left + segment.from.x + (segment.to.x - segment.from.x) * fraction;
+        const y = rect.top + segment.from.y + (segment.to.y - segment.from.y) * fraction;
+        if (!finite(x) || !finite(y) || x < rect.left + 28 || x > rect.right - 28 || y < rect.top + 18 || y > rect.bottom - 18) continue;
+        const id = segment.route.id; keep.add(id);
+        let node = markerNodes.get(id);
+        if (!node) {
+          const epoch = scopeEpoch;
+          node = button('Ruta', event => { if (trusted(event) && current() && epoch === scopeEpoch) openRoute(id); });
+          node.dataset.routeMarker = id;
+          Object.assign(node.style, { position: 'fixed', pointerEvents: 'auto', transform: 'translate(-50%,-50%)', minHeight: '32px', padding: '4px 8px', border: '1px solid #79d7dd', borderRadius: '8px', background: '#101d29', color: '#e5eef6', font: '12px system-ui,sans-serif', cursor: 'pointer' });
+          markers.append(node); markerNodes.set(id, node);
+        }
+        const name = clean(segment.route.name) || `Ruta ${index + 1}`;
+        node.setAttribute('aria-label', `Abrir resumen y configuración: ${name}`);
+        node.title = `Abrir resumen y configuración: ${name}. No envía naves.`;
+        node.style.left = `${x}px`; node.style.top = `${y}px`;
+      }
+      for (const [id, node] of markerNodes) if (!keep.has(id)) { node.remove(); markerNodes.delete(id); }
+      markers.hidden = keep.size === 0;
     }
     function showEditor(originId, destinationId, route = null, unresolved = false) {
       observeScope(getScope()); if (!current() || busy) return;
@@ -1484,14 +1552,24 @@ return {create};
           if (route.needsReview) row.append(el('p', 'Comprueba los movimientos del juego. Marcar como revisado descarta este intento local, conserva la ruta pausada y exige un nuevo intervalo y censo; no se repetirá el envío automáticamente.', 'oldlight-route-hint'));
           if (route.message) row.append(el('p', clean(route.message), route.needsReview ? 'oldlight-route-error' : 'oldlight-route-hint'));
           const reason = el('p', '', 'oldlight-route-status'), checked = el('p', '', 'oldlight-route-hint');
+          const eta = el('p', '', 'oldlight-route-status'); eta.dataset.routeEta = route.id;
           const lastSend = el('p', '', 'oldlight-route-hint');
           reason.dataset.routeDiagnostic = route.id;
-          row.append(reason, checked, lastSend);
-          diagnosticNodes.set(route.id, { reason, checked, lastSend });
+          row.append(eta, reason, checked, lastSend);
+          diagnosticNodes.set(route.id, { reason, checked, lastSend, eta });
           const controls = el('div', undefined, 'oldlight-route-tools');
           controls.append(button('Editar', () => { if (current() && rowEpoch === scopeEpoch) showEditor(route.originId, route.destinationId, routes().find(r => r.id === route.id)); }),
             button(route.paused ? 'Reanudar' : 'Pausar', () => { if (!current() || rowEpoch !== scopeEpoch) return; const latest = routes().find(r => r.id === route.id); if (latest) act(() => call('onPause', route.id, !latest.paused), () => report(latest.paused ? 'Ruta reanudada.' : 'Ruta pausada.')); }),
             button('Eliminar', () => { if (current() && rowEpoch === scopeEpoch && routes().some(r => r.id === route.id)) act(() => call('onDelete', route.id), () => report('Ruta eliminada.')); }));
+          const sendNow = button('Enviar ahora', event => {
+            if (!trusted(event) || !current() || rowEpoch !== scopeEpoch) return;
+            const latest = routes().find(item => item.id === route.id);
+            if (!latest || latest.paused || latest.needsReview || latest.ticket) { report('Ruta pausada, en revisión o con envío pendiente. No se reanuda ni se duplica.', true); return; }
+            act(() => call('onSendNow', route.id), () => report('Solicitud preparada en la cola. El envío conserva sus comprobaciones nativas y de protección.'));
+          });
+          sendNow.title = 'Omite solo el intervalo. Envía lo disponible de los tipos configurados, hasta la cantidad fija y dejando la reserva. Requiere seleccionar el origen y superar las demás comprobaciones.';
+          sendNow.dataset.routeBlocked = String(!!(route.paused || route.needsReview || route.ticket));
+          controls.append(sendNow);
           if (route.needsReview) for (const control of controls.querySelectorAll('button')) {
             control.dataset.routeBlocked = 'true';
             control.title = 'Comprueba el envío y completa primero la revisión de la ruta.';
@@ -1510,6 +1588,13 @@ return {create};
         ? new Date(at).toLocaleTimeString() : '';
       for (const [id, nodes] of diagnosticNodes) {
         const diagnostic = diagnostics?.routes?.find(item => item.id === id);
+        const route = items.find(item => item.id === id), at = now(), next = diagnostic?.nextRunAt ?? route?.nextRunAt;
+        const seconds = Number.isSafeInteger(next) && next >= 0 && finite(at) ? Math.max(0, Math.ceil((next - at) / 1000)) : null;
+        const duration = seconds === null ? '' : `${String(Math.floor(seconds / 3600)).padStart(2, '0')}:${String(Math.floor(seconds / 60) % 60).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+        write(nodes.eta, route?.paused || route?.needsReview ? 'Cuenta atrás suspendida: la ruta no se reanudará automáticamente.'
+          : route?.ticket ? 'Envío pendiente: esperando comprobaciones y confirmación.'
+          : seconds === null ? 'ETA de comprobación sin verificar.' : seconds > 0
+            ? `Próxima comprobación en ${duration}. No garantiza un envío.` : 'Intervalo vencido: próxima comprobación pendiente. No garantiza un envío.');
         write(nodes.reason, clean(diagnostic?.message || diagnostics?.error || 'Motivo actual de espera no disponible.'));
         const checked = formatTime(diagnostic?.checkedAt ?? diagnostics?.checkedAt);
         write(nodes.checked, checked ? `Comprobación local: ${checked}. No confirma un envío ni actividad en la partida.` : 'Sin comprobación local disponible.');
@@ -1523,9 +1608,9 @@ return {create};
     function down(event) {
       if (destroyed) return;
       const canvas = stage();
-      if (!trusted(event)) { if (!root?.contains?.(event.target)) { cancelGesture(); invalidateMap(); } return; }
+      if (!trusted(event)) { if (!helperContains(event.target)) { cancelGesture(); invalidateMap(); } return; }
       if (intent && event.type === 'mousedown') { swallow(event); return; }
-      if (event.target !== canvas) { if (!root?.contains?.(event.target)) { cancelGesture(); invalidateMap(); } return; }
+      if (event.target !== canvas) { if (!helperContains(event.target)) { cancelGesture(); invalidateMap(); } return; }
       if (!event.ctrlKey || event.shiftKey || event.metaKey || event.altKey || event.button !== 0 || (event.pointerType && event.pointerType !== 'mouse')) { intent = null; cancelGesture(); invalidateMap(); return; }
       // Reserve only this exact map gesture, independently of route authority.
       // Missing census/camera must never turn a requested route into native pan.
@@ -1636,11 +1721,11 @@ return {create};
       for (const name of ['pointerup', 'mouseup']) listen(window, name, up, true);
       listen(window, 'click', event => {
         if (ignoreClick && event.target === stage() && now() < ignoreClick.until && Math.hypot(event.clientX - ignoreClick.x, event.clientY - ignoreClick.y) < 12) { ignoreClick = null; swallow(event); return; }
-        if (!root.contains?.(event.target)) { cancelGesture(); invalidateMap(); }
+        if (!helperContains(event.target)) { cancelGesture(); invalidateMap(); }
       }, true);
       listen(window, 'keydown', event => {
         if (event.key === 'Escape') { cancelGesture(); if (gestureNotice) gestureNotice.hidden = true; drawOverlay(); }
-        else if (!['Control', 'Shift', 'Alt', 'Meta'].includes(event.key) && !root.contains?.(event.target)) { cancelGesture(); invalidateMap(); }
+        else if (!['Control', 'Shift', 'Alt', 'Meta'].includes(event.key) && !helperContains(event.target)) { cancelGesture(); invalidateMap(); }
       }, true);
       listen(window, 'keyup', event => { if (event.key === 'Control') { cancelGesture(); drawOverlay(); } }, true);
       for (const name of ['wheel', 'resize', 'scroll', 'blur', 'pointercancel', 'pagehide', 'popstate', 'hashchange']) listen(window, name, () => { cancelGesture(); invalidateMap(); if (gestureNotice) gestureNotice.hidden = true; if (['blur', 'pointercancel', 'pagehide'].includes(name)) intent = null; }, true);
@@ -1665,6 +1750,7 @@ return {create};
       status = el('p', '', 'oldlight-route-status'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
       error = el('p', '', 'oldlight-route-error'); error.setAttribute('role', 'alert'); details.append(status, error);
       availability = el('p', '', 'oldlight-route-hint'); details.append(availability);
+      details.append(el('p', 'Enviar ahora omite solo el intervalo: selecciona el origen y envía lo disponible de los tipos configurados, hasta su cantidad fija y dejando la reserva. No reanuda rutas pausadas ni elimina bloqueos.', 'oldlight-route-hint'));
       details.append(el('p', 'Esquema de rutas · independiente de la cámara', 'oldlight-route-hint'));
       mini = svg('svg'); mini.classList?.add('oldlight-route-map'); attr(mini, 'role', 'img'); attr(mini, 'aria-label', 'Esquema de rutas entre sistemas propios'); details.append(mini);
       mapHint = el('p', '', 'oldlight-route-hint'); details.append(mapHint);
@@ -1692,6 +1778,9 @@ return {create};
       gestureNotice.setAttribute('aria-live', 'polite');
       Object.assign(gestureNotice.style, { position: 'fixed', bottom: '18px', left: '50%', transform: 'translateX(-50%)', maxWidth: 'min(600px,90vw)', padding: '10px 14px', background: '#101d29', color: '#e5eef6', border: '1px solid #79d7dd', borderRadius: '8px', zIndex: '2147483646', pointerEvents: 'none', font: '13px/1.4 system-ui,sans-serif' });
       (document.body || container).append(gestureNotice);
+      markers = el('div'); markers.setAttribute('aria-label', 'Accesos a rutas de refuerzo'); markers.setAttribute('role', 'group');
+      markers.className = 'oldlight-route-markers'; markers.hidden = true;
+      Object.assign(markers.style, { position: 'fixed', inset: '0', pointerEvents: 'none', zIndex: '0' });
       overlay = svg('svg'); overlay.classList?.add('oldlight-route-overlay'); attr(overlay, 'aria-hidden', 'true');
       // The panel may live in Helper's ShadowRoot, but the arrow belongs beside
       // the native canvas, below its UI. Inline paint crosses no shadow boundary.
@@ -1704,9 +1793,9 @@ return {create};
       destroyed = true; operation++; cancelGesture();
       if (frame !== null) window.cancelAnimationFrame?.(frame);
       for (const remove of listeners.splice(0)) remove();
-      root?.remove(); overlay?.remove(); gestureNotice?.remove(); intent = null; anchors.clear();
+      root?.remove(); overlay?.remove(); markers?.remove(); markerNodes.clear(); gestureNotice?.remove(); intent = null; anchors.clear();
     }
-    return Object.freeze({ mount, render, observeScope, open: showEditor, cancelGesture, invalidateMap, destroy });
+    return Object.freeze({ mount, render, observeScope, open: showEditor, openRoute, containsControl: node => markers?.contains?.(node) === true, cancelGesture, invalidateMap, destroy });
   }
   return Object.freeze({ create, ownSystems, SHIPS: Object.freeze(SHIPS.slice()) });
 });
@@ -5409,7 +5498,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.11';
+  const SCRIPT_VERSION = '1.17.12';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -6998,6 +7087,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.12', title: 'Rutas con cuenta atrás y envío inmediato', changes: [
+        'Cuenta atrás hasta la siguiente comprobación de cada ruta, con bloqueos y confirmaciones separados.',
+        'El acceso Ruta sobre cada flecha abre su resumen y configuración sin enviar naves.',
+        'Enviar ahora omite solo el intervalo y prepara las naves disponibles de los tipos configurados, respetando reservas, cantidades máximas y protecciones.',
+      ] },
       { version: '1.17.11', title: 'Motivo de espera de cada ruta', changes: [
         'Cada ruta muestra su impedimento actual, hora de comprobación local y último envío confirmado.',
         'Distingue controles nativos cerrados, coordinación, censo, intervalo guardado, flota disponible y misiones pendientes.',
@@ -18570,7 +18664,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
             ships: document.querySelector(`${FLEET_PANEL} [data-field="ship-queue-list"]`)?.children.length ?? null },
           energy: signedInteger(document.querySelector('[data-field="res-energy"]')) }),
         canNavigate: canNavigateEmpire, onChange: schedule,
-        isHelperEvent: event => Boolean(host && event.composedPath().includes(host)),
+        isHelperEvent: event => Boolean(host && event.composedPath().includes(host) || reinforcementPanel?.containsControl(event.target)),
         isHelperEditorFocused: () => Boolean(host?.shadowRoot?.activeElement?.matches('input,select,textarea,[contenteditable="true"]')),
         onManualInteraction: ms => { empireController?.suspendInteraction(ms); if (typeof reinforcementNavigation !== 'undefined') reinforcementNavigation?.cancel(); } });
       empireController = runtime.create({ core, adapter: empireAdapter, onChange: schedule,
@@ -18659,6 +18753,11 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         syncSettingsTabs(); layoutHelper(); saveSettings(); ui.scroll.scrollTop = 0;
       },
       onSave: changed(value => reinforcementRoutes.save(value)),
+      onSendNow: changed(id => {
+        const block = reinforcementDispatchBlock();
+        if (block) throw new Error(block.message);
+        return reinforcementRoutes.sendNow(id);
+      }),
       onPause: changed((id, paused) => reinforcementRoutes.pause(id, paused)),
       onDelete: changed(id => reinforcementRoutes.remove(id)),
       onAcknowledge: changed(id => reinforcementRoutes.acknowledgeRoute(id)) });

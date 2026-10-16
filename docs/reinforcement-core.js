@@ -61,6 +61,10 @@
       originId: systemId(get(value, 'originId')), destinationId: systemId(get(value, 'destinationId')),
       originName: text(get(value, 'originName'), 400), targetLabel: text(get(value, 'targetLabel'), 400),
       coordinate: point(get(value, 'coordinate')), quantities: amounts(get(value, 'quantities')) };
+    if (get(value, 'manual') !== undefined) {
+      if (get(value, 'manual') !== true) fail();
+      result.manual = true;
+    }
     if (result.originId !== route.originId || result.destinationId !== route.destinationId
       || !result.originName.trim() || !result.targetLabel.trim()) fail();
     return result;
@@ -254,10 +258,10 @@
       origins.add(originId);
       return origins.size <= MAX_RECEIPTS;
     }
-    function permits(state, route, world) {
+    function permits(state, route, world, manual = route.ticket?.manual === true) {
       const receipt = receiptFor(state, route.originId);
-      return Boolean(world && time() >= route.nextRunAt && (!receipt
-        || (time() >= receipt.nextRunAt && world.observedAt > receipt.lastSentAt)) && hasReceiptCapacity(state, route.originId)
+      return Boolean(world && (manual || time() >= route.nextRunAt) && (!receipt
+        || ((manual || time() >= receipt.nextRunAt) && world.observedAt > receipt.lastSentAt)) && hasReceiptCapacity(state, route.originId)
         && !state.routes.some(other => other.id !== route.id && other.originId === route.originId && (other.needsReview || other.ticket)));
     }
     function validSentAt(route, job) {
@@ -273,7 +277,7 @@
       liveTickets.delete(witnessKey(state.scope, route.ticket));
       return { state: recorded, route: next };
     }
-    function plan(route, world, requested = null, diagnostic = null) {
+    function plan(route, world, requested = null, diagnostic = null, manual = route.ticket?.manual === true) {
       const reject = (code, message) => { if (diagnostic) Object.assign(diagnostic, { code, message }); return null; };
       if (!world || (route.lastSentAt !== null && world.observedAt <= route.lastSentAt)) return reject('post-send-census', 'Esperando un censo posterior al último envío confirmado.');
       const origin = world.systems.get(route.originId), destination = world.systems.get(route.destinationId);
@@ -288,9 +292,10 @@
       const quantities = zeros();
       for (const type of SHIPS) {
         const rule = route.ships[type], available = Math.max(0, origin.fleet[type] - rule.reserve);
-        const desired = requested ? requested[type] : rule.mode === 'fixed' ? rule.amount : Math.min(MAX_QUANTITY, available);
+        const desired = requested ? requested[type] : rule.mode === 'fixed'
+          ? manual ? Math.min(rule.amount, available) : rule.amount : Math.min(MAX_QUANTITY, available);
         if (!Number.isSafeInteger(desired) || desired < 0 || desired > MAX_QUANTITY || desired > available
-          || (rule.mode === 'fixed' && desired !== rule.amount)) return reject('insufficient-ships', `Flota insuficiente para ${type}: disponibles ${available} tras reserva ${rule.reserve}; solicitadas ${desired}.`);
+          || (rule.mode === 'fixed' && (manual ? desired > rule.amount : desired !== rule.amount))) return reject('insufficient-ships', `Flota insuficiente para ${type}: disponibles ${available} tras reserva ${rule.reserve}; solicitadas ${desired}.`);
         quantities[type] = desired;
       }
       if (!SHIPS.some(type => quantities[type] > 0)) return reject('no-ships', 'Sin naves para enviar con estas reglas y reservas. Excedente usa las naves estacionadas menos la reserva; no produce naves.');
@@ -306,7 +311,8 @@
         const saved = load(scope), queueJobs = jobs(), proof = {};
         const world = worldFor(scope, false, proof);
         const result = (route, code, message) => ({ id: route.id, code, message, checkedAt,
-          lastSentAt: route.lastSentAt, nextRunAt: route.nextRunAt });
+          lastSentAt: route.lastSentAt,
+          nextRunAt: Math.max(route.nextRunAt, receiptFor(saved, route.originId)?.nextRunAt ?? 0) });
         return { checkedAt, routes: saved.routes.map(route => {
           const explain = (code, message) => result(route, code, message);
           if (route.needsReview) return explain('review', 'Ruta pendiente de revisión. Comprueba los movimientos; no se repetirá el envío.');
@@ -325,7 +331,7 @@
           }
           const receipt = receiptFor(saved, route.originId);
           const next = Math.max(route.nextRunAt, receipt?.nextRunAt ?? 0);
-          if (checkedAt < next) return explain('interval', `Esperando el intervalo guardado: ${Math.ceil((next - checkedAt) / 1000)} s. Reanudar no adelanta ese plazo.`);
+          if (!route.ticket?.manual && checkedAt < next) return explain('interval', `Esperando el intervalo guardado: ${Math.ceil((next - checkedAt) / 1000)} s. Reanudar no adelanta ese plazo.`);
           if (receipt && world.observedAt <= receipt.lastSentAt) return explain('post-send-census', 'Esperando un censo posterior al envío registrado para este origen.');
           if (!hasReceiptCapacity(saved, route.originId)) return explain('receipts', 'Registro de envíos lleno; esperando que caduquen comprobantes verificables.');
           if (saved.routes.some(other => other.id !== route.id && other.originId === route.originId && (other.needsReview || other.ticket))) return explain('origin-route', 'Otra ruta de este origen tiene un envío o revisión pendiente.');
@@ -582,7 +588,7 @@
         return result;
       } catch (_) { return []; }
     }
-    function tick() {
+    function prepare(manualId = null) {
       if (running) return { queued: [], error };
       running = true;
       try {
@@ -593,16 +599,17 @@
         const at = time(), queueJobs = jobs();
         if (!world) return { queued: [], error };
         const routes = saved.routes.filter(route => !route.paused && !route.needsReview && !route.ticket
-          && route.originId === ctx.originId && route.nextRunAt <= at).sort((a, b) => a.nextRunAt - b.nextRunAt || a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+          && route.originId === ctx.originId && (manualId ? route.id === manualId : route.nextRunAt <= at)).sort((a, b) => a.nextRunAt - b.nextRunAt || a.createdAt - b.createdAt || a.id.localeCompare(b.id));
         for (const route of routes) {
           if (queueJobs.some(job => job.scope === ctx.scope && job.originId === route.originId && (job.status !== 'sent' || job.needsReview))) break;
-          const ready = plan(route, world);
-          if (!ready || !permits(saved, route, world)) continue;
+          const manual = manualId !== null, ready = plan(route, world, null, null, manual);
+          if (!ready || !permits(saved, route, world, manual)) continue;
           const sequence = integer(saved.sequence + 1, 1);
           const ticket = { id: `route:${route.id}:${sequence}`, sequence, state: 'prepared', createdAt: at,
             originId: route.originId, destinationId: route.destinationId, originName: ready.origin.name.trim() || route.originId,
             targetLabel: ready.destination.name.trim() || route.destinationId,
             coordinate: { q: ready.destination.q, r: ready.destination.r }, quantities: ready.quantities };
+          if (manual) ticket.manual = true;
           const claimed = stamp({ ...route, sequence, ticket, status: 'queued', message: 'Guardando el refuerzo antes de crear la misión.' });
           saved = commit({ ...saved, sequence, routes: saved.routes.map(item => item.id === route.id ? claimed : item) });
           // A synchronous onChange hook may pause/delete the route or change the
@@ -633,7 +640,24 @@
       } catch (cause) { error = cause.message || 'No se pudo preparar el refuerzo.'; return { queued: [], error }; }
       finally { running = false; }
     }
-    return Object.freeze({ state, list, save, pause, resume, remove, acknowledgeRoute, tick, canRunJob, jobState, dueOrigins, diagnostics });
+    function tick() { return prepare(); }
+    function sendNow(id) {
+      const ctx = context(), saved = load(ctx.scope), route = find(saved, routeId(id));
+      if (running) fail('Ya se está preparando una ruta. No se repetirá.');
+      if (route.paused || route.needsReview) fail('La ruta está pausada o necesita revisión. No se reanudará para enviar ahora.');
+      if (route.ticket) fail('Esta ruta ya tiene un envío pendiente. No se repetirá.');
+      if (!ctx.canAct || !ctx.coordinated) fail('Envío bloqueado por el contexto actual o la coordinación de pestañas. Consulta el diagnóstico.');
+      if (ctx.originId !== route.originId) fail('Selecciona el sistema de origen verificado antes de enviar ahora.');
+      const world = worldFor(ctx.scope), detail = {};
+      if (!world) fail('No hay un censo propio reciente y válido.');
+      if (!plan(route, world, null, detail, true)) fail(detail.message);
+      if (!permits(saved, route, world, true)) fail('Otro envío, revisión o comprobante del origen impide preparar esta ruta.');
+      if (jobs().some(job => job.scope === ctx.scope && job.originId === route.originId && (job.status !== 'sent' || job.needsReview))) fail('Hay otra misión pendiente o por revisar en este origen.');
+      const result = prepare(id);
+      if (!result.queued.length) fail(result.error || 'El contexto cambió antes de crear la misión. No se ha confirmado su preparación; revisa la ruta y la cola.');
+      return result;
+    }
+    return Object.freeze({ state, list, save, pause, resume, remove, acknowledgeRoute, tick, sendNow, canRunJob, jobState, dueOrigins, diagnostics });
   }
   return Object.freeze({ create, SHIPS, MAX_AGE_MS, MAX_QUANTITY, MAX_ROUTES, MAX_RECEIPTS });
 });

@@ -712,3 +712,60 @@ test('route diagnostics do not authorize a recovered sending claim or reconcile 
   assert.deepEqual([...h.storage], before);
   assert.equal(h.calls.length, 1);
 });
+
+test('send now bypasses only cooldown and queues capped available types with reserves', () => {
+  const h = harness();
+  h.engine.save(route({ships:{probe:{mode:'fixed',amount:150,reserve:20},marauder:{mode:'excess',reserve:5}}}));
+  h.storage.get(SCOPE).routes[0].nextRunAt = h.at + 900000;
+  assert.equal(h.engine.tick().queued.length,0);
+  const result=h.engine.sendNow('north');assert.equal(result.queued.length,1);
+  assert.deepEqual(h.queueJobs[0].quantities,{probe:80,marauder:15,sentinel:0,vanguard:0});
+  assert.equal(h.engine.list()[0].ticket.manual,true);
+  assert.equal(h.engine.canRunJob(h.queueJobs[0]),true);
+  assert.throws(()=>h.engine.sendNow('north'),/pendiente/);
+  assert.equal(h.calls.length,1);
+  h.world.systems[0].fleet=fleet(99,20);
+  assert.equal(h.engine.canRunJob(h.queueJobs[0]),false,'live fleet must still cover frozen quantities plus reserve');
+  h.world.systems[0].fleet=fleet();
+  assert.equal(h.engine.canRunJob(h.claim()),true);
+  h.sent();h.engine.tick();assert.equal(h.engine.list()[0].ticket,null);
+  assert.equal(h.engine.list()[0].lastSentAt,h.at);
+  assert.throws(()=>h.engine.sendNow('north'),/censo/,'confirmation requires a newer census even for manual requests');
+  assert.equal(h.calls.length,1);
+});
+for (const [name,change] of [
+ ['paused',h=>h.engine.pause('north')],['review',h=>Object.assign(h.storage.get(SCOPE).routes[0],{paused:true,needsReview:true,status:'review'})],
+ ['coordination',h=>h.context.coordinated=false],['inactive',h=>h.context.canAct=false],['origin',h=>h.context.originId=C],
+ ['stale',h=>h.world.observedAt=h.at-120001],['owner',h=>h.world.systems=h.world.systems.filter(s=>s.id!==B)],
+ ['empty',h=>h.world.systems[0].fleet=fleet(0,0)],['transit',h=>h.world.transits=[{fromQ:0,fromR:0,toQ:5,toR:-2}]],
+ ['unknown transit',h=>h.world.transits=[{fromQ:null,fromR:null,toQ:5,toR:-2}]],
+ ['pending origin',h=>h.queueJobs.push({id:'manual',scope:SCOPE,originId:A,status:'waiting'})],
+])test('send now preserves '+name+' barrier with zero queue effects',()=>{
+ const h=harness();h.engine.save(route());change(h);const before=clone([...h.storage]);
+ assert.equal(typeof h.engine.sendNow,'function');
+ assert.throws(()=>h.engine.sendNow('north'));assert.equal(h.calls.length,0);assert.deepEqual([...h.storage],before);
+});
+test('send now rechecks policy, leadership and scope after durable ticket under reentrancy',()=>{
+ for(const change of [h=>h.context.coordinated=false,h=>h.context.scope='other/self',h=>h.engine.pause('north')]){
+  const h=harness();h.engine.save(route());h.onChange=()=>{h.onChange=null;change(h);};
+  assert.throws(()=>h.engine.sendNow('north'));assert.equal(h.calls.length,0);
+ }
+});
+test('send now shares one durable ticket across same-origin routes, reload and concurrent clients',()=>{
+ const h=harness();h.engine.save(route());h.engine.save(route({id:'other',destinationId:C}));
+ const second=core.create(h.dependencies);
+ assert.equal(h.engine.sendNow('north').queued.length,1);
+ assert.throws(()=>second.sendNow('north'),/pendiente/);
+ assert.throws(()=>second.sendNow('other'),/envío|misión/);
+ h.reload();assert.equal(h.engine.canRunJob(h.claim()),false,'recovered sending cannot acquire live witness');
+ assert.equal(h.calls.length,1);
+});
+test('countdown deadline tracks receipts and interval edits while pause never clears cooldown',()=>{
+ const h=harness();h.engine.save(route());h.engine.tick();h.sent();h.engine.tick();
+ const original=h.at+300000;assert.equal(h.engine.diagnostics().routes[0].nextRunAt,original);
+ h.engine.save(route({intervalMinutes:1}));assert.equal(h.engine.diagnostics().routes[0].nextRunAt,original);
+ h.engine.save(route({intervalMinutes:15}));assert.equal(h.engine.diagnostics().routes[0].nextRunAt,h.at+900000);
+ h.engine.pause('north');h.advance(1000);h.engine.resume('north');assert.equal(h.engine.diagnostics().routes[0].nextRunAt,1000000+900000);
+ h.advance(899000);assert.equal(h.engine.diagnostics().routes[0].code,'ready');
+ assert.equal(h.calls.length,1,'expiry observation alone cannot queue');
+});

@@ -669,3 +669,42 @@ test('route card explains current wait and check time without replacing controls
   assert.equal(h.calls.length, calls);
   h.app.destroy();
 });
+
+test('route countdown updates to expiry without replacing controls and pauses explicitly',()=>{
+ const h=harness();create(h);h.routes[0].nextRunAt=16000;h.app.render();
+ const edit=byButton(h.container,'Editar');assert.match(h.container.textContent,/Próxima comprobación en 00:00:15/);
+ h.advance(1000);h.app.render();assert.match(h.container.textContent,/00:00:14/);assert.equal(byButton(h.container,'Editar'),edit);
+ h.advance(14000);h.app.render();assert.match(h.container.textContent,/Intervalo vencido/);assert.equal(h.calls.length,1);
+ h.click('Pausar');assert.match(h.container.textContent,/Cuenta atrás suspendida/);assert.equal(byButton(h.container,'Enviar ahora').disabled,true);
+ h.click('Reanudar');assert.match(h.container.textContent,/Intervalo vencido/);h.app.destroy();
+});
+test('floating route control follows projections, opens summary and preserves repeated-open drafts',()=>{
+ let shift=0,scale=1,available=true;
+ const h=harness({projectSystem:s=>available?{x:150+s.q*20*scale+shift,y:150+s.r*20*scale,visible:true}:null});create(h);
+ let marker=h.document.querySelector('.oldlight-route-markers').querySelector('button');assert.ok(marker);
+ assert.equal(marker.style.pointerEvents,'auto');assert.equal(h.app.containsControl(marker),true);
+ const x=marker.style.left;shift=40;h.app.render();assert.equal(h.document.querySelector('.oldlight-route-markers').querySelector('button'),marker);assert.notEqual(marker.style.left,x);
+ marker.dispatch('click');assert.equal(h.field('Sistema de origen').value,A);assert.equal(h.field('Sistema de destino').value,B);
+ h.field('Intervalo en minutos').value='27';marker.dispatch('click');assert.equal(h.field('Intervalo en minutos').value,'27');assert.equal(h.calls.length,1);
+ const beforeZoom=marker.style.left;scale=1.4;h.app.render();assert.notEqual(marker.style.left,beforeZoom);assert.equal(h.document.querySelector('.oldlight-route-markers').querySelector('button'),marker);
+ h.window.dispatch('pointerdown',{target:marker});h.window.dispatch('click',{target:marker});assert.equal(marker.parentNode!==null,true);
+ available=false;h.app.render();assert.equal(h.document.querySelector('.oldlight-route-markers').hidden,true);
+ available=true;h.app.render();assert.equal(h.document.querySelector('.oldlight-route-markers').hidden,false);
+ h.scope='other/self';h.app.render();assert.equal(h.document.querySelector('.oldlight-route-markers').hidden,true);
+ const before=h.calls.length;marker.dispatch('click');assert.equal(h.calls.length,before);h.app.destroy();assert.equal(h.document.querySelector('.oldlight-route-markers'),null);
+});
+test('send now requires explicit trusted click and double activation cannot duplicate pending action',()=>{
+ let resolve,calls=0;
+ const h=harness({onSendNow:()=>{calls++;return new Promise(r=>resolve=r);}});create(h);
+ const button=byButton(h.container,'Enviar ahora');button.dispatch('click',{isTrusted:false});assert.equal(calls,0);
+ button.dispatch('click');button.dispatch('click');assert.equal(calls,1);assert.equal(button.disabled,true);
+ resolve({ok:true});h.app.destroy();
+});
+test('multiple route markers open their own endpoints and keep rendering below native controls',()=>{
+ const h=harness({projectSystem:s=>({x:150+s.q*15,y:150+s.r*15,visible:true})});create(h);
+ h.routes.push({...h.routes[0],id:'route-2',originId:B,destinationId:A});h.app.render();
+ const markers=h.document.querySelector('.oldlight-route-markers'),buttons=markers.querySelectorAll('button');assert.equal(buttons.length,2);
+ buttons[1].dispatch('click');assert.equal(h.field('Sistema de origen').value,B);assert.equal(h.field('Sistema de destino').value,A);
+ assert.equal(markers.style.zIndex,'0');assert.equal(markers.style.pointerEvents,'none');assert.equal(markers.nextSibling,h.canvas);
+ h.app.destroy();
+});

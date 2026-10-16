@@ -164,3 +164,22 @@ for(const queueGuardsOnly of [true,false]) test('independent last-fleet reentran
   assert.equal(h.engine.list()[0].needsReview,true);
   assert.equal(h.dispatches,0);
 });
+
+test('send now real queue bypasses cooldown once and freezes available capped fleet with reserve', async()=>{
+ const h=setup();
+ h.engine.save({id:'r',originId:A,destinationId:B,intervalMinutes:15,ships:{probe:{mode:'fixed',amount:200,reserve:20}},paused:false});
+ assert.equal(h.engine.tick().queued.length,0,'regular fixed request still requires all 200');
+ assert.equal(h.engine.sendNow('r').queued.length,1);
+ assert.equal(h.queue.list()[0].quantities.probe,80);assert.equal(h.engine.canRunJob(h.queue.list()[0]),true);
+ assert.throws(()=>h.engine.sendNow('r'),/pendiente/);
+ await h.queue.tick();assert.equal(h.dispatches,1);h.engine.tick();
+ h.advance(1);
+ assert.equal(h.engine.tick().queued.length,0,'ordinary interval is preserved');
+ assert.equal(h.engine.sendNow('r').queued.length,1,'explicit new request can bypass interval after fresh census');
+ await h.queue.tick();assert.equal(h.dispatches,2);
+});
+for(const mutation of ['pause','ownership','reserve','leadership'])test('send now real queue keeps final '+mutation+' guard',async()=>{
+ const h=setup();h.engine.sendNow('r');
+ h.setMutate(()=>{if(mutation==='pause')h.engine.pause('r');if(mutation==='ownership')h.world.systems=h.world.systems.filter(s=>s.id!==B);if(mutation==='reserve')h.world.systems[0].fleet[0].quantity=79;if(mutation==='leadership')h.setCoordinated(false);});
+ await h.queue.tick();assert.equal(h.dispatches,0);
+});
