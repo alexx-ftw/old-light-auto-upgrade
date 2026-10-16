@@ -4751,6 +4751,55 @@
       "independentReviewCriteria": [
         "Verificar que solo conserva eventos del runner existente, sin aceptar progreso parcial como éxito ni ampliar plazos, filtrar pruebas o reintentar."
       ]
+    },
+    {
+      "id": "browser-startup-immutable-times-and-log-summary",
+      "feedback": "elapsedMs se reescribía al cerrar y el reporter descartaba los diagnósticos, impidiendo contrastar primer arranque real frente a posteriores.",
+      "beforeFail": {
+        "revision": "9f9af4a60291e7b0fa05b4909fecffe57cb2e555",
+        "command": "QA_BROWSER_PROCESS_SOURCE=/workspace/oldlight-transfer/browser-process-timestamps-before.cjs node --test --test-name-pattern='browser startup timestamps' tests/browser-process.test.cjs",
+        "observedFailure": "readyAfterMs no existe; mismo test nuevo con validador anterior también pierde OLDLIGHT_BROWSER_STARTUP en reporte stderr.",
+        "evidence": "docs/browser-startup-timing-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/browser-process.test.cjs",
+          "name": "browser startup timestamps stay immutable after readiness and delayed cleanup and logs omit paths"
+        },
+        {
+          "file": "tests/release-validation.test.cjs",
+          "name": "gate retains fixed browser startup summaries without arbitrary stderr paths credentials or false success"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "DevTools listo, espera y cierre posterior",
+          "expected": "firstStderrAfterMs,readyAfterMs,outcomeAtMs permanecen; solo lifetimeAfterMs crece.",
+          "regression": {
+            "file": "tests/browser-process.test.cjs",
+            "name": "browser startup timestamps stay immutable after readiness and delayed cleanup and logs omit paths"
+          }
+        },
+        {
+          "scenario": "Resumen de stderr incluye campos extra/rutas/valores sintéticos y campos inválidos",
+          "expected": "Solo enums y enteros/null permitidos llegan al log; diagnóstico no concede aprobación parcial.",
+          "regression": {
+            "file": "tests/release-validation.test.cjs",
+            "name": "gate retains fixed browser startup summaries without arbitrary stderr paths credentials or false success"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Causa del primer arranque fallido en CI",
+          "reason": "DBus stderr no demuestra causa. Ensayo separado invierte dos archivos completos en runners nuevos; no sustituye gate ni reproduce automáticamente un host frío local."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Contrastar tiempos inmutables antes y después del cierre y estado de timeout separado de limpieza.",
+        "Verificar resumen fijo sin entorno/args/perfiles/endpoints y reporter sin aceptar diagnóstico como test aprobado.",
+        "Revisar que ambas órdenes ejecutan archivos completos conservando fallos, sin warmup,retry ni cambios de15s o300s."
+      ]
     }
   ]
 }

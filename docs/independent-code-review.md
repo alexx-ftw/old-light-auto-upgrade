@@ -174,3 +174,7 @@ DiagnósticosUnicode: KiB cuenta bytes, no longitudUTF16. Exigir multibyte despu
 ## Timeout global sin progreso parcial
 
 La CI38923441731 de1.17.27 agotó300s sin failureEvents; el reporte descartaba resúmenes y pasos aprobados ya recibidos. Exigir conservar progreso parcial como diagnóstico, manteniendo la exigencia del resumen global completo para aprobar. No atribuir el corte a Chromium sin evidencia ni aumentar un plazo por intuición. Contrastar el último archivo completado y el siguiente inventariado antes de corregir costes o bloqueos. Ver [reproducción y límites](gate-progress-validation.md).
+
+## Tiempo de arranque distinto de vida del proceso
+
+La revisión9f9af4a detectó elapsedMs reescrito al cerrar y reporter que descartaba stdout/diagnostic. Exigir firstStderrAfterMs,readyAfterMs youtcomeAtMs inmutables, timeout separado de cleanup, resumen de campos fijos sin secretos y ambos órdenes en runners nuevos sin calentar navegador para ocultar el fallo. No confundir DBus stderr con causa, primer arranque con escena específica, ni un ensayo verde con resolución. Ver [evidencia y límites](browser-startup-timing-validation.md).

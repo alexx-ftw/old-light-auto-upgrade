@@ -21,10 +21,26 @@ const inside = (root, file) => file === root || (!path.relative(root, file).star
   && path.relative(root, file) !== '..' && !path.isAbsolute(path.relative(root, file)));
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 
+// Only fixed diagnostic fields reach the gate stderr; test output cannot grant success.
+function browserStartupSummary(message) {
+  const prefix='OLDLIGHT_BROWSER_STARTUP ';
+  if (typeof message!=='string' || !message.startsWith(prefix) || message.length>4096) return null;
+  try {
+    const value=JSON.parse(message.slice(prefix.length)), clean={};
+    const enums={phase:['settled','closed'],binary:['chromium','chromium-browser','google-chrome','chrome','node','other'],status:['starting','ready','failed'],cleanup:[null,'closed','incomplete'],exitSignal:[null,'SIGTERM','SIGKILL','SIGINT','SIGABRT','SIGSEGV','SIGTRAP','SIGBUS','SIGILL']};
+    for (const [key,allowed] of Object.entries(enums)) { if(!allowed.includes(value[key]))return null;clean[key]=value[key]; }
+    for(const key of ['ordinal','firstStderrAfterMs','readyAfterMs','outcomeAtMs','lifetimeAfterMs','exitCode']) {
+      const number=value[key];if(number!==null&&(!Number.isSafeInteger(number)||number<0))return null;clean[key]=number;
+    }
+    if(!Number.isSafeInteger(clean.ordinal)||clean.ordinal<1)return null;
+    return prefix+JSON.stringify(clean)+'\n';
+  } catch { return null; }
+}
 // The same file doubles as the Node test reporter. Test stdout is an event, not
 // reporter JSON, so a console.log cannot masquerade as a successful summary.
 async function* reporter(events) {
   for await (const event of events) {
+    if(event.type==='test:stderr') { const summary=browserStartupSummary(event.data.message);if(summary)process.stderr.write(summary); }
     if (event.type === 'test:summary' || event.type === 'test:fail' || event.type === 'test:pass'
       || (event.type === 'test:diagnostic' && event.data.message === "'only' and 'runOnly' require the --test-only command-line option.")) {
       yield JSON.stringify(event, (_, value) => value instanceof Error
@@ -33,6 +49,7 @@ async function* reporter(events) {
   }
 }
 module.exports = reporter;
+module.exports.browserStartupSummary = browserStartupSummary;
 
 function child(command, args, cwd, env, timeout = 30000) {
   const result = spawnSync(command, args, { cwd, env, encoding: 'utf8', timeout,

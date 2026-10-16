@@ -503,3 +503,14 @@ test('feedback after-pass evidence requires an exact executed test, not a suite,
   const { root } = fixture(t, { 'tests/nested/sample.test.cjs': printed });
   fails(root, /Feedback regression must execute exactly once and pass/);
 });
+
+test('gate retains fixed browser startup summaries without arbitrary stderr paths credentials or false success',t=>{
+ const value={phase:'settled',ordinal:1,binary:'chromium',status:'ready',cleanup:null,exitSignal:null,firstStderrAfterMs:12,readyAfterMs:30,outcomeAtMs:30,lifetimeAfterMs:31,exitCode:null,extra:'SYNTHETIC_SECRET_VALUE /private/profile ws://private'};
+ const line='OLDLIGHT_BROWSER_STARTUP '+JSON.stringify(value)+'\n';
+ const {root}=fixture(t,{'tests/nested/sample.test.cjs':"process.stderr.write("+JSON.stringify(line)+");const t=require('node:test');t('fixture passes',()=>{});"});
+ const {result,report}=invoke(root);assert.equal(result.status,0,JSON.stringify(report));
+ const output=report.stages.tests.stderr;assert.match(output,/OLDLIGHT_BROWSER_STARTUP/);assert.doesNotMatch(output,/SYNTHETIC|private|extra/);
+ const summary=JSON.parse(output.trim().slice('OLDLIGHT_BROWSER_STARTUP '.length));assert.equal(summary.readyAfterMs,30);assert.equal(summary.firstStderrAfterMs,12);assert.equal(summary.ordinal,1);
+ const parse=require('../validate-release.cjs').browserStartupSummary;
+ assert.equal(parse('arbitrary SYNTHETIC_SECRET_VALUE'),null);assert.equal(parse('OLDLIGHT_BROWSER_STARTUP '+JSON.stringify({...value,binary:'/private/profile'})),null);assert.equal(parse('OLDLIGHT_BROWSER_STARTUP '+JSON.stringify({...value,readyAfterMs:'SYNTHETIC_SECRET_VALUE'})),null);
+});
