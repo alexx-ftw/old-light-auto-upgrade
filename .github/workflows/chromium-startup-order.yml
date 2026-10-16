@@ -40,12 +40,7 @@ jobs:
       - name: Print bounded numeric gate progress and launcher hash after observation
         if: always()
         run: |
-          node - "$RUNNER_TEMP/observed-gate.json" <<'JS'
-          const fs=require('node:fs'),d=JSON.parse(fs.readFileSync(process.argv[2]));
-          if(d.scope!=='diagnostic-observation-only'||d.releaseValidation!==false||d.input?.commit!==process.env.GITHUB_SHA)throw Error('Diagnostic identity mismatch');
-          const t=d.stages.tests,progress=t.progress||{};
-          console.log('DIAGNOSTIC_ONLY_GATE '+JSON.stringify({releaseValidation:false,status:d.status,commit:d.input.commit,files:t.fileCount,counts:t.counts||null,elapsedMs:progress.elapsedMs||t.durationMs||null,completedFiles:progress.completedFiles?.length,remainingFiles:progress.remainingFiles?.length}));
-          JS
+          node tools/chromium-gate-summary.cjs "$RUNNER_TEMP/observed-gate.json"
           sha256sum /usr/bin/chromium
           node tools/chromium-startup-observation-result.cjs
       - name: Preserve diagnostic evidence
