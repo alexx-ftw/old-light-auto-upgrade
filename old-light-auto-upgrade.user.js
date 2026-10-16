@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.14
+// @version      1.17.15
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -1766,7 +1766,21 @@ return {create};
         else if (!['Control', 'Shift', 'Alt', 'Meta'].includes(event.key) && !helperContains(event.target)) { cancelGesture(); invalidateMap(); }
       }, true);
       listen(window, 'keyup', event => { if (event.key === 'Control') { cancelGesture(); drawOverlay(); } }, true);
-      for (const name of ['wheel', 'resize', 'scroll', 'blur', 'pointercancel', 'pagehide', 'popstate', 'hashchange']) listen(window, name, () => { cancelGesture(); invalidateMap(); if (gestureNotice) gestureNotice.hidden = true; if (['blur', 'pointercancel', 'pagehide'].includes(name)) intent = null; }, true);
+      for (const name of ['wheel', 'resize', 'scroll', 'blur', 'pointercancel', 'pagehide', 'popstate', 'hashchange']) listen(window, name, event => {
+        // Scrolling Helper content cannot move the native map. Avoid clearing
+        // a settled arrow until the next 80 ms frame just for that UI event.
+        // Retargeted Shadow DOM events are identified by the owner, not names.
+        let helper = helperContains(event.target);
+        try { helper ||= options.isHelperEvent?.(event) === true; } catch (_) { /* Unknown events still invalidate. */ }
+        if (['wheel', 'scroll'].includes(name) && helper && !gesture) {
+          mapCache = null; // Recheck the census as well as the camera; no stale fallback.
+          drawOverlay();
+          return;
+        }
+        cancelGesture(); invalidateMap();
+        if (gestureNotice) gestureNotice.hidden = true;
+        if (['blur', 'pointercancel', 'pagehide'].includes(name)) intent = null;
+      }, true);
       listen(window, 'lostpointercapture', event => { if (gesture && !gesture.released && (event.pointerId === undefined || gesture.pointerId === event.pointerId)) { cancelGesture(); invalidateMap(); } }, true);
       listen(window, 'pointerleave', event => { if (gesture && event.target === stage()) { cancelGesture(); invalidateMap(); } }, true);
       listen(window, 'pointerout', event => { if (gesture && (event.relatedTarget === null || !inside(event))) { cancelGesture(); invalidateMap(); } }, true);
@@ -5551,7 +5565,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.14';
+  const SCRIPT_VERSION = '1.17.15';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -7140,6 +7154,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.15', title: 'Flechas estables al desplazar el Helper', changes: [
+        'Desplazar el contenido del Helper ya no borra repetidamente las flechas verificadas entre los frames del mapa.',
+        'Se comprueban de nuevo censo y cámara; el zoom del mapa, los gestos y los datos inválidos conservan su invalidación.',
+        'La causa del parpadeo comunicado sigue pendiente de confirmar con la versión instalada y el contexto del evento.',
+      ] },
       { version: '1.17.14', title: 'Recuperar Drive al volver a la pestaña', changes: [
         'Al volver a una pestaña desconectada, recupera una autorización nueva ya confirmada en otra pestaña del mismo Client ID.',
         'Conserva la caducidad absoluta y las comprobaciones de cuenta; no inicia OAuth ni reactiva la misma autorización detenida.',
@@ -18820,6 +18839,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       schedule(); return result;
     };
     reinforcementPanel = globalThis.OldLightReinforcementPanel.create({ document, window,
+      isHelperEvent: event => Boolean(host && event.composedPath?.().includes(host)),
       onControlRoot: installHelperKeyboardBoundary,
       getScope: () => missionContext().scope,
       getWorld: () => globalThis.OldLightEmpireBridge?.snapshot({ includeOwnership: false }) || null,

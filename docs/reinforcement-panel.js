@@ -598,7 +598,21 @@
         else if (!['Control', 'Shift', 'Alt', 'Meta'].includes(event.key) && !helperContains(event.target)) { cancelGesture(); invalidateMap(); }
       }, true);
       listen(window, 'keyup', event => { if (event.key === 'Control') { cancelGesture(); drawOverlay(); } }, true);
-      for (const name of ['wheel', 'resize', 'scroll', 'blur', 'pointercancel', 'pagehide', 'popstate', 'hashchange']) listen(window, name, () => { cancelGesture(); invalidateMap(); if (gestureNotice) gestureNotice.hidden = true; if (['blur', 'pointercancel', 'pagehide'].includes(name)) intent = null; }, true);
+      for (const name of ['wheel', 'resize', 'scroll', 'blur', 'pointercancel', 'pagehide', 'popstate', 'hashchange']) listen(window, name, event => {
+        // Scrolling Helper content cannot move the native map. Avoid clearing
+        // a settled arrow until the next 80 ms frame just for that UI event.
+        // Retargeted Shadow DOM events are identified by the owner, not names.
+        let helper = helperContains(event.target);
+        try { helper ||= options.isHelperEvent?.(event) === true; } catch (_) { /* Unknown events still invalidate. */ }
+        if (['wheel', 'scroll'].includes(name) && helper && !gesture) {
+          mapCache = null; // Recheck the census as well as the camera; no stale fallback.
+          drawOverlay();
+          return;
+        }
+        cancelGesture(); invalidateMap();
+        if (gestureNotice) gestureNotice.hidden = true;
+        if (['blur', 'pointercancel', 'pagehide'].includes(name)) intent = null;
+      }, true);
       listen(window, 'lostpointercapture', event => { if (gesture && !gesture.released && (event.pointerId === undefined || gesture.pointerId === event.pointerId)) { cancelGesture(); invalidateMap(); } }, true);
       listen(window, 'pointerleave', event => { if (gesture && event.target === stage()) { cancelGesture(); invalidateMap(); } }, true);
       listen(window, 'pointerout', event => { if (gesture && (event.relatedTarget === null || !inside(event))) { cancelGesture(); invalidateMap(); } }, true);

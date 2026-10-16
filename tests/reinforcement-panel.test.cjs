@@ -51,6 +51,9 @@ const byButton = (root, name) => all(root).find(n => n.tagName === 'BUTTON' && n
 function harness(extra = {}) {
   const document = new Document(), window = document.defaultView, container = document.createElement('main'), canvas = document.createElement('canvas'); canvas.id = 'stage';
   document.body.append(canvas, container);
+  const frames = new Map(); let frameId = 0;
+  window.requestAnimationFrame = callback => { frames.set(++frameId, callback); return frameId; };
+  window.cancelAnimationFrame = id => frames.delete(id);
   let scope = SCOPE, clock = 1000, routes = [], calls = [], serial = 0, timers = new Map(), timerSerial = 0, failure = null;
   let world = { scope: SCOPE, galaxy: 'alpha', selfId: 'self', connected: true, complete: true, observedAt: 1000, systems: [{ id: A, q: 0, r: 0, name: 'Origen' }, { id: B, q: 10, r: 2, name: 'Destino' }] };
   const save = route => { calls.push(['save', route]); if (failure) return failure(); const id = route.id || `route-${++serial}`; routes = [...routes.filter(r => r.id !== id), { ...route, id }]; return { ok: true }; };
@@ -66,6 +69,7 @@ function harness(extra = {}) {
     get error() { return container.querySelector('.oldlight-route-error').textContent; },
     get status() { return container.querySelector('.oldlight-route-status').textContent; },
     advance: ms => { clock += ms; },
+    frame: ms => { clock += ms; const tasks = [...frames.values()]; frames.clear(); for (const fn of tasks) fn(clock - 1000); },
     tick: () => { for (const [id, fn] of [...timers]) { timers.delete(id); fn(); } },
     gesture: (type, x, y, extra = {}) => window.dispatch(type, { target: canvas, clientX: x, clientY: y, ctrlKey: true, pointerType: 'mouse', pointerId: 1, ...extra }),
     hover: (name, x, y) => {
@@ -773,4 +777,95 @@ test('authoritative loss of route endpoint after visual gap immediately removes 
  pending=false;world.systems=world.systems.filter(s=>s.id!==B);h.world=world;h.app.render();
  assert.equal(h.document.querySelector('.oldlight-route-overlay').style.display,'none');
  assert.equal(h.document.querySelector('.oldlight-route-markers').hidden,true);h.app.destroy();
+});
+
+
+test('helper scroll and wheel preserve continuous arrow DOM across frames census updates pointer and editor activity', () => {
+  const host = {}, h = harness({ isHelperEvent: event => event.composedPath?.().includes(host) === true,
+    projectSystem: s => ({ x: 150 + s.q * 20, y: 150 + s.r * 20, visible: true }) }); create(h);
+  const overlay = h.document.querySelector('.oldlight-route-overlay'), line = overlay.querySelector('line');
+  const layer = h.document.querySelector('.oldlight-route-markers'), marker = layer.querySelector('button');
+  const root = h.container.querySelector('.oldlight-routes'); let replacements = 0;
+  const replace = overlay.replaceChildren.bind(overlay); overlay.replaceChildren = (...nodes) => { replacements++; replace(...nodes); };
+  const states = [];
+  for (let i = 0; i < 120; i++) {
+    h.world = { ...h.world, revision: i + 1, observedAt: 1000 + i * 16 };
+    const target = i % 3 === 0 ? root : i % 3 === 1 ? marker : host;
+    h.window.dispatch(i % 2 ? 'wheel' : 'scroll', { target, composedPath: () => [target, host] });
+    states.push(overlay.style.display !== 'none' && overlay.querySelector('line') === line);
+    h.window.dispatch('pointerleave', { target: h.canvas, relatedTarget: marker });
+    h.hover(i % 2 ? 'Origen' : 'Destino', 150, 150);
+    if (i % 15 === 0) { marker.dispatch('click'); h.app.render(); }
+    h.frame(16);
+    states.push(overlay.style.display !== 'none' && overlay.querySelector('line') === line);
+    assert.ok(layer.querySelector('button') === marker, 'Marker keeps identity across helper events');
+  }
+  assert.equal(states.length, 240); assert.ok(states.every(Boolean), 'No hidden frame or SVG replacement while verified geometry stays equal');
+  assert.equal(replacements, 0); assert.equal(h.calls.filter(call => call[0] === 'save').length, 1);
+  h.app.destroy();
+});
+
+test('helper scroll still cancels an active drag and invalid camera or census hides the persisted arrow', () => {
+  let camera = true;
+  const h = harness({ projectSystem: s => camera ? { x: 150 + s.q * 20, y: 150 + s.r * 20, visible: true } : null }); create(h);
+  const root = h.container.querySelector('.oldlight-routes'), overlay = h.document.querySelector('.oldlight-route-overlay');
+  h.gesture('pointerdown', 150, 150); h.gesture('pointermove', 220, 180);
+  h.window.dispatch('scroll', { target: root });
+  assert.equal(overlay.style.display, 'none'); assert.equal(overlay.querySelectorAll('line').length, 0);
+  h.app.render(); camera = false; h.window.dispatch('scroll', { target: root });
+  assert.equal(overlay.style.display, 'none', 'Helper scroll cannot mask an unavailable camera');
+  camera = true; h.app.render(); h.world = null; h.window.dispatch('wheel', { target: root });
+  assert.equal(overlay.style.display, 'none', 'Helper event must not retain a cached authoritative census');
+  assert.equal(h.calls.filter(call => call[0] === 'save').length, 1); h.app.destroy();
+});
+
+test('map wheel and genuine camera movement keep invalidation and reprojection during helper scroll recovery', () => {
+  let shift = 0;
+  const h = harness({ projectSystem: s => ({ x: 150 + s.q * 20 + shift, y: 150 + s.r * 20, visible: true }) }); create(h);
+  const root = h.container.querySelector('.oldlight-routes'), overlay = h.document.querySelector('.oldlight-route-overlay');
+  const previous = overlay.querySelector('line').getAttribute('x1');
+  h.window.dispatch('wheel', { target: h.canvas }); assert.equal(overlay.style.display, 'none');
+  shift = 30; h.frame(80); assert.notEqual(overlay.querySelector('line').getAttribute('x1'), previous);
+  shift = 50; h.window.dispatch('scroll', { target: root });
+  assert.notEqual(overlay.querySelector('line').getAttribute('x1'), previous);
+  h.document.hidden = true; h.window.dispatch('scroll', { target: root }); assert.equal(overlay.style.display, 'none');
+  h.app.destroy();
+});
+
+
+test('production helper event boundary recognizes the Shadow DOM host and rejects unrelated targets', () => {
+  const fs = require('node:fs'), path = require('node:path');
+  const source = fs.readFileSync(path.join(__dirname, '../old-light-auto-upgrade.user.js'), 'utf8');
+  const integration = source.slice(source.indexOf('    reinforcementPanel = globalThis.OldLightReinforcementPanel.create('));
+  const expression = integration.match(/isHelperEvent: (event => [^\n]+),\n/)[1];
+  const host = {}, unrelated = {};
+  const boundary = new Function('host', `return (${expression});`)(host);
+  assert.equal(boundary({ target: host, composedPath: () => [host] }), true);
+  assert.equal(boundary({ target: unrelated, composedPath: () => [unrelated] }), false);
+  assert.equal(boundary({ target: unrelated }), false);
+});
+
+test('temporal census gaps tooltip changes and zoom preserve only valid decoration and revoke prolonged gaps', () => {
+  let pending = false, shift = 0, camera = true;
+  const h = harness({ isCensusPending: () => pending,
+    projectSystem: s => camera ? { x: 150 + s.q * 20 + shift, y: 150 + s.r * 20, visible: true } : null }); create(h);
+  const root = h.container.querySelector('.oldlight-routes'), overlay = h.document.querySelector('.oldlight-route-overlay');
+  let world = h.world, visible = 0;
+  for (let i = 0; i < 240; i++) {
+    pending = i % 60 >= 20 && i % 60 < 24;
+    world = { ...world, observedAt: 1000 + i * 16, revision: i + 1 };
+    h.world = pending ? null : world;
+    if (i % 60 === 40) shift += 10; // A newly verified camera position; no stale geometry is retained.
+    h.hover(i % 2 ? 'Origen' : 'Destino', 150, 150);
+    h.window.dispatch('scroll', { target: root });
+    h.app.render(); h.frame(16);
+    assert.notEqual(overlay.style.display, 'none', `Valid geometry or bounded pending delivery remains visible at frame ${i}`);
+    visible++;
+  }
+  assert.equal(visible, 240);
+  pending = true; h.world = null; h.app.render(); h.advance(101); h.app.render();
+  assert.equal(overlay.style.display, 'none', 'A prolonged unsettled census still removes decoration');
+  pending = false; h.world = world; h.app.render(); camera = false;
+  h.window.dispatch('scroll', { target: root }); assert.equal(overlay.style.display, 'none');
+  h.app.destroy();
 });

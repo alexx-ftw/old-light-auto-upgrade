@@ -3333,6 +3333,93 @@
         "Verify a fresh confirmed ID remains usable after a prior disconnect and repeated events cannot restart an active runtime.",
         "Keep provider-required user authorization at expiration explicit; no new scopes, credentials or silent refresh."
       ]
+    },
+    {
+      "id": "reinforcement-helper-scroll-flicker",
+      "feedback": "La flecha sigue parpadeando en la sesión, versión pendiente. Reproducción adicional: scroll del propio Helper vacía SVG entre frames de80ms aunque cámara/censo sigan válidos.",
+      "beforeFail": {
+        "revision": "0274df01af57b6942c95dedef5107ebc7c057ec2",
+        "command": "node --test /tmp/oldlight-arrow-11715-before/tests/reinforcement-panel.test.cjs",
+        "observedFailure": "Mismo harness final sobre módulo/userscript base:150casos,146correctos,4fallidos. ScrollHelper reemplaza la línea y deja frames ocultos; falta límite de hostShadowDOM; falla secuencia temporal. Probe independiente20scrolls:16frames ocultos y4visibles.",
+        "evidence": "docs/1.17.15-arrow-scroll-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "helper scroll and wheel preserve continuous arrow DOM across frames census updates pointer and editor activity"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "helper scroll still cancels an active drag and invalid camera or census hides the persisted arrow"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "map wheel and genuine camera movement keep invalidation and reprojection during helper scroll recovery"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "production helper event boundary recognizes the Shadow DOM host and rejects unrelated targets"
+        },
+        {
+          "file": "tests/reinforcement-panel.test.cjs",
+          "name": "temporal census gaps tooltip changes and zoom preserve only valid decoration and revoke prolonged gaps"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Helper scroll/wheel with stable camera, updated census, pointer and editor",
+          "expected": "All temporal samples visible with identical SVG and marker; no overlay replacement.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "helper scroll and wheel preserve continuous arrow DOM across frames census updates pointer and editor activity"
+          }
+        },
+        {
+          "scenario": "Active drag, invalid camera or missing census",
+          "expected": "Cancel gesture and remove decoration; do not use stale cache.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "helper scroll still cancels an active drag and invalid camera or census hides the persisted arrow"
+          }
+        },
+        {
+          "scenario": "Map wheel and new verified camera geometry",
+          "expected": "Invalidate map event and reproject new camera rather than retaining old geometry.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "map wheel and genuine camera movement keep invalidation and reprojection during helper scroll recovery"
+          }
+        },
+        {
+          "scenario": "Retargeted Shadow DOM host or unrelated event target",
+          "expected": "Recognize only actual Helper host in composedPath.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "production helper event boundary recognizes the Shadow DOM host and rejects unrelated targets"
+          }
+        },
+        {
+          "scenario": "Bounded census delivery, prolonged gap and unavailable camera over frames",
+          "expected": "Preserve bounded decoration only, then hide at prior invalidation boundaries.",
+          "regression": {
+            "file": "tests/reinforcement-panel.test.cjs",
+            "name": "temporal census gaps tooltip changes and zoom preserve only valid decoration and revoke prolonged gaps"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Actual installed version, live flicker cause and browser compositor",
+          "reason": "Version and event context are missing. Simulated DOM/rAF reproduction does not prove actual scroll events or screen painting in Brave/Violentmonkey."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Reproduce the before-state with periodic events and observe empty/visible intervals across frames rather than isolated snapshots.",
+        "Verify production Shadow DOM callback, Helper minimization and marker events without broadening unknown/map event handling.",
+        "Demand current census and camera on the helper event; retain gesture cancellation and no stale hover fallback.",
+        "Keep100ms pending-decoration limit, invalid scope/session/canvas hiding and all game action guards unchanged.",
+        "State actual installed version and session mechanism are unconfirmed; never infer success in the real game from offline tests."
+      ]
     }
   ]
 }
