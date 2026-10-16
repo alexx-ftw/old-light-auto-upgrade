@@ -1,4 +1,5 @@
 'use strict';
+const vm=require('node:vm');
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),assert=require('node:assert/strict'),{createObserver}=require('./chromium-startup-observation.cjs');
 (async()=>{const directory=fs.mkdtempSync(path.join(os.tmpdir(),'oldlight-observation-selfcheck-'));const fixture=path.resolve(__dirname,'../tests/browser-startup.fixture.cjs');
  try{for(const [mode,acceptanceMs,observationMs,expected] of [['ready',500,1000,'PASS'],['ready-fragmented',40,1000,'FAIL'],['hang',40,180,'FAIL']]){const folder=fs.mkdtempSync(path.join(directory,'browser-')),observer=createObserver({directory:path.join(directory,'results'),acceptanceMs,observationMs}),handle=observer.launch(process.execPath,[fixture,mode],folder);try{if(mode==='hang')await assert.rejects(handle.endpoint,/startup timeout/);else await handle.endpoint;}finally{await handle.close();}const files=fs.readdirSync(path.join(directory,'results'));const record=JSON.parse(fs.readFileSync(path.join(directory,'results',files.at(-1))));assert.equal(record.acceptance,expected);assert.equal(record.closed,true);assert.equal(record.cleanup,'closed');if(mode==='ready-fragmented'){assert.equal(record.outcome,'ready');assert.ok(record.readyAfterMs>acceptanceMs);assert.ok(record.readyAfterMs<observationMs);}if(mode==='hang'){assert.equal(record.outcome,'failed');assert.equal(record.readyAfterMs,null);}assert.ok(record.samples.length>0&&record.samples.length<=64);assert.ok(record.samplingCostMs>=0);}
@@ -23,8 +24,17 @@ const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),asse
  const changed=transform(source);
  new Function('require','module','exports','__filename','__dirname',changed);
  assert.match(changed,/scope: 'diagnostic-observation-only', releaseValidation: false/);
- assert.match(changed,/if \(args\[0\] === '--test'\) args = \['--require'/);
+ assert.match(changed,/if \(args\[0\] === '--test'\) args = \[args\[0\], '--require'/);
  for(const boundary of ['#!/usr/bin/env node','function nodeChild(args',"scope: 'offline-validation-only'",'if (require.main === module) main();'])assert.throws(()=>transform(source.replace(boundary,'changed-boundary')));
  assert.equal(fs.readFileSync(path.resolve(__dirname,'../validate-release.cjs'),'utf8'),source);
- console.log('PASS: diagnostic gate transform has exact boundaries and preserves tracked validator bytes.');
+ assert.match(changed,/args = \[args\[0\], '--require',[^\n]+\.slice\(1\)/);
+ const child=new (require('node:events').EventEmitter)();child.pid=123456;child.stdout=new (require('node:events').EventEmitter)();child.stderr=new (require('node:events').EventEmitter)();
+ const timers=[];let invocation;
+ const body=changed.slice(changed.indexOf('function nodeChild('),changed.indexOf('function requireSuccess('));
+ const run=vm.runInNewContext('('+body+')',{spawn:(_node,args)=>{invocation=args;return child;},process:{execPath:'node',kill(){}},activeGroups:new Map(),Buffer,setTimeout:(callback,ms)=>{timers.push({callback,ms});return {};},clearTimeout(){}});
+ const completion=run(['--test','--test-concurrency=1','example.test.cjs'],'/tmp',{});
+ assert.equal(invocation[0],'--test');assert.equal(invocation[1],'--require');
+ child.emit('exit',0,null);assert.ok(timers.some(timer=>timer.ms===3000),'test subprocess retains three second cleanup grace');assert.equal(timers.some(timer=>timer.ms===500),false);
+ child.emit('close');timers.find(timer=>timer.ms===3000).callback();completion.catch(error=>{console.error(error);process.exitCode=1;});
+ console.log('PASS: diagnostic gate transform preserves tracked bytes and actual subprocess cleanup grace.');
 }

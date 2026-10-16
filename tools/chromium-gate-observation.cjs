@@ -7,7 +7,7 @@ function transform(source) {
   if (!source.startsWith('#!/usr/bin/env node\n')) throw Error('Diagnostic gate header changed');
   source = source.slice('#!/usr/bin/env node\n'.length);
   const replacements = [
-    ["function nodeChild(args, cwd, env, timeout = 30000) {", "function nodeChild(args, cwd, env, timeout = 30000) {\n  if (args[0] === '--test') args = ['--require', " + JSON.stringify(path.join(__dirname, 'chromium-snapshot-preload.cjs')) + ", ...args];"],
+    ["function nodeChild(args, cwd, env, timeout = 30000) {", "function nodeChild(args, cwd, env, timeout = 30000) {\n  if (args[0] === '--test') args = [args[0], '--require', " + JSON.stringify(path.join(__dirname, 'chromium-snapshot-preload.cjs')) + ", ...args.slice(1)];"],
     ["scope: 'offline-validation-only'", "scope: 'diagnostic-observation-only', releaseValidation: false"],
     ["if (require.main === module) main();", "return main();"],
   ];
