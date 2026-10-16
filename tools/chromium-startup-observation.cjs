@@ -2,12 +2,20 @@
 // Diagnostic only. Never loaded by validate-release or by the distributed Helper.
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),vm=require('node:vm'),cp=require('node:child_process');
 const helper=path.resolve(__dirname,'../tests/helpers/browser-process.cjs');
+// stat fields are numbered from state (field3) after the final comm delimiter.
+// Read only numeric accounting for owned process group members, never cmdline/env.
+function parseProcessCounters(fields){
+ const number=index=>{const value=fields[index];if(!/^\d+$/.test(value||'')||!Number.isSafeInteger(Number(value)))throw Error('Invalid process counter');return Number(value);};
+ return {cpuTicks:number(11)+number(12),rssPages:number(21),threads:number(17),minorFaults:number(7),majorFaults:number(9),blockedLeaders:fields[0]==='D'?1:0,blockDelayTicks:fields.length>39?number(39):0};
+}
+function parseIoReadBytes(text){const match=/^read_bytes: (\d+)$/m.exec(text);if(!match)return null;const value=Number(match[1]);return Number.isSafeInteger(value)?value:null;}
 function resources(group){
- let processes=0,cpuTicks=0,rssPages=0,threads=0;
- for(const name of fs.readdirSync('/proc'))if(/^\d+$/.test(name))try{const raw=fs.readFileSync('/proc/'+name+'/stat','utf8'),fields=raw.slice(raw.lastIndexOf(') ')+2).trim().split(/\s+/);if(Number(fields[2])===group){processes++;cpuTicks+=Number(fields[11])+Number(fields[12]);rssPages+=Number(fields[21]);threads+=Number(fields[17]);}}catch{}
+ let processes=0,cpuTicks=0,rssPages=0,threads=0,minorFaults=0,majorFaults=0,blockedLeaders=0,blockDelayTicks=0,ioReadBytes=0,ioReadableProcesses=0;
+ for(const name of fs.readdirSync('/proc'))if(/^\d+$/.test(name))try{const raw=fs.readFileSync('/proc/'+name+'/stat','utf8'),fields=raw.slice(raw.lastIndexOf(') ')+2).trim().split(/\s+/);if(Number(fields[2])===group){const counters=parseProcessCounters(fields);processes++;cpuTicks+=counters.cpuTicks;rssPages+=counters.rssPages;threads+=counters.threads;minorFaults+=counters.minorFaults;majorFaults+=counters.majorFaults;blockedLeaders+=counters.blockedLeaders;blockDelayTicks+=counters.blockDelayTicks;
+ try{const bytes=parseIoReadBytes(fs.readFileSync('/proc/'+name+'/io','utf8'));if(bytes!==null){ioReadBytes+=bytes;ioReadableProcesses++;}}catch{}}}catch{}
  let memAvailableKiB=null,cgroup=null;try{memAvailableKiB=Number(/^MemAvailable:\s+(\d+)/m.exec(fs.readFileSync('/proc/meminfo','utf8'))?.[1])||null;}catch{}
  try{const text=fs.readFileSync('/sys/fs/cgroup/cpu.stat','utf8');cgroup=Object.fromEntries(['usage_usec','nr_throttled','throttled_usec'].map(key=>[key,Number(new RegExp('^'+key+' (\\d+)','m').exec(text)?.[1])||0]));}catch{}
- return {processes,cpuTicks,rssPages,threads,memAvailableKiB,cgroup,hostLoadAverage:os.loadavg(),availableParallelism:os.availableParallelism()};
+ return {processes,cpuTicks,rssPages,threads,minorFaults,majorFaults,blockedLeaders,blockDelayTicks,ioReadBytes:ioReadableProcesses?ioReadBytes:null,ioReadableProcesses,memAvailableKiB,cgroup,hostLoadAverage:os.loadavg(),availableParallelism:os.availableParallelism()};
 }
 function createObserver({directory,acceptanceMs=15000,observationMs=45000,source=fs.readFileSync(helper,'utf8')}={}){
  if(!directory||!(observationMs>acceptanceMs&&observationMs<=60000))throw Error('Invalid diagnostic observation bounds');
@@ -34,4 +42,4 @@ function createObserver({directory,acceptanceMs=15000,observationMs=45000,source
  return {launch};
 }
 function install(){const actual=require(helper),observer=createObserver({directory:path.join(os.tmpdir(),'oldlight-startup-observation')});actual.launch=observer.launch;}
-module.exports={createObserver,install};
+module.exports={createObserver,install,parseProcessCounters,parseIoReadBytes};
