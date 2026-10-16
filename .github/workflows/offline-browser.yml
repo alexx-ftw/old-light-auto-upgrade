@@ -30,5 +30,7 @@ jobs:
             /tmp/oldlight-overlay-browser-*/frames.json
             /tmp/oldlight-native-browser-*/*.png
             /tmp/oldlight-native-browser-*/frames.json
+            /tmp/oldlight-native-browser-*/browser-startup.json
+            /tmp/oldlight-native-browser-*/browser-stderr.log
             ${{ runner.temp }}/release-validation.json
           if-no-files-found: warn

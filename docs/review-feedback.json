@@ -4458,6 +4458,96 @@
         "Contrastar timestamps/identidad/owner, cola desaparecida y fallo de persistencia sin liberar claim.",
         "Verificar ataque contabilizado una vez y transferencia cero raids, con recuperación legítima tras censo."
       ]
+    },
+    {
+      "id": "browser-startup-diagnostics-and-process-ownership",
+      "feedback": "El helper de Chromium confundía salida temprana con timeout, descartaba stderr y podía dejar descendientes/pipe vivos. Se reproduce offline; todavía no demuestra causa raíz de los fallos CI remotos.",
+      "beforeFail": {
+        "revision": "c4475b7e4864a9f4cdfb3dd001dd024bd04ff896",
+        "command": "QA_NATIVE_BROWSER_SOURCE=/workspace/oldlight-transfer/browser-startup-before-native.cjs node --test --test-name-pattern='native browser startup' tests/browser-process.test.cjs",
+        "observedFailure": "Dos fallos con el mismo harness: timeout genérico en lugar de code42/mensaje; descendiente sigue vivo true!=false después de cleanup. Sin red ni juego.",
+        "evidence": "docs/browser-startup-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/browser-process.test.cjs",
+          "name": "native browser startup reports an immediate launcher exit with code and sanitized stderr rather than a generic timeout"
+        },
+        {
+          "file": "tests/browser-process.test.cjs",
+          "name": "native browser startup failure terminates its launcher descendants even after the launcher exits and retains stderr"
+        },
+        {
+          "file": "tests/browser-process.test.cjs",
+          "name": "browser process accepts a real endpoint announcement once and closes its own process group without retries"
+        },
+        {
+          "file": "tests/browser-process.test.cjs",
+          "name": "terminating the browser harness kills its detached browser group and preserves the termination signal"
+        },
+        {
+          "file": "tests/browser-process.test.cjs",
+          "name": "silent browser startup still fails at the unchanged fifteen second deadline and cleans its process"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "native browser startup reports an immediate launcher exit with code and sanitized stderr rather than a generic timeout",
+          "expected": "Conservar causa y límites, no reintentar/omitir pruebas; limpiar exclusivamente procesos propios y no publicar secretos.",
+          "regression": {
+            "file": "tests/browser-process.test.cjs",
+            "name": "native browser startup reports an immediate launcher exit with code and sanitized stderr rather than a generic timeout"
+          }
+        },
+        {
+          "scenario": "native browser startup failure terminates its launcher descendants even after the launcher exits and retains stderr",
+          "expected": "Conservar causa y límites, no reintentar/omitir pruebas; limpiar exclusivamente procesos propios y no publicar secretos.",
+          "regression": {
+            "file": "tests/browser-process.test.cjs",
+            "name": "native browser startup failure terminates its launcher descendants even after the launcher exits and retains stderr"
+          }
+        },
+        {
+          "scenario": "browser process accepts a real endpoint announcement once and closes its own process group without retries",
+          "expected": "Conservar causa y límites, no reintentar/omitir pruebas; limpiar exclusivamente procesos propios y no publicar secretos.",
+          "regression": {
+            "file": "tests/browser-process.test.cjs",
+            "name": "browser process accepts a real endpoint announcement once and closes its own process group without retries"
+          }
+        },
+        {
+          "scenario": "terminating the browser harness kills its detached browser group and preserves the termination signal",
+          "expected": "Conservar causa y límites, no reintentar/omitir pruebas; limpiar exclusivamente procesos propios y no publicar secretos.",
+          "regression": {
+            "file": "tests/browser-process.test.cjs",
+            "name": "terminating the browser harness kills its detached browser group and preserves the termination signal"
+          }
+        },
+        {
+          "scenario": "silent browser startup still fails at the unchanged fifteen second deadline and cleans its process",
+          "expected": "Conservar causa y límites, no reintentar/omitir pruebas; limpiar exclusivamente procesos propios y no publicar secretos.",
+          "regression": {
+            "file": "tests/browser-process.test.cjs",
+            "name": "silent browser startup still fails at the unchanged fifteen second deadline and cleans its process"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Causa raíz de los intentos CI anteriores",
+          "reason": "El helper previo no persistía ni incluía stderr/exit en fallo; no hay dato para atribuir causa. No se elude403 de artefactos."
+        },
+        {
+          "scope": "macOS",
+          "reason": "Contrato POSIX inspeccionado; ejecución actual Linux con Chromium real."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Cuestionar fault injection: misma lógica de helper anterior/final y spawn como única frontera sustituida; distinguir fixture defectuoso de reproducción válida.",
+        "Ejercer salida previa al endpoint, wrapper con pipe heredado, señales y cierre normal; detectar procesos vivos o fallos de limpieza ocultos.",
+        "Verificar que15000/300000 y aserciones completas no cambian, no hay retry/fallback ni cambios del userscript, y stderr acotado/redactado no contiene entorno o credenciales.",
+        "Inspeccionar CI nueva y no atribuir el éxito eventual a una causa previa que no se ha demostrado."
+      ]
     }
   ]
 }

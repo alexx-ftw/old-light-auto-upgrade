@@ -1,23 +1,18 @@
 'use strict';
-const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), { spawn } = require('node:child_process');
+const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), { launch } = require('./browser-process.cjs');
 const candidates = ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome', '/opt/google/chrome/chrome'];
 async function open(serve) {
   const executable = candidates.find(file => fs.existsSync(file));
   if (!executable) throw Error('Native galaxy coverage requires Chromium');
   const artifacts = fs.mkdtempSync(path.join(os.tmpdir(), 'oldlight-native-browser-'));
-  const child = spawn(executable, ['--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-first-run', '--enable-unsafe-swiftshader', '--remote-debugging-port=0', '--user-data-dir=' + path.join(artifacts, 'profile'), 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
-  let socket, serial = 0, session, stderr = '', command;
+  const processHandle = launch(executable, ['--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-first-run', '--enable-unsafe-swiftshader', '--remote-debugging-port=0', '--user-data-dir=' + path.join(artifacts, 'profile'), 'about:blank'], artifacts);
+  let socket, serial = 0, session, command;
   const pending = new Map(), errors = [], requests = [], denied = [];
   async function close() {
-    if (command && socket?.readyState === WebSocket.OPEN) await command('Browser.close', {}, null).catch(() => {});
-    for (const p of pending.values()) { clearTimeout(p.timer); p.reject(Error('Browser closed')); } pending.clear(); socket?.close(); child.kill('SIGKILL');
+    for (const p of pending.values()) { clearTimeout(p.timer); p.reject(Error('Browser closed')); } pending.clear(); socket?.close(); await processHandle.close();
   }
   try {
-    const endpoint = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(Error('Native Chromium startup timeout')), 15000);
-      child.once('error', error => { clearTimeout(timer); reject(error); });
-      child.stderr.on('data', data => { stderr += data; const match = /DevTools listening on (ws:\/\/[^\s]+)/.exec(stderr); if (match) { clearTimeout(timer); resolve(match[1]); } });
-    });
+    const endpoint = await processHandle.endpoint;
     socket = new WebSocket(endpoint); await new Promise((resolve, reject) => { socket.addEventListener('open', resolve, { once: true }); socket.addEventListener('error', reject, { once: true }); });
     command = (method, params = {}, target = session) => new Promise((resolve, reject) => {
       const id = ++serial, timer = setTimeout(() => { pending.delete(id); reject(Error('CDP timeout: ' + method)); }, 60000);
@@ -49,6 +44,6 @@ async function open(serve) {
     }
     async function isolated() { const frame = (await command('Page.getFrameTree')).frameTree.frame; return (await command('Page.createIsolatedWorld', { frameId: frame.id, worldName: 'oldlight-offline-helper', grantUniveralAccess: false })).executionContextId; }
     return { artifacts, executable, errors, requests, denied, command, evaluate, isolated, close };
-  } catch (error) { await close(); throw error; }
+  } catch (error) { try{await close();}catch(cleanup){throw new AggregateError([error,cleanup],error.message+'; '+cleanup.message);}throw error; }
 }
 module.exports = { open };
