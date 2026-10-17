@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.29
+// @version      1.17.30
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -6261,7 +6261,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.29';
+  const SCRIPT_VERSION = '1.17.30';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -6611,11 +6611,13 @@ return Object.freeze({ encode });
     const preview = el('textarea'); preview.readOnly = true; preview.hidden = true; preview.rows = 8;
     preview.id = 'oldlight-metrics-report'; preview.setAttribute('aria-label', 'Informe local de métricas en JSON');
     preview.style.cssText = 'width:100%;max-width:100%;box-sizing:border-box;resize:vertical';
+    const previewNote = el('p', 'El informe seleccionado se mantiene para copiarlo. Se actualizará al salir del campo. La exportación usa el informe actual.', 'hint');
+    previewNote.dataset.field = 'metrics-preview-note'; previewNote.hidden = true;
     previewButton.setAttribute('aria-controls', preview.id); previewButton.setAttribute('aria-expanded', 'false');
     const note = el('p', 'Puedes revisar el informe antes de compartirlo manualmente. No se incluye en las copias ni se sincroniza por Drive. Desactivar también borra los contadores locales. El informe incluye versión, días UTC y contadores con categorías fijas; no contiene tramas del juego ni textos de error. Los estados imperiales repetidos no se vuelven a contar hasta que cambian; al activar no se recupera el historial anterior. Se mide como máximo un paso del helper por minuto y pestaña, en intervalos de menos de 4, 16, 50 o 200 ms, o de 200 ms en adelante. Son muestras del trabajo del helper, no FPS ni tiempos de red; no detectan todos los picos. No se guardan duraciones exactas. Los días antiguos se descartan al registrar nuevos eventos.', 'hint');
-    box.append(heading, label, explanation, actions, status, preview, note);
+    box.append(heading, label, explanation, actions, status, preview, previewNote, note);
     shadow.querySelector('[data-page="data"]').append(box);
-    function refresh(message = '') {
+    function refresh(message = '', forcePreview = false) {
       const { report, status: state } = metrics.getReport();
       toggle.checked = state.enabled;
       const issues = {
@@ -6627,38 +6629,46 @@ return Object.freeze({ encode });
         ? 'No se pudo acceder al almacenamiento de métricas. La medición está detenida en esta pestaña; no se puede confirmar el guardado o el borrado.'
         : Object.hasOwn(issues, state.errorCode) ? issues[state.errorCode]
           : message || (state.enabled ? `Activadas. ${state.total} eventos en ${state.days} días; solo en este navegador.` : 'Desactivadas. No se registran eventos.'));
-      if (!preview.hidden) preview.value = JSON.stringify(report, null, 2);
+      let holdSelection = false;
+      if (!preview.hidden) {
+        const value = JSON.stringify(report, null, 2);
+        holdSelection = !forcePreview && state.enabled && !state.storageError
+          && shadow.activeElement === preview && preview.selectionStart < preview.selectionEnd && preview.value !== value;
+        if (!holdSelection && preview.value !== value) preview.value = value;
+      }
+      if (previewNote.hidden !== !holdSelection) previewNote.hidden = !holdSelection;
     }
+    preview.addEventListener('blur', () => refresh('', true));
     toggle.addEventListener('change', event => {
-      if (!event.isTrusted) { refresh(); return; }
+      if (!event.isTrusted) { refresh('', true); return; }
       const enabled = toggle.checked;
       metrics.setEnabled(enabled);
-      refresh();
+      refresh('', true);
     });
     previewButton.addEventListener('click', () => {
       preview.hidden = !preview.hidden;
       previewButton.setAttribute('aria-expanded', String(!preview.hidden));
       previewButton.textContent = preview.hidden ? 'Ver informe' : 'Ocultar informe';
-      refresh();
+      refresh('', true);
     });
     exportButton.addEventListener('click', event => {
       if (!event.isTrusted) return;
       let url;
       try {
         const { report, status: state } = metrics.getReport();
-        if (state.storageError) { refresh(); return; }
+        if (state.storageError) { refresh('', true); return; }
         url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2) + '\n'], { type: 'application/json' }));
         const link = document.createElement('a');
         link.href = url; link.download = 'old-light-metrics-' + new Date().toISOString().slice(0, 10) + '.json';
         link.click();
-        refresh('Descarga solicitada al navegador. No se ha enviado a ningún servidor.');
-      } catch { refresh('No se pudo exportar el informe. Puedes revisarlo con «Ver informe».'); }
+        refresh('Descarga solicitada al navegador. No se ha enviado a ningún servidor.', true);
+      } catch { refresh('No se pudo exportar el informe. Puedes revisarlo con «Ver informe».', true); }
       finally { if (url) setTimeout(() => URL.revokeObjectURL(url), 2000); }
     });
     clearButton.addEventListener('click', event => {
       if (!event.isTrusted) return;
       const cleared = metrics.clear();
-      refresh(cleared ? 'Contadores borrados y medición desactivada en este navegador.' : 'No se pudo confirmar el borrado.');
+      refresh(cleared ? 'Contadores borrados y medición desactivada en este navegador.' : 'No se pudo confirmar el borrado.', true);
     });
     // Explicit feature names only. No general click/input capture or game DOM data.
     shadow.addEventListener('click', event => {
@@ -6668,7 +6678,7 @@ return Object.freeze({ encode });
       if (control) refresh();
     });
     window.addEventListener('storage', event => {
-      if (['old-light-auto-upgrade:metrics:v1', 'old-light-auto-upgrade:metrics-consent:v1', null].includes(event.key)) refresh();
+      if (['old-light-auto-upgrade:metrics:v1', 'old-light-auto-upgrade:metrics-consent:v1', null].includes(event.key)) refresh('', event.key !== 'old-light-auto-upgrade:metrics:v1');
     });
     metrics.onChange(refresh);
     refresh();
@@ -7968,6 +7978,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.30', title: 'Copiar el informe de métricas sin perder la selección', changes: [
+        'Si llegan nuevos contadores mientras seleccionas el informe para copiarlo, conserva esa copia y avisa; se actualiza al salir del campo.',
+        'Desactivar, borrar, cambiar el consentimiento o fallar el almacenamiento invalida la copia. La exportación siempre usa el informe actual.',
+        'No añade datos, portapapeles ni permisos. Mantiene las elecciones anteriores y el reinicio de contadores por versión.',
+      ] },
       { version: '1.17.29', title: 'Informe y estado de métricas coherentes', changes: [
         'El panel y la exportación obtienen informe y estado de una misma lectura, evitando mostrar métricas activadas junto a un informe vacío por un fallo de almacenamiento.',
         'La exportación indica que la descarga se ha solicitado al navegador; no puede confirmar que el navegador haya guardado el archivo.',

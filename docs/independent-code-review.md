@@ -204,3 +204,7 @@ Al añadir verificación manual, inventariar también jobs yorden de archivos de
 ## Vista de métricas y fallo entre lecturas
 
 En1.17.29 se reprodujo un estado visible saludable junto a informe vacío: getStatus leía antes de que snapshot detectase un error y detuviera la medición. Revisar informe/estado como una unidad, no solo cada getter aislado. Exigir un control donde cambia o falla la lectura entre ambos, y otro donde falla ya la primera; recuperar almacenamiento no debe reactivar por sí solo. Contrastar el JSON exportado con el esquema permitido y no confundir link.click con descarga completada. Una vista conjunta no constituye un bloqueo global entre pestañas. [Evidencia](1.17.29-metrics-report-validation.md).
+
+## Informe seleccionado y actualizaciones de fondo
+
+En1.17.30 Chromium real reprodujo selección0..151 que colapsa a182..182 tras un contador nuevo. No basta comprobar JSON correcto después de renderizar: revisar el recorrido seleccionar→evento de fondo→copiar y un control sin cambios. Si se conserva una copia seleccionada, exigir aviso, liberación por blur y prioridad de revocación/error/borrado; un evento de consentimiento puede procesarse después de off→on y aun así debe invalidar la copia anterior. Exportar continúa usando el informe actual; no añadir permisos de portapapeles para resolver un problema de selección. [Reproducción y límites](1.17.30-metrics-selection-validation.md).

@@ -350,3 +350,87 @@ test('Metrics preview and export show a failed read immediately and recover only
   assert.deepEqual(report, JSON.parse(preview.value));
   assert.match(h.field('metrics-status').textContent, /Descarga solicitada al navegador/);
 });
+
+test('Real Chromium preserves a selected metrics report during new counts and invalidates it on blur or revocation', async t => {
+  const browser = require('./helpers/native-browser.cjs');
+  const b = await browser.open(url => url.origin === 'https://oldlight.io' && url.pathname === '/metrics-offline-qa'
+    ? { type: 'text/html; charset=utf-8', body: '<!doctype html><meta charset=utf-8><title>Offline metrics QA</title><link rel=icon href=data:,><main></main>' } : null);
+  try {
+    await b.command('Page.navigate', { url: 'https://oldlight.io/metrics-offline-qa' });
+    for (let i = 0; i < 100 && await b.evaluate('document.readyState') !== 'complete'; i++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(await b.evaluate('document.title'), 'Offline metrics QA');
+    const begin = source.indexOf('  function createLocalMetrics('), end = source.indexOf('  // END LOCAL METRICS INTEGRATION', begin);
+    const installedVersion = source.match(/const SCRIPT_VERSION = '([^']+)'/)[1];
+    await b.evaluate(coreSource);
+    await b.evaluate(`(() => {
+      const SCRIPT_VERSION = ${JSON.stringify(installedVersion)};
+      const setText = (node, value) => { if (node.textContent !== value) node.textContent = value; };
+      ${source.slice(begin, end)}
+      const host = document.createElement('div'); document.querySelector('main').append(host);
+      const shadow = host.attachShadow({ mode: 'open' }); shadow.innerHTML = '<div data-page="data"></div>';
+      const metrics = createLocalMetrics(); installMetricsPanel(shadow); metrics.record('helper.loaded');
+      globalThis.metricsQA = { shadow, metrics };
+      shadow.querySelector('[data-action="metrics-preview"]').click();
+    })()`);
+    const select = () => b.evaluate(`(() => { const p = metricsQA.shadow.querySelector('textarea'); p.focus(); p.setSelectionRange(0, p.value.length); return { value: p.value, start: p.selectionStart, end: p.selectionEnd }; })()`);
+    const inspect = () => b.evaluate(`(() => {
+      const s = metricsQA.shadow, p = s.querySelector('textarea'), n = s.querySelector('[data-field="metrics-preview-note"]');
+      return { value: p.value, start: p.selectionStart, end: p.selectionEnd, noteVisible: Boolean(n && !n.hidden), note: n?.textContent || '', enabled: s.querySelector('[data-action="metrics-toggle"]').checked, status: s.querySelector('[data-field="metrics-status"]').textContent };
+    })()`);
+    const initial = await select();
+    await b.evaluate("metricsQA.metrics.record('unknown.event')");
+    const unchanged = await inspect();
+    assert.deepEqual({ value: unchanged.value, start: unchanged.start, end: unchanged.end }, initial, 'An unchanged report remains selectable');
+    await b.evaluate("metricsQA.metrics.record('settings.changed')");
+    const held = await inspect();
+    assert.equal(held.start, 0); assert.equal(held.end, initial.value.length, 'New counts must not collapse the real textarea selection');
+    assert.equal(held.value, initial.value, 'The selected text stays byte-identical while copying');
+    assert.equal(held.noteVisible, true); assert.match(held.note, /seleccionado|seleccionada/);
+    await b.evaluate('metricsQA.shadow.querySelector(\'[data-action="metrics-export"]\').focus()');
+    const released = await inspect();
+    assert.equal(released.noteVisible, false);
+    assert.equal(JSON.parse(released.value).days[0].counts['settings.changed'], 1, 'Blur updates from current metrics');
+    await select();
+    await b.evaluate(`localStorage.setItem(${JSON.stringify(consentKey)}, JSON.stringify({ enabled: false, generation: '00000000-0000-4000-8000-000000000002' })); window.dispatchEvent(new StorageEvent('storage', { key: ${JSON.stringify(consentKey)} }));`);
+    const revoked = await inspect();
+    assert.equal(revoked.enabled, false); assert.deepEqual(JSON.parse(revoked.value).days, []); assert.equal(revoked.noteVisible, false);
+    await b.evaluate("metricsQA.metrics.setEnabled(true); metricsQA.metrics.record('helper.loaded')");
+    await select();
+    await b.evaluate(`const originalMetricsRead = Storage.prototype.getItem; Storage.prototype.getItem = function(name) { if (name === ${JSON.stringify(key)}) throw Error('private storage failure'); return originalMetricsRead.call(this, name); }; window.dispatchEvent(new StorageEvent('storage', { key: ${JSON.stringify(key)} }));`);
+    const failed = await inspect();
+    assert.equal(failed.enabled, false); assert.deepEqual(JSON.parse(failed.value).days, []); assert.equal(failed.noteVisible, false);
+    assert.match(failed.status, /medición está detenida/); assert.equal(failed.value.includes('private'), false);
+    await b.evaluate('Storage.prototype.getItem = originalMetricsRead');
+    const evidence = { browser: (await b.command('Browser.getVersion', {}, null)).product, initial, held, released, revoked, failed, errors: b.errors, denied: b.denied };
+    fs.writeFileSync(path.join(b.artifacts, 'metrics-preview.json'), JSON.stringify(evidence, null, 2));
+    t.diagnostic('METRICS_BROWSER_ARTIFACTS=' + b.artifacts);
+    assert.deepEqual(b.errors, []); assert.deepEqual(b.denied, []);
+  } finally { await b.close(); }
+});
+
+test('Selected metrics previews export current data and invalidate on consent rotation or storage clear even while enabled', async () => {
+  const h = panelHarness();
+  h.metrics.record('helper.loaded'); h.action('metrics-preview').fire('click');
+  const preview = h.nodes.find(node => node.id === 'oldlight-metrics-report');
+  const select = () => { h.shadow.activeElement = preview; preview.selectionStart = 0; preview.selectionEnd = preview.value.length; };
+  select(); const original = preview.value;
+  h.metrics.record('settings.changed');
+  assert.equal(preview.value, original, 'Copy selection holds the displayed snapshot');
+  assert.equal(h.field('metrics-preview-note').hidden, false);
+  h.action('metrics-export').fire('click');
+  const exported = JSON.parse(await h.urls[0].text());
+  assert.equal(exported.days[0].counts['settings.changed'], 1, 'Export always uses current permitted data');
+  assert.deepEqual(exported, JSON.parse(preview.value));
+  assert.deepEqual(Object.keys(exported).sort(), ['days', 'schema', 'version']);
+  assert.equal(h.field('metrics-preview-note').hidden, true);
+  select();
+  h.metrics.setEnabled(false); h.metrics.setEnabled(true);
+  h.window.fire('storage', { key: consentKey });
+  assert.equal(h.action('metrics-toggle').checked, true, 'A newer generation may already be enabled');
+  assert.deepEqual(JSON.parse(preview.value).days, [], 'Consent notification invalidates the old copy even after off-to-on');
+  assert.equal(h.field('metrics-preview-note').hidden, true);
+  h.metrics.record('helper.loaded'); select();
+  h.storage.clear(); h.window.fire('storage', { key: null });
+  assert.deepEqual(JSON.parse(preview.value).days, [], 'Whole-storage clear invalidates the selected copy immediately');
+  assert.equal(h.field('metrics-preview-note').hidden, true);
+});

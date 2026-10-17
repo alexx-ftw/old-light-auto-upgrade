@@ -5069,6 +5069,63 @@
         "Verificar que getReport usa un readState y preserva forcedOff, consentimiento, contratos previos y JSONexport exacto sin status/generation.",
         "No prometer atomicidad entre pestañas ni descarga completada; mantener datos, permisos, telemetría y opt-out sin ampliación."
       ]
+    },
+    {
+      "id": "metrics-preview-copy-selection",
+      "feedback": "Un nuevo contador reescribe el textarea de métricas mientras está seleccionado y Chromium colapsa la selección antes de copiar.",
+      "beforeFail": {
+        "revision": "e09f1edaed6eb5b1283e4094d5ddaa5606845829",
+        "command": "node --test --test-name-pattern='Real Chromium preserves a selected metrics report' tests/metrics-integration.test.cjs (mismo test sobre fuentes base en copia aislada, ver evidencia)",
+        "observedFailure": "Selección observada182..182 tras actualizar JSON151→182caracteres, esperado inicio0 y texto seleccionado estable. Evento desconocido sin cambios conserva selección0..151.",
+        "evidence": "docs/1.17.30-metrics-selection-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/metrics-integration.test.cjs",
+          "name": "Real Chromium preserves a selected metrics report during new counts and invalidates it on blur or revocation"
+        },
+        {
+          "file": "tests/metrics-integration.test.cjs",
+          "name": "Selected metrics previews export current data and invalidate on consent rotation or storage clear even while enabled"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Texto seleccionado enfocado y llega nuevo contador permitido",
+          "expected": "Texto/rango estables y aviso; salir del campo actualiza desde estado actual.",
+          "regression": {
+            "file": "tests/metrics-integration.test.cjs",
+            "name": "Real Chromium preserves a selected metrics report during new counts and invalidates it on blur or revocation"
+          }
+        },
+        {
+          "scenario": "Desactivación o error de lectura mientras hay selección",
+          "expected": "Informe vacío inmediato y aviso de copia oculto, sin preservar datos al detener medición.",
+          "regression": {
+            "file": "tests/metrics-integration.test.cjs",
+            "name": "Real Chromium preserves a selected metrics report during new counts and invalidates it on blur or revocation"
+          }
+        },
+        {
+          "scenario": "Exportar durante selección y evento de consentimiento tras off→on o borrado global",
+          "expected": "Exportación usa esquema/datos actuales; consentimiento/borrado invalida copia incluso con medición nuevamente activa.",
+          "regression": {
+            "file": "tests/metrics-integration.test.cjs",
+            "name": "Selected metrics previews export current data and invalidate on consent rotation or storage clear even while enabled"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Portapapeles, otros navegadores y sesión instalada",
+          "reason": "Solo selección/foco reales de Chromium y datos sintéticos; no se accede al portapapeles ni se confirma descarga o partida real."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Reproducir selección colapsada sobre fuentes anteriores y control negativo sin cambios del documento en navegador real.",
+        "Revisar blur forzado, conteos normales y que consentimiento/error/borrado prevalezcan, incluso off→on antes del evento.",
+        "Verificar exportación actual sin generación/estado interno y ausencia de APIs nuevas de portapapeles, categorías o permisos."
+      ]
     }
   ]
 }
