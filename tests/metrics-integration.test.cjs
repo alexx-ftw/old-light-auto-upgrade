@@ -525,3 +525,16 @@ test('Restored metrics read failures surface immediately and never implicitly re
   h.action('metrics-toggle').checked = true; h.action('metrics-toggle').fire('change');
   assert.equal(h.action('metrics-toggle').checked, true); assert.deepEqual(JSON.parse(preview.value).days, []);
 });
+
+test('an older metrics panel explains newer-release suspension without exposing or deleting its counters', () => {
+  const newer = { schema: 1, version: '99.0.0', generation: '00000000-0000-4000-8000-000000000001',
+    days: [{ date: new Date().toISOString().slice(0, 10), counts: { 'helper.loaded': 7 } }] };
+  const storage = new Map([[key, JSON.stringify(newer)]]), before = storage.get(key);
+  const h = panelHarness({ storage });
+  assert.match(h.field('metrics-status').textContent, /versión más reciente.*Recarga/);
+  assert.equal(h.action('metrics-toggle').checked, false);
+  h.action('metrics-preview').fire('click');
+  assert.deepEqual(JSON.parse(h.nodes.find(node => node.id === 'oldlight-metrics-report').value).days, []);
+  assert.equal(storage.get(key), before);
+  assert.equal(storage.has(consentKey), false);
+});

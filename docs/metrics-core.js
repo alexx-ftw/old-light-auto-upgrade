@@ -131,6 +131,17 @@
     return parsed.valid && matches(raw, parsed.state) ? parsed.state : null;
   }
 
+  function newerRelease(raw, version, generation, today) {
+    if (!plain(raw) || valueOf(raw, 'schema') !== SCHEMA || valueOf(raw, 'generation') !== generation) return false;
+    const storedVersion = valueOf(raw, 'version');
+    if (safeVersion(storedVersion) === 'unknown' || safeVersion(version) === 'unknown') return false;
+    const left = storedVersion.split('.').map(Number), right = version.split('.').map(Number);
+    for (let i = 0; i < 3; i += 1) {
+      if (left[i] !== right[i]) return left[i] > right[i] && sanitize(raw, storedVersion, generation, today).valid;
+    }
+    return false;
+  }
+
   function dominates(actual, expected) {
     if (actual.schema !== expected.schema || actual.version !== expected.version || actual.generation !== expected.generation) return false;
     for (const wanted of expected.days) {
@@ -209,7 +220,7 @@
 
     function fail(code) {
       forcedOff = true;
-      storageError = code !== 'invalid-clock' && code !== 'consent-changed' && code !== 'generation-unavailable';
+      storageError = code !== 'invalid-clock' && code !== 'consent-changed' && code !== 'generation-unavailable' && code !== 'newer-version';
       errorCode = code;
     }
 
@@ -267,6 +278,9 @@
       const result = readRaw('read', 'read-failed');
       if (!result.ok) return { ok: false, state, permission };
       try {
+        if (newerRelease(result.raw, version, permission.generation, today)) {
+          fail('newer-version'); return { ok: false, state, permission };
+        }
         const parsed = sanitize(result.raw, version, permission.generation, today);
         if (!parsed.valid) { fail('invalid-state'); return { ok: false, state, permission }; }
         const latest = consent();

@@ -5537,6 +5537,131 @@
         "Revisar generación/cuenta/configuración y cambios nuevos durante la operación.",
         "Contrastar recuperación explícita, deduplicación existente y ausencia de reintentos automáticos de restauración."
       ]
+    },
+    {
+      "id": "local-metrics-cooperative-version-rollback",
+      "feedback": "Escritores secuenciales de versiones distintas reiniciaban repetidamente los contadores locales de la otra versión.",
+      "beforeFail": {
+        "revision": "1e1e69a0ab0d8004c42e6d69b4f0fceb7398d5e2",
+        "command": "node --test tests/metrics-version-guard.test.cjs",
+        "observedFailure": "Mismo harness contra fuentes anteriores:2PASS/5FAIL; el escritor anterior devolvió true cuando se esperaba false y reemplazó los contadores posteriores.",
+        "evidence": "docs/1.17.35-local-metrics-version-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/metrics-version-guard.test.cjs",
+          "name": "older cooperative metrics cannot erase a newer release through sequential recording"
+        },
+        {
+          "file": "tests/metrics-version-guard.test.cjs",
+          "name": "same release metrics still accumulate sequential events across tabs"
+        },
+        {
+          "file": "tests/metrics-version-guard.test.cjs",
+          "name": "a newer release resets old counters once while an older cooperative writer cannot reset them back"
+        },
+        {
+          "file": "tests/metrics-version-guard.test.cjs",
+          "name": "metrics release ordering compares numeric components instead of strings"
+        },
+        {
+          "file": "tests/metrics-version-guard.test.cjs",
+          "name": "an explicit opt-out from an older cooperative tab still erases newer counters and revokes consent"
+        },
+        {
+          "file": "tests/metrics-version-guard.test.cjs",
+          "name": "a stale consent generation is ignored rather than treated as a newer active metrics release"
+        },
+        {
+          "file": "tests/metrics-version-guard.test.cjs",
+          "name": "a sampled step from an older release cannot overwrite newer counters when it finishes"
+        },
+        {
+          "file": "tests/metrics-integration.test.cjs",
+          "name": "an older metrics panel explains newer-release suspension without exposing or deleting its counters"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "older cooperative metrics cannot erase a newer release through sequential recording",
+          "expected": "Conservar aislamiento de versión y consentimiento; el opt-out explícito sigue borrando.",
+          "regression": {
+            "file": "tests/metrics-version-guard.test.cjs",
+            "name": "older cooperative metrics cannot erase a newer release through sequential recording"
+          }
+        },
+        {
+          "scenario": "same release metrics still accumulate sequential events across tabs",
+          "expected": "Conservar aislamiento de versión y consentimiento; el opt-out explícito sigue borrando.",
+          "regression": {
+            "file": "tests/metrics-version-guard.test.cjs",
+            "name": "same release metrics still accumulate sequential events across tabs"
+          }
+        },
+        {
+          "scenario": "a newer release resets old counters once while an older cooperative writer cannot reset them back",
+          "expected": "Conservar aislamiento de versión y consentimiento; el opt-out explícito sigue borrando.",
+          "regression": {
+            "file": "tests/metrics-version-guard.test.cjs",
+            "name": "a newer release resets old counters once while an older cooperative writer cannot reset them back"
+          }
+        },
+        {
+          "scenario": "metrics release ordering compares numeric components instead of strings",
+          "expected": "Conservar aislamiento de versión y consentimiento; el opt-out explícito sigue borrando.",
+          "regression": {
+            "file": "tests/metrics-version-guard.test.cjs",
+            "name": "metrics release ordering compares numeric components instead of strings"
+          }
+        },
+        {
+          "scenario": "an explicit opt-out from an older cooperative tab still erases newer counters and revokes consent",
+          "expected": "Conservar aislamiento de versión y consentimiento; el opt-out explícito sigue borrando.",
+          "regression": {
+            "file": "tests/metrics-version-guard.test.cjs",
+            "name": "an explicit opt-out from an older cooperative tab still erases newer counters and revokes consent"
+          }
+        },
+        {
+          "scenario": "a stale consent generation is ignored rather than treated as a newer active metrics release",
+          "expected": "Conservar aislamiento de versión y consentimiento; el opt-out explícito sigue borrando.",
+          "regression": {
+            "file": "tests/metrics-version-guard.test.cjs",
+            "name": "a stale consent generation is ignored rather than treated as a newer active metrics release"
+          }
+        },
+        {
+          "scenario": "a sampled step from an older release cannot overwrite newer counters when it finishes",
+          "expected": "Conservar aislamiento de versión y consentimiento; el opt-out explícito sigue borrando.",
+          "regression": {
+            "file": "tests/metrics-version-guard.test.cjs",
+            "name": "a sampled step from an older release cannot overwrite newer counters when it finishes"
+          }
+        },
+        {
+          "scenario": "an older metrics panel explains newer-release suspension without exposing or deleting its counters",
+          "expected": "Conservar aislamiento de versión y consentimiento; el opt-out explícito sigue borrando.",
+          "regression": {
+            "file": "tests/metrics-integration.test.cjs",
+            "name": "an older metrics panel explains newer-release suspension without exposing or deleting its counters"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Pestañas legacy e intercalación después de readState",
+          "reason": "Código ya cargado no se modifica retroactivamente; no hay escritura atómica CAS. Recargar versiones antiguas. No se afirma resolver esas fronteras."
+        },
+        {
+          "scope": "Sesión real del usuario",
+          "reason": "Pruebas sintéticas y auditoría del código; no se opera en cuentas ni partida."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Verificar comparación numérica y guard antes de sanitizar la versión anterior.",
+        "No alterar claves, consentimiento, borrado explícito ni exportar datos ajenos.",
+        "Contrastar actualización una vez, generación revocada, tiempos y reintentos; no presentar legacy/CAS como resueltos."
+      ]
     }
   ]
 }

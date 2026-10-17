@@ -226,3 +226,7 @@ La primera candidata33,5cadbe4, conservaba inteligencia obsoleta al desconocer e
 ## Resultado de aplicación Drive1.17.34
 
 Un código busy o invalid_backup no demuestra que la importación no comenzara: cleanup o notificaciones pueden fallar después de mutar datos. Exigir resultado explícito previo a invocar applyBackup, aislamiento por solicitud y restauración de intención ligada a generación/cuenta. Revisar cambios concurrentes y respuesta perdida sin convertir incertidumbre en reintento. [Evidencia y límites](1.17.34-drive-restore-validation.md).
+
+## Métricas locales entre versiones compatibles1.17.35
+
+Reiniciar por versión no autoriza que un escritor antiguo borre repetidamente el informe posterior. Exigir secuencia entre dos instancias y control de misma versión, comparación numérica y opt-out desde la instancia bloqueada. No confundir protección cooperativa secuencial con reparación del código legacy ya cargado o CAS. Una clave nueva también cambia qué bytes puede borrar el opt-out legacy: revisar ese contrato antes de proponer migraciones. [Auditoría y límites](1.17.35-local-metrics-version-validation.md).

@@ -730,7 +730,7 @@ test('a concurrent valid document from another generation is ignored without a c
   assert.equal(other.getStatus().total, 1);
 });
 
-test('a concurrent valid document from another release is transient and cannot relabel counts', () => {
+test('a concurrent newer release suspends an older collector without relabeling counts or changing consent', () => {
   const f = fixture(state());
   let interrupt = true;
   const other = core.create({ ...f.options, write(value) {
@@ -742,7 +742,9 @@ test('a concurrent valid document from another release is transient and cannot r
   } });
   assert.equal(other.record('helper.loaded'), false);
   assert.equal(other.getStatus().storageError, false);
-  assert.equal(other.isEnabled(), true);
+  assert.equal(other.isEnabled(), false);
+  assert.equal(other.getStatus().errorCode, 'newer-version');
+  assert.equal(f.consent().enabled, true);
   assert.deepEqual(other.snapshot().days, []);
 });
 

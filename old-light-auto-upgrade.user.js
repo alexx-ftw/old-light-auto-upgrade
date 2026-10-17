@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.34
+// @version      1.17.35
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -4935,6 +4935,17 @@ return Object.freeze({create});
     return parsed.valid && matches(raw, parsed.state) ? parsed.state : null;
   }
 
+  function newerRelease(raw, version, generation, today) {
+    if (!plain(raw) || valueOf(raw, 'schema') !== SCHEMA || valueOf(raw, 'generation') !== generation) return false;
+    const storedVersion = valueOf(raw, 'version');
+    if (safeVersion(storedVersion) === 'unknown' || safeVersion(version) === 'unknown') return false;
+    const left = storedVersion.split('.').map(Number), right = version.split('.').map(Number);
+    for (let i = 0; i < 3; i += 1) {
+      if (left[i] !== right[i]) return left[i] > right[i] && sanitize(raw, storedVersion, generation, today).valid;
+    }
+    return false;
+  }
+
   function dominates(actual, expected) {
     if (actual.schema !== expected.schema || actual.version !== expected.version || actual.generation !== expected.generation) return false;
     for (const wanted of expected.days) {
@@ -5013,7 +5024,7 @@ return Object.freeze({create});
 
     function fail(code) {
       forcedOff = true;
-      storageError = code !== 'invalid-clock' && code !== 'consent-changed' && code !== 'generation-unavailable';
+      storageError = code !== 'invalid-clock' && code !== 'consent-changed' && code !== 'generation-unavailable' && code !== 'newer-version';
       errorCode = code;
     }
 
@@ -5071,6 +5082,9 @@ return Object.freeze({create});
       const result = readRaw('read', 'read-failed');
       if (!result.ok) return { ok: false, state, permission };
       try {
+        if (newerRelease(result.raw, version, permission.generation, today)) {
+          fail('newer-version'); return { ok: false, state, permission };
+        }
         const parsed = sanitize(result.raw, version, permission.generation, today);
         if (!parsed.valid) { fail('invalid-state'); return { ok: false, state, permission }; }
         const latest = consent();
@@ -6386,7 +6400,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.34';
+  const SCRIPT_VERSION = '1.17.35';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -6750,6 +6764,7 @@ return Object.freeze({ encode });
       const issues = {
         'generation-unavailable': 'Este navegador no permite activar las métricas con seguridad. Actualízalo o deja la medición desactivada.',
         'invalid-clock': 'El reloj del dispositivo no es válido. La medición está detenida; revisa la fecha antes de activarla.',
+        'newer-version': 'Otra pestaña registra métricas de una versión más reciente. Recarga esta pestaña para seguir midiendo; tu elección de métricas no ha cambiado.',
         'consent-changed': 'La elección de métricas cambió en otra pestaña. Revisa el interruptor antes de volver a activarlas.',
       };
       setText(status, state.storageError
@@ -8113,6 +8128,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.35', title: 'Protección local entre versiones compatibles', changes: [
+        'Detiene el registro local de una versión anterior que detecta contadores de una versión posterior.',
+        'Indica cuándo recargar la pestaña y conserva el consentimiento y el borrado explícito.',
+        'La protección requiere versiones que la incorporen; recarga las pestañas antiguas. No ofrece exclusión atómica entre escritores.',
+      ] },
       { version: '1.17.34', title: 'Conservar respaldo pendiente tras rechazo de restauración', changes: [
         'Conserva el respaldo automático pendiente cuando el Helper demuestra que no inició la restauración.',
         'Los errores inciertos siguen bloqueados; no se reintenta automáticamente una restauración.',
