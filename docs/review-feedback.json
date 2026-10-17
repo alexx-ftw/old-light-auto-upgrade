@@ -5835,6 +5835,119 @@
         "Conservar bytes completos en rollback exitoso y campos desconocidos al guardar pausa; no alterar consentimiento/telemetría.",
         "Probar fallo/noop/readfailure, suspend/render, esquema futuro e importación inválida sin efectos; distinguir garantías de recarga y límites."
       ]
+    },
+    {
+      "id": "settings-read-invalid-activation",
+      "feedback": "Tipos explícitos inválidos de enabled activaban el Helper y borrar la clave durante una sesión descartaba preferencias y reactivaba.",
+      "beforeFail": {
+        "revision": "7c51f74540e325e428ae1f912bfe609568c9358f",
+        "command": "node --test /tmp/oldlight-settings-activation-before/tests/settings-read-recovery.test.cjs",
+        "observedFailure": "Mismo harness18casos:12PASS/6FAIL con bytes previos; candidata18PASS. canOperateMission se activaba ante flag malformado.",
+        "evidence": "docs/1.17.37-settings-activation-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/settings-read-recovery.test.cjs",
+          "name": "invalid stored activation pauses cold loading while retaining valid preferences and original bytes"
+        },
+        {
+          "file": "tests/settings-read-recovery.test.cjs",
+          "name": "invalid cross-tab activation pauses without adopting replacement preferences or losing current choices"
+        },
+        {
+          "file": "tests/settings-read-recovery.test.cjs",
+          "name": "deleting stored settings during an existing session preserves preferences and pauses instead of first-run activation"
+        },
+        {
+          "file": "tests/settings-read-recovery.test.cjs",
+          "name": "a genuine first run remains compatible and the ordinary mission gate can act with valid context"
+        },
+        {
+          "file": "tests/settings-read-recovery.test.cjs",
+          "name": "legacy preferences without activation retain cold defaults but cannot reactivate a paused live session"
+        },
+        {
+          "file": "tests/settings-read-recovery.test.cjs",
+          "name": "future-looking metadata cannot override invalid activation and unknown stored fields remain untouched"
+        },
+        {
+          "file": "tests/settings-read-recovery.test.cjs",
+          "name": "explicitly saving a safely paused configuration preserves valid known preferences across reload"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "invalid stored activation pauses cold loading while retaining valid preferences and original bytes",
+          "expected": "Pausar valores explícitos inválidos sin escritura; conservar formatos históricos y preferencias; control de autoridad positivo/negativo.",
+          "regression": {
+            "file": "tests/settings-read-recovery.test.cjs",
+            "name": "invalid stored activation pauses cold loading while retaining valid preferences and original bytes"
+          }
+        },
+        {
+          "scenario": "invalid cross-tab activation pauses without adopting replacement preferences or losing current choices",
+          "expected": "Pausar valores explícitos inválidos sin escritura; conservar formatos históricos y preferencias; control de autoridad positivo/negativo.",
+          "regression": {
+            "file": "tests/settings-read-recovery.test.cjs",
+            "name": "invalid cross-tab activation pauses without adopting replacement preferences or losing current choices"
+          }
+        },
+        {
+          "scenario": "deleting stored settings during an existing session preserves preferences and pauses instead of first-run activation",
+          "expected": "Pausar valores explícitos inválidos sin escritura; conservar formatos históricos y preferencias; control de autoridad positivo/negativo.",
+          "regression": {
+            "file": "tests/settings-read-recovery.test.cjs",
+            "name": "deleting stored settings during an existing session preserves preferences and pauses instead of first-run activation"
+          }
+        },
+        {
+          "scenario": "a genuine first run remains compatible and the ordinary mission gate can act with valid context",
+          "expected": "Pausar valores explícitos inválidos sin escritura; conservar formatos históricos y preferencias; control de autoridad positivo/negativo.",
+          "regression": {
+            "file": "tests/settings-read-recovery.test.cjs",
+            "name": "a genuine first run remains compatible and the ordinary mission gate can act with valid context"
+          }
+        },
+        {
+          "scenario": "legacy preferences without activation retain cold defaults but cannot reactivate a paused live session",
+          "expected": "Pausar valores explícitos inválidos sin escritura; conservar formatos históricos y preferencias; control de autoridad positivo/negativo.",
+          "regression": {
+            "file": "tests/settings-read-recovery.test.cjs",
+            "name": "legacy preferences without activation retain cold defaults but cannot reactivate a paused live session"
+          }
+        },
+        {
+          "scenario": "future-looking metadata cannot override invalid activation and unknown stored fields remain untouched",
+          "expected": "Pausar valores explícitos inválidos sin escritura; conservar formatos históricos y preferencias; control de autoridad positivo/negativo.",
+          "regression": {
+            "file": "tests/settings-read-recovery.test.cjs",
+            "name": "future-looking metadata cannot override invalid activation and unknown stored fields remain untouched"
+          }
+        },
+        {
+          "scenario": "explicitly saving a safely paused configuration preserves valid known preferences across reload",
+          "expected": "Pausar valores explícitos inválidos sin escritura; conservar formatos históricos y preferencias; control de autoridad positivo/negativo.",
+          "regression": {
+            "file": "tests/settings-read-recovery.test.cjs",
+            "name": "explicitly saving a safely paused configuration preserves valid known preferences across reload"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Nueva lectura fría sin clave y formatos futuros arbitrarios",
+          "reason": "Sin marcador persistente no se distingue borrado de primer uso; no existe esquema raíz de preferencias para validar metadata arbitraria."
+        },
+        {
+          "scope": "Roundtrip de campos desconocidos al guardar y sesión real",
+          "reason": "El lector no modifica bytes; el escritor normal no se amplía. VM y guarda productiva, no pedidos reales ni compositor."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Revisar null/string/number/object/absence y autoridad de canOperateMission con control positivo.",
+        "Preservar preferencias conocidas, bytes desconocidos y recuperación booleanaválida; nuncaescribir por leer.",
+        "Separar firstrun/deletion/live legacy partial y mantener explícitos límites future/CAS/roundtrip."
+      ]
     }
   ]
 }

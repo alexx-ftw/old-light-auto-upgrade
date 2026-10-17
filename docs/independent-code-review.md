@@ -234,3 +234,7 @@ Reiniciar por versión no autoriza que un escritor antiguo borre repetidamente e
 ## Rollback incompleto y recarga1.17.36
 
 Una pausa en memoria no protege después de recargar si los bytes previos siguen enabledtrue. Exigir readSettings productivo tras el fallo, readback de escritura y controles de no-op/readfailure; establecer stop antes de callbacks de UI que puedan lanzar. Cambiar activación no autoriza eliminar campos futuros del objeto guardado. Mantener límites de almacenamiento roto, CAS y lector local malformado como seguimiento distinto. [Evidencia](1.17.36-backup-rollback-pause-validation.md).
+
+## Autoridad de activación al leer1.17.37
+
+Normalizar enabled con !=false convierte corrupción de tipo en permiso. Separar primera instalación, borrado de clave con sesión existente, campo histórico ausente y campo explícito inválido. Exigir control positivo de la guarda real, preservación completa de preferencias de sesión y cero escrituras; no inventar esquema por metadata desconocida. La lectura fría sin clave sigue siendo indistinguible del primer uso y el escritor de campos futuros es seguimiento distinto. [Contrato y evidencia](1.17.37-settings-activation-validation.md).

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.36
+// @version      1.17.37
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -6400,7 +6400,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.36';
+  const SCRIPT_VERSION = '1.17.37';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -7066,8 +7066,19 @@ return Object.freeze({ encode });
   function readSettings(previous = null) {
     try {
       const raw = localStorage.getItem(KEY);
-      const saved = raw === null ? {} : JSON.parse(raw);
+      // Only a cold first run may use the historical enabled default. Losing a
+      // live session's key must not erase its choices or grant fresh authority.
+      if (raw === null) return normalizeSettings(previous ? { ...previous, enabled: false } : {});
+      const saved = JSON.parse(raw);
       if (!saved || typeof saved !== 'object' || Array.isArray(saved)) throw new TypeError('Invalid settings root');
+      if (!Object.hasOwn(saved, 'enabled')) {
+        // Older partial preferences omitted this flag. Keep their cold default,
+        // but never turn a paused live session on merely because it is absent.
+        return normalizeSettings(previous ? { ...previous, ...saved, enabled: previous.enabled === true } : saved);
+      }
+      if (typeof saved.enabled !== 'boolean') {
+        return normalizeSettings({ ...(previous || saved), enabled: false });
+      }
       return normalizeSettings(saved);
     } catch {
       // Unavailable or corrupt storage must not activate default automation or
@@ -8128,6 +8139,10 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.37', title: 'Carga segura de la activación guardada', changes: [
+        'Los tipos inválidos de activación pausan sin escribir ni descartar las preferencias válidas de la sesión.',
+        'Distingue el primer uso del borrado de la clave durante una sesión y conserva compatibilidad con preferencias históricas parciales.',
+      ] },
       { version: '1.17.36', title: 'Pausa comprobada tras recuperación incompleta de copia', changes: [
         'Guarda y comprueba la pausa antes de reconstruir la interfaz si falla la recuperación de una importación.',
         'Conserva las preferencias anteriores, incluidos campos desconocidos, y avisa si la pausa solo puede confirmarse en esta sesión.',
