@@ -5187,6 +5187,55 @@
         "Verificar targets de eventos y que solo leen getReport, sin sampling/reinicio/consentimiento; oculto y carga nueva no agregan lecturas.",
         "Comprobar retención, errores persistentes, forcePreview y eventos duplicados con núcleo/collector y categorías intactos."
       ]
+    },
+    {
+      "id": "imperial-unverified-allocation-diagnostic",
+      "feedback": "El panel confunde reparto no verificado con asignación cero, dificultando distinguir flota y edificios.",
+      "beforeFail": {
+        "revision": "10d984f7f7646b425f03a805fa8ab4184fd96833",
+        "command": "node --test --test-name-pattern='imperial allocation feedback distinguishes' tests/empire-panel.test.cjs",
+        "observedFailure": "Con ready:false el mensaje sigue siendo Sin producción imperial adicional asignada en lugar de reparto pendiente.",
+        "evidence": "docs/1.17.32-imperial-allocation-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "imperial allocation feedback distinguishes unverified plans from verified zero allocations"
+        },
+        {
+          "file": "tests/empire-panel.test.cjs",
+          "name": "imperial allocation diagnostics retain role exclusions and reject missing or malformed allocations without writes"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Reparto pendiente frente a cero verificado y modo apagado",
+          "expected": "Mensajes distintos, positivos preservados y sin guardados",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "imperial allocation feedback distinguishes unverified plans from verified zero allocations"
+          }
+        },
+        {
+          "scenario": "Plan incompleto, asignación inválida, rol o sistema excluido",
+          "expected": "No inventar cero ni cantidades; explicar política verificada sin modificarla",
+          "regression": {
+            "file": "tests/empire-panel.test.cjs",
+            "name": "imperial allocation diagnostics retain role exclusions and reject missing or malformed allocations without writes"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Causa real de Structures y navegador instalado",
+          "reason": "Pendientes preferencias del usuario; DOM sintético sin pintura, partida ni pedidos reales."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Distinguir evidencia ausente de cero confirmado, guardas completas y asignación válida.",
+        "Comprobar roles legítimamente sin asignación, modo apagado y pérdida de censo sin efectos ni lecturas adicionales.",
+        "Confirmar que no cambia arbitraje/reservas ni afirma resolver Structures o vulnerabilidad."
+      ]
     }
   ]
 }

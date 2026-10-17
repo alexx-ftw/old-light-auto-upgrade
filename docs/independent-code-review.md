@@ -212,3 +212,7 @@ En1.17.30 Chromium real reprodujo selección0..151 que colapsa a182..182 tras un
 ## Vista restaurada y notificaciones diferidas
 
 En1.17.31 un orden simulado pageshow→storage reprodujo estado/copia antiguos tras revocación; el núcleo seguía respetando el consentimiento al leer. Revisar la vista antes de esperar la próxima notificación y una generación nueva ya habilitada. Exigir targets reales window/document, lecturas sin escrituras/muestreo y recuperación explícita tras error. Un reloj simulado no prueba suspensión del sistema ni justifica modificar el token síncrono de step; mantener esa incertidumbre. [Evidencia y límites](1.17.31-metrics-lifecycle-validation.md).
+
+## Diagnóstico de asignación no verificada1.17.32
+
+Una rama que oculta cantidades antiguas puede seguir comunicando una conclusión falsa: texto de asignación cero cuando no hay reparto verificado. Exigir distinguir off, pendiente, cero confirmado y rol/exclusión sin convertir lecturas de presentación en nuevas guardas costosas o permisos. Mantener incertidumbre del reporte de Structures y verificar que el hint diferencia flota de edificios. Ver [evidencia](1.17.32-imperial-allocation-validation.md).

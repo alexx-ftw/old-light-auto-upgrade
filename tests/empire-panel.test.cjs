@@ -143,7 +143,7 @@ test('missing transit source and mixed census generations warn and do not show a
   for (const change of [h => { h.data.transitCensus = null; }, h => { h.data.snapshots[1].censusId = 'source-2'; }]) {
     const h = harness(); h.data.config.enabled = true; change(h); h.app.render();
     assert.ok(h.paragraphs().some(text => text.startsWith('Flota sin censo sincronizado')));
-    assert.ok(withClass(h.container, 'empire-progress').every(node => node.textContent === 'Sin producción imperial adicional asignada.'));
+    assert.ok(withClass(h.container, 'empire-progress').every(node => node.textContent === 'Reparto de flota pendiente de verificar.'));
   }
 });
 
@@ -152,7 +152,7 @@ test('activation rechecks capability and stopping stays available when capabilit
   assert.equal(h.toggle.disabled, true); h.toggle.dispatch('click'); assert.equal(h.writes, 0);
   h.capable = true; h.app.render(); h.toggle.dispatch('click');
   assert.equal(h.data.config.enabled, true); assert.equal(h.toggle.getAttribute('aria-pressed'), 'true');
-  assert.equal(withClass(h.cards[0], 'empire-progress')[0].textContent, 'Sin producción imperial adicional asignada.');
+  assert.equal(withClass(h.cards[0], 'empire-progress')[0].textContent, 'Reparto de flota pendiente de verificar.');
   h.data.ready = true; h.app.render();
   assert.equal(withClass(h.cards[0], 'empire-progress')[0].textContent, 'Reparto propuesto: Marauder ×6');
   h.capable = false; h.app.render(); assert.equal(h.toggle.disabled, false); h.toggle.dispatch('click');
@@ -200,7 +200,7 @@ test('role and exclusion controls save only their intended system policy', () =>
   const h = harness(); h.toggle.dispatch('click');
   const role = byLabel(h.container, 'Rol de Colonia'); role.value = 'industry'; role.dispatch('change');
   assert.equal(h.data.config.systems[B].role, 'industry'); assert.equal(h.data.config.systems[A], undefined);
-  assert.equal(withClass(h.cards[1], 'empire-progress')[0].textContent, 'Sin producción imperial adicional asignada.');
+  assert.equal(withClass(h.cards[1], 'empire-progress')[0].textContent, 'Reparto de flota pendiente de verificar.');
   const enabled = byLabel(h.container, 'Atender Colonia'); enabled.checked = false; enabled.dispatch('change');
   assert.equal(h.data.config.systems[B].enabled, false); assert.equal(h.data.config.systems[B].role, 'industry');
   assert.equal(h.data.config.fleetTargets.marauder, 20);
@@ -670,4 +670,39 @@ test('recovery focus stays visible and hidden account round trips close stale he
   help.open = true; h.visible = false;
   h.app.observeScope('beta/player'); h.app.observeScope(SCOPE); h.visible = true; h.app.render();
   assert.equal(help.open, false); assert.equal(h.writes, 0);
+});
+
+test('imperial allocation feedback distinguishes unverified plans from verified zero allocations', () => {
+  const h = harness(); h.data.config.enabled = true;
+  const before = structuredClone(h.data.config);
+  h.data.ready = false; h.app.render();
+  assert.ok(withClass(h.container, 'empire-progress').every(node => node.textContent === 'Reparto de flota pendiente de verificar.'));
+  h.data.ready = true; h.app.render();
+  assert.ok(withClass(h.container, 'empire-progress').some(node => node.textContent.startsWith('Reparto propuesto:')));
+  h.data.config.fleetTargets.marauder = 0; h.app.render();
+  assert.ok(withClass(h.container, 'empire-progress').every(node => node.textContent === 'Sin producción imperial adicional asignada.'));
+  h.data.transitCensus = null; h.app.render();
+  assert.ok(withClass(h.container, 'empire-progress').every(node => node.textContent === 'Reparto de flota pendiente de verificar.'));
+  h.data.config.enabled = false; h.app.render();
+  assert.ok(withClass(h.container, 'empire-progress').every(node => node.textContent === 'Producción imperial desactivada.'));
+  assert.equal(h.writes, 0); assert.equal(before.enabled, true);
+});
+
+
+test('imperial allocation diagnostics retain role exclusions and reject missing or malformed allocations without writes', () => {
+  const h = harness(); h.data.config.enabled = true; h.data.ready = true;
+  for (const value of [undefined, {}, { probe: -1, marauder: 0, sentinel: 0, vanguard: 0 }, { probe: 0, marauder: 1.5, sentinel: 0, vanguard: 0 }]) {
+    h.data.cachedPlan = { complete: true, summary: { allocationsBySystem: { [A]: value } } }; h.app.render();
+    assert.equal(withClass(h.cards[0], 'empire-progress')[0].textContent, 'Reparto de flota pendiente de verificar.');
+  }
+  h.data.cachedPlan = { complete: false, summary: { allocationsBySystem: { [A]: { probe: 0, marauder: 0, sentinel: 0, vanguard: 0 } } } }; h.app.render();
+  assert.equal(withClass(h.cards[0], 'empire-progress')[0].textContent, 'Reparto de flota pendiente de verificar.');
+  delete h.data.cachedPlan;
+  h.data.config.systems[A] = { role: 'industry', enabled: true }; h.app.render();
+  assert.equal(withClass(h.cards[0], 'empire-progress')[0].textContent, 'Este rol no recibe producción de flota.');
+  h.data.config.systems[A].enabled = false; h.app.render();
+  assert.equal(withClass(h.cards[0], 'empire-progress')[0].textContent, 'Sistema excluido del reparto de flota.');
+  assert.ok(h.paragraphs().some(text => text.includes('El reparto corresponde a flota.')));
+  const before = structuredClone(h.data.config); h.app.render(); h.app.render();
+  assert.deepEqual(h.data.config, before); assert.equal(h.writes, 0);
 });

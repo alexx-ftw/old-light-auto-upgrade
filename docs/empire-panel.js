@@ -203,9 +203,16 @@
         text(nodes.resourceNodes.energy, num(snap?.energy));
         for (const [id, node] of nodes.shipNodes) { const fleet = snap?.fleet?.[id]; text(node, `${LABELS[id]}: ${num(fleet?.parked)} en base · ${num(fleet?.away)} en misión · ${num(fleet?.building)} en cola`); }
         // setConfig revokes ready immediately but retains the old plan until update.
-        const allocation = cfg.enabled && fleetVerified && state.ready === true ? state.plan?.summary?.allocationsBySystem?.[entry.id] : null;
-        const parts = allocation ? core.DEFAULT_SHIPS.filter(id => allocation[id] > 0).map(id => `${LABELS[id]} ×${num(allocation[id])}`) : [];
-        text(nodes.allocation, parts.length ? 'Reparto propuesto: ' + parts.join(' · ') : 'Sin producción imperial adicional asignada.');
+        const verified = fleetVerified && state.ready === true && state.plan?.complete === true;
+        const allocation = verified ? state.plan?.summary?.allocationsBySystem?.[entry.id] : null;
+        const validAllocation = allocation && core.DEFAULT_SHIPS.every(id => Number.isSafeInteger(allocation[id]) && allocation[id] >= 0);
+        const parts = validAllocation ? core.DEFAULT_SHIPS.filter(id => allocation[id] > 0).map(id => `${LABELS[id]} ×${num(allocation[id])}`) : [];
+        text(nodes.allocation, !cfg.enabled ? 'Producción imperial desactivada.'
+          : !verified ? 'Reparto de flota pendiente de verificar.'
+          : !profile.enabled ? 'Sistema excluido del reparto de flota.'
+          : !['balanced', 'shipyard'].includes(profile.role) ? 'Este rol no recibe producción de flota.'
+          : !validAllocation ? 'Reparto de flota pendiente de verificar.'
+          : parts.length ? 'Reparto propuesto: ' + parts.join(' · ') : 'Sin producción imperial adicional asignada.');
       }
       for (const [id, nodes] of cards) if (!retained.has(id)) { nodes.card.remove(); cards.delete(id); }
       property(empty, 'hidden', roster.length > 0);
@@ -311,7 +318,7 @@
         el('p', 'Equilibrado y Astillero reciben producción de flota. Industria y Defensa no reciben producción imperial adicional en esta fase.', 'empire-hint'),
         el('p', 'El reparto requiere Atender. Los roles reordenan prioridades, no excluyen otros edificios: respetan tus edificios marcados y las reglas de Depot/Reactor. No organizan patrullas, ataques ni transportes.', 'empire-hint'),
         el('p', 'Con la sincronización de Drive conectada, se comparten objetivos, roles y Atender. Activar o detener Imperio sigue siendo una decisión local.', 'empire-hint'));
-      root.append(head, status, recoveryHelp, total, overview, fleetSummary, productionSummary, el('h3', 'Objetivos para todo el imperio'), scopeHelp, goals,
+      root.append(head, status, recoveryHelp, total, overview, fleetSummary, productionSummary, el('p', 'El reparto corresponde a flota. Las mejoras siguen las prioridades de Edificios; consulta allí la siguiente acción y su motivo.', 'empire-hint'), el('h3', 'Objetivos para todo el imperio'), scopeHelp, goals,
         error, help, el('h3', 'Sistemas del imperio', 'empire-systems-heading'), list, empty);
       container.append(style, root); render();
       return root;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.31
+// @version      1.17.32
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -3293,9 +3293,16 @@ return Object.freeze({create});
         text(nodes.resourceNodes.energy, num(snap?.energy));
         for (const [id, node] of nodes.shipNodes) { const fleet = snap?.fleet?.[id]; text(node, `${LABELS[id]}: ${num(fleet?.parked)} en base · ${num(fleet?.away)} en misión · ${num(fleet?.building)} en cola`); }
         // setConfig revokes ready immediately but retains the old plan until update.
-        const allocation = cfg.enabled && fleetVerified && state.ready === true ? state.plan?.summary?.allocationsBySystem?.[entry.id] : null;
-        const parts = allocation ? core.DEFAULT_SHIPS.filter(id => allocation[id] > 0).map(id => `${LABELS[id]} ×${num(allocation[id])}`) : [];
-        text(nodes.allocation, parts.length ? 'Reparto propuesto: ' + parts.join(' · ') : 'Sin producción imperial adicional asignada.');
+        const verified = fleetVerified && state.ready === true && state.plan?.complete === true;
+        const allocation = verified ? state.plan?.summary?.allocationsBySystem?.[entry.id] : null;
+        const validAllocation = allocation && core.DEFAULT_SHIPS.every(id => Number.isSafeInteger(allocation[id]) && allocation[id] >= 0);
+        const parts = validAllocation ? core.DEFAULT_SHIPS.filter(id => allocation[id] > 0).map(id => `${LABELS[id]} ×${num(allocation[id])}`) : [];
+        text(nodes.allocation, !cfg.enabled ? 'Producción imperial desactivada.'
+          : !verified ? 'Reparto de flota pendiente de verificar.'
+          : !profile.enabled ? 'Sistema excluido del reparto de flota.'
+          : !['balanced', 'shipyard'].includes(profile.role) ? 'Este rol no recibe producción de flota.'
+          : !validAllocation ? 'Reparto de flota pendiente de verificar.'
+          : parts.length ? 'Reparto propuesto: ' + parts.join(' · ') : 'Sin producción imperial adicional asignada.');
       }
       for (const [id, nodes] of cards) if (!retained.has(id)) { nodes.card.remove(); cards.delete(id); }
       property(empty, 'hidden', roster.length > 0);
@@ -3401,7 +3408,7 @@ return Object.freeze({create});
         el('p', 'Equilibrado y Astillero reciben producción de flota. Industria y Defensa no reciben producción imperial adicional en esta fase.', 'empire-hint'),
         el('p', 'El reparto requiere Atender. Los roles reordenan prioridades, no excluyen otros edificios: respetan tus edificios marcados y las reglas de Depot/Reactor. No organizan patrullas, ataques ni transportes.', 'empire-hint'),
         el('p', 'Con la sincronización de Drive conectada, se comparten objetivos, roles y Atender. Activar o detener Imperio sigue siendo una decisión local.', 'empire-hint'));
-      root.append(head, status, recoveryHelp, total, overview, fleetSummary, productionSummary, el('h3', 'Objetivos para todo el imperio'), scopeHelp, goals,
+      root.append(head, status, recoveryHelp, total, overview, fleetSummary, productionSummary, el('p', 'El reparto corresponde a flota. Las mejoras siguen las prioridades de Edificios; consulta allí la siguiente acción y su motivo.', 'empire-hint'), el('h3', 'Objetivos para todo el imperio'), scopeHelp, goals,
         error, help, el('h3', 'Sistemas del imperio', 'empire-systems-heading'), list, empty);
       container.append(style, root); render();
       return root;
@@ -6261,7 +6268,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.31';
+  const SCRIPT_VERSION = '1.17.32';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -7986,6 +7993,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.32', title: 'Reparto imperial pendiente o verificado', changes: [
+        'Las tarjetas distinguen un reparto pendiente de verificar de una asignación de flota cero confirmada.',
+        'Indican el modo desactivado, un sistema excluido o un rol sin producción de flota, sin cambiar sus preferencias.',
+        'Aclaran que el reparto corresponde a flota; la siguiente acción de edificios y su motivo se consultan en Edificios.',
+      ] },
       { version: '1.17.31', title: 'Métricas actualizadas al volver a la pestaña', changes: [
         'Al volver a una pestaña o recuperar su vista guardada, el panel consulta la elección y los contadores actuales, sin esperar otra notificación.',
         'La reanudación actualiza también una copia seleccionada: no conserva datos revocados o caducados ni reactiva una medición detenida por error.',
