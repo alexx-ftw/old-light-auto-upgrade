@@ -842,3 +842,17 @@ test('verification accepts its own oldest retained day expiring during a midnigh
   assert.equal(other.getStatus().errorCode, null);
   assert.deepEqual(other.snapshot().days, [row('2026-10-13', { 'helper.loaded': 1 })]);
 });
+
+test('A combined metrics report and status share one sanitized counter read without local generation metadata', () => {
+  const h = fixture(state({ days: [row('2026-10-13', { 'helper.loaded': 2, 'settings.changed': 3 })] }));
+  const before = h.calls.read;
+  const view = h.metrics.getReport();
+  assert.equal(h.calls.read - before, 1);
+  assert.deepEqual(Object.keys(view.report).sort(), ['days', 'schema', 'version']);
+  assert.equal(view.status.enabled, true);
+  assert.equal(view.status.total, 5);
+  assert.equal(view.status.days, view.report.days.length);
+  assert.equal(JSON.stringify(view).includes(GENERATION), false);
+  assert.deepEqual(view.report, h.metrics.snapshot());
+  assert.deepEqual(view.status, h.metrics.getStatus());
+});

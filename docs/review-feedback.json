@@ -5020,6 +5020,55 @@
         "Reproducir mismohelper/reloj endpointtardío con15fail y40pass, más silencio real40s, salida temprana,señales ycleanup.",
         "Mantener420global ytodos los tests; verificarCLImanualsoportado exacto enramaantesmain yCIautomático posterior."
       ]
+    },
+    {
+      "id": "coherent-metrics-report-status",
+      "feedback": "Lecturas separadas de estado e informe pueden mostrar métricas activadas y un evento junto a un informe vacío cuando falla la segunda lectura.",
+      "beforeFail": {
+        "revision": "ba192c98de91771aaa0ec9b1c2bbb8e2ca807431",
+        "command": "node --test --test-name-pattern='Metrics preview renders one coherent' tests/metrics-integration.test.cjs (mismo test sobre fuentes base en copia aislada, ver evidencia)",
+        "observedFailure": "Checkbox true y estado Activadas/1evento, report.days observado[], esperado helper.loaded:1; segunda lectura inválida detiene core sin refrescar el estado visible.",
+        "evidence": "docs/1.17.29-metrics-report-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/metrics-integration.test.cjs",
+          "name": "Metrics preview renders one coherent storage view instead of a healthy status beside a failed report"
+        },
+        {
+          "file": "tests/metrics-integration.test.cjs",
+          "name": "Metrics preview and export show a failed read immediately and recover only after explicit reactivation"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Primer acceso válido; segunda lectura potencialmente corrupta",
+          "expected": "Una sola lectura de contadores produce estado e informe coherentes, sin mezclar vistas.",
+          "regression": {
+            "file": "tests/metrics-integration.test.cjs",
+            "name": "Metrics preview renders one coherent storage view instead of a healthy status beside a failed report"
+          }
+        },
+        {
+          "scenario": "Primera lectura falla; almacenamiento se recupera; reactivación explícita",
+          "expected": "Aviso y checkbox detenido inmediatos, exportación bloqueada; solo reactivación explícita permite nuevo informe/exportación.",
+          "regression": {
+            "file": "tests/metrics-integration.test.cjs",
+            "name": "Metrics preview and export show a failed read immediately and recover only after explicit reactivation"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Navegador y partida reales",
+          "reason": "Panel VM/DOM sintético; no demuestra descarga completada, pintura o concurrencia real ni un incidente del propietario."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Reproducir antes/después con mismo harness y derivar un fallo propio en frontera de lectura.",
+        "Verificar que getReport usa un readState y preserva forcedOff, consentimiento, contratos previos y JSONexport exacto sin status/generation.",
+        "No prometer atomicidad entre pestañas ni descarga completada; mantener datos, permisos, telemetría y opt-out sin ampliación."
+      ]
     }
   ]
 }

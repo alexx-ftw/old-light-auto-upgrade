@@ -297,3 +297,56 @@ test('Privacy policy and rendered metrics panel agree with adapter defaults and 
     assert.equal(storage.get(consentKey), raw, 'render does not initialize or rewrite consent');
   }
 });
+
+test('Metrics preview renders one coherent storage view instead of a healthy status beside a failed report', () => {
+  let armed = false, counterReads = 0;
+  class ChangingStorage extends Map {
+    get(name) {
+      const value = super.get(name);
+      if (armed && name === key && ++counterReads === 2) return '{invalid';
+      return value;
+    }
+  }
+  const h = panelHarness({ storage: new ChangingStorage() });
+  h.metrics.record('helper.loaded');
+  armed = true;
+  h.action('metrics-preview').fire('click');
+  const report = JSON.parse(h.nodes.find(node => node.id === 'oldlight-metrics-report').value);
+  // The stored healthy report contains exactly one event. A second read can
+  // observe another tab's corrupt replacement, but must not mix both views.
+  assert.equal(h.action('metrics-toggle').checked, true);
+  assert.match(h.field('metrics-status').textContent, /1 eventos en 1 días/);
+  assert.deepEqual(report.days.map(day => day.counts), [{ 'helper.loaded': 1 }]);
+  assert.equal(counterReads, 1, 'A visible refresh must read counters once');
+});
+
+test('Metrics preview and export show a failed read immediately and recover only after explicit reactivation', async () => {
+  let failRead = false;
+  class FailingStorage extends Map {
+    get(name) { if (failRead && name === key) throw Error('private storage failure'); return super.get(name); }
+  }
+  const h = panelHarness({ storage: new FailingStorage() });
+  h.metrics.record('helper.loaded');
+  failRead = true;
+  h.action('metrics-preview').fire('click');
+  const preview = h.nodes.find(node => node.id === 'oldlight-metrics-report');
+  assert.equal(h.action('metrics-toggle').checked, false);
+  assert.match(h.field('metrics-status').textContent, /medición está detenida/);
+  assert.deepEqual(JSON.parse(preview.value).days, []);
+  assert.equal(preview.value.includes('private'), false);
+  h.action('metrics-export').fire('click');
+  assert.equal(h.urls.length, 0, 'A failed view cannot become a downloaded empty success');
+  failRead = false;
+  h.action('metrics-preview').fire('click'); h.action('metrics-preview').fire('click');
+  assert.equal(h.action('metrics-toggle').checked, false, 'Recovered storage does not silently reactivate');
+  h.action('metrics-toggle').checked = true; h.action('metrics-toggle').fire('change');
+  h.metrics.record('helper.loaded');
+  assert.equal(h.action('metrics-toggle').checked, true);
+  assert.deepEqual(JSON.parse(preview.value).days.map(day => day.counts), [{ 'helper.loaded': 1 }]);
+  h.action('metrics-export').fire('click');
+  assert.equal(h.urls.length, 1);
+  const report = JSON.parse(await h.urls[0].text());
+  assert.deepEqual(Object.keys(report).sort(), ['days', 'schema', 'version']);
+  assert.deepEqual(report, JSON.parse(preview.value));
+  assert.match(h.field('metrics-status').textContent, /Descarga solicitada al navegador/);
+});

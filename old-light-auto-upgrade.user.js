@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.28
+// @version      1.17.29
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -5087,8 +5087,7 @@ return Object.freeze({create});
     }
 
     function snapshot() {
-      const current = readState();
-      return { schema: SCHEMA, version, days: !forcedOff && current.ok && current.permission.enabled ? current.state.days : [] };
+      return getReport().report;
     }
 
     function isEnabled() {
@@ -5102,15 +5101,25 @@ return Object.freeze({create});
       return setEnabled(false);
     }
 
-    function getStatus() {
+    // Keep the visible status and exported/previewed document on one read.
+    // This avoids combining an earlier healthy status with a later failed read;
+    // it does not lock storage against another tab after this view is returned.
+    function getReport() {
       const current = readState();
       const enabled = !forcedOff && current.ok && current.permission.enabled === true;
       const days = enabled ? current.state.days : [];
       const total = days.reduce((sum, row) => sum + Object.values(row.counts).reduce((subtotal, count) => subtotal + count, 0), 0);
-      return { enabled, storageError, days: days.length, total, deletionPending, errorCode };
+      return {
+        report: { schema: SCHEMA, version, days },
+        status: { enabled, storageError, days: days.length, total, deletionPending, errorCode },
+      };
     }
 
-    return Object.freeze({ setEnabled, isEnabled, record, snapshot, clear, getStatus, startTiming, finishTiming });
+    function getStatus() {
+      return getReport().status;
+    }
+
+    return Object.freeze({ setEnabled, isEnabled, record, snapshot, clear, getStatus, getReport, startTiming, finishTiming });
   }
 
   return Object.freeze({ create, EVENTS, SCHEMA, RETENTION_DAYS, MAX_COUNT });
@@ -6252,7 +6261,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.28';
+  const SCRIPT_VERSION = '1.17.29';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -6607,7 +6616,7 @@ return Object.freeze({ encode });
     box.append(heading, label, explanation, actions, status, preview, note);
     shadow.querySelector('[data-page="data"]').append(box);
     function refresh(message = '') {
-      const state = metrics.getStatus();
+      const { report, status: state } = metrics.getReport();
       toggle.checked = state.enabled;
       const issues = {
         'generation-unavailable': 'Este navegador no permite activar las métricas con seguridad. Actualízalo o deja la medición desactivada.',
@@ -6618,7 +6627,7 @@ return Object.freeze({ encode });
         ? 'No se pudo acceder al almacenamiento de métricas. La medición está detenida en esta pestaña; no se puede confirmar el guardado o el borrado.'
         : Object.hasOwn(issues, state.errorCode) ? issues[state.errorCode]
           : message || (state.enabled ? `Activadas. ${state.total} eventos en ${state.days} días; solo en este navegador.` : 'Desactivadas. No se registran eventos.'));
-      if (!preview.hidden) preview.value = JSON.stringify(metrics.snapshot(), null, 2);
+      if (!preview.hidden) preview.value = JSON.stringify(report, null, 2);
     }
     toggle.addEventListener('change', event => {
       if (!event.isTrusted) { refresh(); return; }
@@ -6636,13 +6645,13 @@ return Object.freeze({ encode });
       if (!event.isTrusted) return;
       let url;
       try {
-        const report = metrics.snapshot();
-        if (metrics.getStatus().storageError) { refresh(); return; }
+        const { report, status: state } = metrics.getReport();
+        if (state.storageError) { refresh(); return; }
         url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2) + '\n'], { type: 'application/json' }));
         const link = document.createElement('a');
         link.href = url; link.download = 'old-light-metrics-' + new Date().toISOString().slice(0, 10) + '.json';
         link.click();
-        refresh('Informe descargado. No se ha enviado a ningún servidor.');
+        refresh('Descarga solicitada al navegador. No se ha enviado a ningún servidor.');
       } catch { refresh('No se pudo exportar el informe. Puedes revisarlo con «Ver informe».'); }
       finally { if (url) setTimeout(() => URL.revokeObjectURL(url), 2000); }
     });
@@ -7959,6 +7968,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.29', title: 'Informe y estado de métricas coherentes', changes: [
+        'El panel y la exportación obtienen informe y estado de una misma lectura, evitando mostrar métricas activadas junto a un informe vacío por un fallo de almacenamiento.',
+        'La exportación indica que la descarga se ha solicitado al navegador; no puede confirmar que el navegador haya guardado el archivo.',
+        'No añade datos ni permisos y mantiene las elecciones anteriores. Como en cada actualización, los contadores locales corresponden a la nueva versión.',
+      ] },
       { version: '1.17.28', title: 'Evitar el bloqueo al cargar el mapa', changes: [
         'El overlay solo escribe visibilidad, etiquetas y controles cuando su valor cambia, evitando un ciclo de mutaciones y actualizaciones al cargar.',
         'Conserva la actualización de rutas, cámara y permisos. Comprobado offline sin interacción, con Imperio activado o desactivado y sin objetivos.',

@@ -408,8 +408,7 @@
     }
 
     function snapshot() {
-      const current = readState();
-      return { schema: SCHEMA, version, days: !forcedOff && current.ok && current.permission.enabled ? current.state.days : [] };
+      return getReport().report;
     }
 
     function isEnabled() {
@@ -423,15 +422,25 @@
       return setEnabled(false);
     }
 
-    function getStatus() {
+    // Keep the visible status and exported/previewed document on one read.
+    // This avoids combining an earlier healthy status with a later failed read;
+    // it does not lock storage against another tab after this view is returned.
+    function getReport() {
       const current = readState();
       const enabled = !forcedOff && current.ok && current.permission.enabled === true;
       const days = enabled ? current.state.days : [];
       const total = days.reduce((sum, row) => sum + Object.values(row.counts).reduce((subtotal, count) => subtotal + count, 0), 0);
-      return { enabled, storageError, days: days.length, total, deletionPending, errorCode };
+      return {
+        report: { schema: SCHEMA, version, days },
+        status: { enabled, storageError, days: days.length, total, deletionPending, errorCode },
+      };
     }
 
-    return Object.freeze({ setEnabled, isEnabled, record, snapshot, clear, getStatus, startTiming, finishTiming });
+    function getStatus() {
+      return getReport().status;
+    }
+
+    return Object.freeze({ setEnabled, isEnabled, record, snapshot, clear, getStatus, getReport, startTiming, finishTiming });
   }
 
   return Object.freeze({ create, EVENTS, SCHEMA, RETENTION_DAYS, MAX_COUNT });
