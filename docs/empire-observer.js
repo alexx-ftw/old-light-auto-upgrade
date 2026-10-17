@@ -101,7 +101,7 @@
     const x = record(value), out = { id: id(x.id), q: coord(x.q), r: coord(x.r), name: name(x.name),
       buildings: unique(array(x.buildings, BUILDINGS.length).map(building), b => b.type),
       fleet: x.fleet == null ? null : ships(x.fleet), economy: economy(x.economy), shipyard: shipyard(x.shipyard) };
-    optional(out, x, 'capturedAt', int); optional(out, x, 'score', num); optional(out, x, 'garrisonCap', int);
+    optional(out, x, 'capturedAt', int); optional(out, x, 'score', num); optional(out, x, 'garrisonCap', int); optional(out, x, 'maxDispatchRange', num);
     return out;
   }
   function systems(value) {
@@ -152,6 +152,20 @@
       record(item); return { q: coord(item.q), r: coord(item.r) };
     }), item => `${item.q},${item.r}`) };
     optional(out, x, 'name', name);
+    optional(out, x, 'kind', v => word(v, ['human', 'npc', 'dormant']));
+    optional(out, x, 'protectedUntil', v => v === null ? null : stamp(v));
+    optional(out, x, 'treatyWith', v => v === null ? null : unique(array(v, LIMITS.players).map(t => {
+      record(t); return { playerId: id(t.playerId), until: stamp(t.until) };
+    }), t => t.playerId));
+    return out;
+  }
+  function ownerMetadata(player, previous = null) {
+    const out = {};
+    for (const k of ['name', 'kind', 'protectedUntil']) if (own(player, k)) out[k] = player[k];
+    // Native updated players preserve only an omitted treaty list. Missing
+    // protection/kind stays unknown; it never becomes positive attackability.
+    if (own(player, 'treatyWith')) out.treatyWith = player.treatyWith;
+    else if (previous && own(previous, 'treatyWith')) out.treatyWith = previous.treatyWith;
     return out;
   }
   function ownershipPlayers(value) {
@@ -194,7 +208,7 @@
     const state = { players: new Map(), coordinates: new Map() };
     for (const player of value.players) {
       const cells = new Map(player.owned.map(cell => [`${cell.q},${cell.r}`, cell]));
-      state.players.set(player.id, { id: player.id, ...(player.name === undefined ? {} : { name: player.name }), cells });
+      state.players.set(player.id, { id: player.id, ...ownerMetadata(player), cells });
       for (const key of cells.keys()) state.coordinates.set(key, player.id);
     }
     return state;
@@ -220,18 +234,18 @@
         if (old && !player.owned.length) {
           // Native [] retains ownership. A name/economy-only update must not
           // traverse a large owner's unchanged coordinate index.
-          players.set(player.id, { id: player.id, ...(player.name === undefined ? {} : { name: player.name }), cells: old.cells });
+          players.set(player.id, { id: player.id, ...ownerMetadata(player, old), cells: old.cells });
           continue;
         }
         const cells = new Map(player.owned.map(cell => [`${cell.q},${cell.r}`, cell]));
         // Remove old index entries first, then install all final claims. This
         // preserves ambiguity detection between players touched in one delta.
         if (old) for (const key of old.cells.keys()) coordinates.delete(key);
-        const next = { id: player.id, ...(player.name === undefined ? {} : { name: player.name }), cells };
+        const next = { id: player.id, ...ownerMetadata(player, old), cells };
         players.set(player.id, next); replacements.set(player.id, next);
       }
       for (const player of delta.added) if (!players.has(player.id)) {
-        const next = { id: player.id, ...(player.name === undefined ? {} : { name: player.name }),
+        const next = { id: player.id, ...ownerMetadata(player),
           cells: new Map(player.owned.map(cell => [`${cell.q},${cell.r}`, cell])) };
         players.set(player.id, next); replacements.set(player.id, next);
       }
@@ -419,7 +433,7 @@
     function ownershipProjection() {
       if (!coherentOwnership()) return null;
       return { version: 1, complete: false, players: [...ownership.players.values()].map(player => ({
-        id: player.id, ...(player.name === undefined ? {} : { name: player.name }),
+        id: player.id, ...ownerMetadata(player),
         owned: [...player.cells.values()].map(cell => ({ q: cell.q, r: cell.r })),
       })) };
     }

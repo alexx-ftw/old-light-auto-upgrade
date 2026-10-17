@@ -63,7 +63,8 @@ function worldFor(value,s,at){
   for(const raw of rows){const systemId=id(get(raw,'id')),coordinate=point({q:get(raw,'q'),r:get(raw,'r')}),key=coordinate.q+','+coordinate.r;
    if(seen.has(systemId)||coordinates.has(key)||get(raw,'owned')===false)return null;
    seen.add(systemId);coordinates.add(key);const ships=exactShips(get(raw,'fleet'));if(!ships)return null;
-   systems.push({id:systemId,...coordinate,name:string(get(raw,'name')??systemId),fleet:ships});
+   const range=get(raw,'maxDispatchRange');if(range!==undefined&&(typeof range!=='number'||!Number.isFinite(range)||range<0))return null;
+   systems.push({id:systemId,...coordinate,name:string(get(raw,'name')??systemId),fleet:ships,maxDispatchRange:range??null});
   }
   return {observedAt,systems,transits:transits.map(t=>({to:point({q:get(t,'toQ'),r:get(t,'toR')})}))};
  }catch{return null;}
@@ -83,9 +84,46 @@ function ownerFor(value,s,target,at){
   return found;
  }catch{return null;}
 }
+// A positive subset of observed rivals, never an exhaustive galaxy census.
+// Missing protection or self-treaty evidence is unknown, not permission.
+function candidateOwners(value,s,at){
+ try{
+  if(!worldFor(value,s,at)||get(value,'selfId')!==s.split('/')[1])return [];
+  const players=get(get(value,'ownership'),'players');if(get(get(value,'ownership'),'version')!==1||get(get(value,'ownership'),'complete')!==false||!Array.isArray(players)||players.length>10000)return [];
+  const self=players.find(p=>get(p,'id')===get(value,'selfId')),treaties=get(self,'treatyWith');
+  if(treaties!==null&&!Array.isArray(treaties)||treaties===undefined||treaties?.length>10000)return [];
+  const expiry=x=>typeof x==='string'&&Number.isSafeInteger(Date.parse(x))&&Date.parse(x)>=0?Date.parse(x):fail();
+  const protectedTargets=new Set();
+  for(const t of treaties||[]){const target=id(get(t,'playerId'));if(expiry(get(t,'until'))>at)protectedTargets.add(target);}
+  const ids=new Set(),cells=new Set(),out=[];let total=0;
+  for(const player of players){
+   const ownerId=id(get(player,'id')),owned=get(player,'owned');if(ids.has(ownerId)||!Array.isArray(owned)||owned.length>10000)return [];ids.add(ownerId);
+   const shield=get(player,'protectedUntil'),knownShield=shield===null||typeof shield==='string';
+   const mutual=get(player,'treatyWith'),mutualActive=Array.isArray(mutual)&&mutual.some(t=>get(t,'playerId')===get(value,'selfId')&&expiry(get(t,'until'))>at);
+   const kind=get(player,'kind'),allowed=!mutualActive&&ownerId!==get(value,'selfId')&&['human','npc','dormant'].includes(kind)&&knownShield&&(shield===null||expiry(shield)<=at)&&!protectedTargets.has(ownerId);
+   for(const cell of owned){const coordinate=point({q:get(cell,'q'),r:get(cell,'r')}),key=coordinate.q+','+coordinate.r;if(++total>10000||cells.has(key))return [];cells.add(key);
+    if(allowed){const ownerName=typeof get(player,'name')==='string'?string(get(player,'name')):'';out.push({...coordinate,ownerId,ownerName,name:(ownerName?'Sistema de '+ownerName:'Sistema observado').slice(0,200)});}
+   }
+  }
+  return out;
+ }catch{return [];}
+}
+function rankTargets(candidates,intelligence,from,at){
+ const origin=point({q:get(from,'q'),r:get(from,'r')});if(!Array.isArray(candidates)||candidates.length>10000||!Array.isArray(intelligence)||intelligence.length>64)fail();
+ const fresh=intelligence.filter(x=>get(x,'takenAt')<=at&&at-get(x,'takenAt')<=MAX_AGE&&SHIPS.every(t=>Number.isSafeInteger(get(get(x,'remaining'),t))&&get(get(x,'remaining'),t)>=0));
+ const seen=new Set();
+ const rows=candidates.map(raw=>{const target={...point({q:get(raw,'q'),r:get(raw,'r')}),ownerId:id(get(raw,'ownerId')),name:string(get(raw,'name')),ownerName:string(get(raw,'ownerName')||'')};
+  const key=target.q+','+target.r;if(seen.has(key))fail();seen.add(key);
+  const info=fresh.find(x=>samePoint(get(x,'target'),target)&&get(x,'ownerId')===target.ownerId);return {...target,known:Boolean(info),info:info||null,distance:distance(origin,target),dominated:0};});
+ const known=rows.filter(r=>r.known);
+ const dominates=(a,b)=>Number.isFinite(a.info.bonus)&&Number.isFinite(b.info.bonus)&&a.info.bonus<=b.info.bonus&&SHIPS.every(t=>a.info.remaining[t]<=b.info.remaining[t])&&(a.info.bonus<b.info.bonus||SHIPS.some(t=>a.info.remaining[t]<b.info.remaining[t]));
+ for(const row of known)row.dominated=known.filter(other=>other!==row&&dominates(other,row)).length;
+ return rows.sort((a,b)=>Number(b.known)-Number(a.known)||a.dominated-b.dominated||a.distance-b.distance||a.q-b.q||a.r-b.r||a.ownerId.localeCompare(b.ownerId));
+}
+
 function createOwnerReader({getBridge,now=Date.now}){
- let bridge=null,unsubscribe=null,revision=0,snapshot=null;const cache=new Map();
- const invalidate=()=>{revision++;snapshot=null;cache.clear();};
+ let bridge=null,unsubscribe=null,revision=0,snapshot=null;const cache=new Map();let candidateCache=null;
+ const invalidate=()=>{revision++;snapshot=null;cache.clear();candidateCache=null;};
  function read(s,target){try{
   const current=getBridge();if(current!==bridge){unsubscribe?.();bridge=current;invalidate();unsubscribe=bridge?.subscribe(invalidate)||null;}
   const status=bridge?.status?.();if(!status?.connected||!status.complete)return null;
@@ -95,8 +133,25 @@ function createOwnerReader({getBridge,now=Date.now}){
   const value=ownerFor(snapshot,s,target,at),after=bridge.status();
   if(revision!==generation||!after?.connected||!after.complete){invalidate();return null;}
   cache.set(key,value);return value?copy(value):null;
- }catch{return null;}}
- return {read,destroy(){unsubscribe?.();bridge=null;unsubscribe=null;invalidate();}};
+ }catch{invalidate();return null;}}
+ function candidateState(s){
+  // Reuse the same revision-invalidated private snapshot and live bridge gate.
+  read(s,{q:0,r:0});
+  try{const status=bridge?.status?.(),at=now();if(!status?.connected||!status.complete||!snapshot||get(snapshot,'scope')!==s||get(snapshot,'observedAt')>at||at-get(snapshot,'observedAt')>MAX_AGE)return null;
+   const currentRevision=revision;
+   if(candidateCache===null||at<candidateCache.at||at>=candidateCache.expiresAt){
+    const rows=candidateOwners(snapshot,s,at),times=[];
+    for(const p of get(get(snapshot,'ownership'),'players')||[]){const expiry=Date.parse(get(p,'protectedUntil'));if(expiry>at)times.push(expiry);
+     for(const t of get(p,'treatyWith')||[]){if(get(p,'id')!==s.split('/')[1]&&get(t,'playerId')!==s.split('/')[1])continue;const end=Date.parse(get(t,'until'));if(end>at)times.push(end);}}
+    candidateCache={at,rows,keys:new Set(rows.map(x=>x.q+','+x.r)),expiresAt:Math.min(Infinity,...times)};
+   }
+   const finalStatus=bridge.status();if(revision!==currentRevision||!finalStatus?.connected||!finalStatus.complete){invalidate();return null;}
+   return candidateCache;
+  }catch{return null;}
+ }
+ const candidates=s=>{const state=candidateState(s);return state?copy(state.rows):[];};
+ const eligible=(s,target)=>{const state=candidateState(s);return Boolean(state&&state.keys.has(get(target,'q')+','+get(target,'r')));};
+ return {read,candidates,eligible,destroy(){unsubscribe?.();bridge=null;unsubscribe=null;invalidate();}};
 }
 function plan(objectives,world,jobs,s,at){
  if(Array.isArray(objectives)&&objectives.length===0)return [];
@@ -125,13 +180,14 @@ function plan(objectives,world,jobs,s,at){
   if(SHIPS.reduce((sum,t)=>sum+o.fleet[t],0)>o.maxLosses-SHIPS.reduce((sum,t)=>sum+o.losses[t],0)){entry.message='La flota supera el presupuesto de pérdidas restante. Revisa el plan antes de otra incursión.';continue;}
   const usable=verified.systems.filter(x=>!busy.has(x.id)).map(x=>({...x,free:Object.fromEntries(SHIPS.map(t=>[t,Math.max(0,available.get(x.id)[t]-o.defense[t])]))}));
   if(SHIPS.some(t=>usable.reduce((sum,x)=>sum+x.free[t],0)<o.fleet[t])){entry.message='Faltan naves libres tras defensas y compromisos; revisa la flota prevista.';continue;}
-  const readyOrigins=usable.filter(x=>SHIPS.every(t=>x.free[t]>=o.fleet[t])),candidates=[];
+  const attackOrigins=o.autoNext?usable.filter(x=>x.maxDispatchRange!==null&&distance(x,o.target)<=x.maxDispatchRange):usable;
+  const readyOrigins=attackOrigins.filter(x=>SHIPS.every(t=>x.free[t]>=o.fleet[t])),candidates=[];
   // Any ready origin ranks before every assembly plan. Do not enumerate donors
   // for a ready fleet or solve dominated assembly candidates.
-  for(const origin of (readyOrigins.length?readyOrigins:usable)){
+  for(const origin of (readyOrigins.length?readyOrigins:attackOrigins)){
    const missing=Object.fromEntries(SHIPS.map(t=>[t,Math.max(0,o.fleet[t]-origin.free[t])])),transfers=[];
    if(SHIPS.every(t=>missing[t]===0)){candidates.push({origin,transfers,score:distance(origin,o.target)});continue;}
-   for(const donor of usable.filter(x=>x.id!==origin.id).sort((a,b)=>distance(a,origin)-distance(b,origin)||a.id.localeCompare(b.id))){
+   for(const donor of usable.filter(x=>x.id!==origin.id&&(!o.autoNext||x.maxDispatchRange!==null&&distance(x,origin)<=x.maxDispatchRange)).sort((a,b)=>distance(a,origin)-distance(b,origin)||a.id.localeCompare(b.id))){
     const amounts=Object.fromEntries(SHIPS.map(t=>[t,Math.min(donor.free[t],missing[t])]));
     if(SHIPS.some(t=>amounts[t])){transfers.push({originId:donor.id,destinationId:origin.id,originName:donor.name,destinationName:origin.name,from:{q:donor.q,r:donor.r},to:{q:origin.q,r:origin.r},quantities:amounts});for(const t of SHIPS)missing[t]-=amounts[t];}
     if(SHIPS.every(t=>missing[t]===0))break;
@@ -152,7 +208,7 @@ function plan(objectives,world,jobs,s,at){
  }
  return result;
 }
-return {SHIPS,MAX_AGE,MAX_FLEET,MAX_OBJECTIVES,MAX_OBSERVED,parseReport,worldFor,ownerFor,createOwnerReader,plan,
+return {SHIPS,MAX_AGE,MAX_FLEET,MAX_OBJECTIVES,MAX_OBSERVED,parseReport,worldFor,ownerFor,candidateOwners,rankTargets,createOwnerReader,plan,
  // Shared bounded primitives keep controller storage and pure planning on one contract.
- primitives:{fail,plain,get,object,integer,string,id,scope,copy,zeros,samePoint,point,fleet}};
+ primitives:{fail,plain,get,object,integer,string,id,scope,copy,zeros,samePoint,point,fleet,distance}};
 });

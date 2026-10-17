@@ -216,3 +216,7 @@ En1.17.31 un orden simulado pageshow→storage reprodujo estado/copia antiguos t
 ## Diagnóstico de asignación no verificada1.17.32
 
 Una rama que oculta cantidades antiguas puede seguir comunicando una conclusión falsa: texto de asignación cero cuando no hay reparto verificado. Exigir distinguir off, pendiente, cero confirmado y rol/exclusión sin convertir lecturas de presentación en nuevas guardas costosas o permisos. Mantener incertidumbre del reporte de Structures y verificar que el hint diferencia flota de edificios. Ver [evidencia](1.17.32-imperial-allocation-validation.md).
+
+## Cadena autorizada tras captura1.17.33
+
+Retirar una tarjeta histórica podía borrar la guardia del sucesor. La presencia de arrays exactos en una captura anterior tampoco demuestra que correspondiesen a su ticket. Exigir revisar rutas UI alternativas y migración del almacenamiento real producido por el controlador previo, no solo fixtures con gasto ya conocido. Separar elegibilidad positiva de ranking; probar expiración/rollback/revocación final y jamás hacer cero de ausencia. Las propiedades públicas omitidas siguen desconocidas y no autorizan atacar. Comprobar presupuestos heredados, mismo guard nativo/rango del origen, rechazo de continuación no consentida y una sola intención durable. Ver [contrato y límites](1.17.33-capture-chain-validation.md).

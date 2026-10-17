@@ -3,7 +3,7 @@
  if(typeof module==='object'&&module.exports)module.exports=api;
  if(root)Object.defineProperty(root,'OldLightConquestController',{configurable:true,value:api});})(globalThis,function(core){
 'use strict';
-const {SHIPS}=core,{fail,get,object,integer,string,id,scope,copy,zeros,samePoint,point,fleet}=core.primitives;
+const {SHIPS}=core,{fail,get,object,integer,string,id,scope,copy,zeros,samePoint,point,fleet,distance}=core.primitives;
 const STATES=['planning','paused','awaiting_report','captured','uncertain','limit','cancelled'];
 const sync=value=>{if(value&&typeof value.then==='function'){Promise.resolve(value).catch(()=>{});fail('El almacenamiento de conquista debe ser síncrono.');}return value;};
 const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
@@ -42,11 +42,12 @@ function validate(raw){
  const rows=get(raw,'objectives'),receipts=get(raw,'receipts');if(!Array.isArray(rows)||rows.length>core.MAX_OBJECTIVES||!Array.isArray(receipts)||receipts.length>128)fail();
  const ids=new Set(),targets=new Set();
  const objectives=rows.map(raw=>{
-  object(raw,['id','scope','target','status','createdAt','updatedAt','fleet','defense','maxRaids','maxLosses','raids','losses','reports','latestReport','sequence','ticket','message','barrierAt','ownerId']);
+  object(raw,['id','scope','target','status','createdAt','updatedAt','fleet','defense','maxRaids','maxLosses','raids','losses','reports','latestReport','sequence','ticket','message','barrierAt','ownerId','autoNext','successorId','budgetKnown']);
   const target=get(raw,'target');object(target,['q','r','name']);const value={id:id(get(raw,'id')),scope:scope(get(raw,'scope')),
    target:{...point({q:get(target,'q'),r:get(target,'r')}),name:string(get(target,'name'),200)},status:get(raw,'status'),createdAt:integer(get(raw,'createdAt')),updatedAt:integer(get(raw,'updatedAt')),
    fleet:fleet(get(raw,'fleet'),true),defense:fleet(get(raw,'defense')),maxRaids:integer(get(raw,'maxRaids'),100,1),maxLosses:integer(get(raw,'maxLosses'),200000,1),
    raids:integer(get(raw,'raids'),100),losses:Object.fromEntries(SHIPS.map(t=>[t,integer(get(get(raw,'losses'),t),200000)])),reports:[],latestReport:evidence(get(raw,'latestReport')),sequence:integer(get(raw,'sequence'),1000),message:string(get(raw,'message'),500),barrierAt:integer(get(raw,'barrierAt')??0),ownerId:get(raw,'ownerId')===null?null:id(get(raw,'ownerId'))};
+  value.budgetKnown=get(raw,'budgetKnown')??!(value.status==='captured'&&value.raids>0);if(typeof value.budgetKnown!=='boolean')fail();value.autoNext=get(raw,'autoNext')??false;if(typeof value.autoNext!=='boolean')fail();value.successorId=get(raw,'successorId')==null?null:id(get(raw,'successorId'));if(value.successorId===value.id)fail();
   const key=value.scope+'/'+value.target.q+','+value.target.r;
   if(ids.has(value.id)||targets.has(key)||!STATES.includes(value.status)||value.updatedAt<value.createdAt)fail();ids.add(value.id);targets.add(key);
   const reports=get(raw,'reports');if(!Array.isArray(reports)||reports.length>128)fail();value.reports=reports.map(id);if(new Set(value.reports).size!==value.reports.length)fail();
@@ -58,17 +59,22 @@ function validate(raw){
  const targetsSeen=new Set(),history=tombstones.map(raw=>{object(raw,['scope','target','throughAt']);const value={scope:scope(get(raw,'scope')),target:point(get(raw,'target')),throughAt:integer(get(raw,'throughAt'))};const key=value.scope+'/'+value.target.q+','+value.target.r;if(targetsSeen.has(key))fail();targetsSeen.add(key);return value;});
  return {schemaVersion:1,objectives,tombstones:history,receipts:receipts.map(raw=>{object(raw,['scope','originId','sentAt']);const r={scope:scope(get(raw,'scope')),originId:id(get(raw,'originId')),sentAt:integer(get(raw,'sentAt'))},key=r.scope+'/'+r.originId;if(receiptKeys.has(key))fail();receiptKeys.add(key);return r;})};
 }
-function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPreparing,onChange=()=>{},now=Date.now,newId=()=>crypto.randomUUID(),legacyTargets=()=>[],getTargetOwner,isTargetAllowed}={}){
+function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPreparing,onChange=()=>{},now=Date.now,newId=()=>crypto.randomUUID(),legacyTargets=()=>[],getTargetOwner,isTargetAllowed,getCandidates=()=>[],isChainTargetAllowed=()=>false}={}){
  if(![read,write,getContext,getWorld,getJobs,queue,cancel,cancelPreparing,onChange,now,newId,legacyTargets,getTargetOwner,isTargetAllowed].every(x=>typeof x==='function'))fail('Faltan adaptadores de conquista.');
- let config={schemaVersion:1,objectives:[],receipts:[]},error='',writeBlocked=false,destroyed=false,running=false;
+ let config={schemaVersion:1,objectives:[],receipts:[]},error='',writeBlocked=false,destroyed=false,running=false,intelligence=[],intelScope='';
  const clock=()=>integer(now());
  function load(){if(destroyed)return false;try{const raw=sync(read());config=raw===undefined?{schemaVersion:1,objectives:[],receipts:[]}:validate(raw);if(!writeBlocked&&error.startsWith('No se pueden leer'))error='';return true;}catch{error='No se pueden leer los objetivos de conquista. No se prepararán misiones.';return false;}}
  function save(next){const clean=validate(next);if(JSON.stringify(clean).length>400000)fail('Demasiados datos de conquista.');try{const accepted=sync(write(copy(clean)));if(accepted===false)throw Error('storage rejected write');const observed=validate(sync(read()));if(!equal(observed,clean))throw Error('storage verification failed');config=clean;error='';writeBlocked=false;}catch{writeBlocked=true;error='No se pudo guardar conquista. No se prepararán misiones.';throw Error(error);}onChange();}
- const context=()=>sync(getContext());
+ const context=()=>{const c=sync(getContext());if(c?.scope!==intelScope){intelligence=[];intelScope=c?.scope||'';}return c;};
  function current(idValue){const s=context()?.scope;return config.objectives.find(o=>o.id===idValue&&o.scope===s);}
  function change(objective,patch){if(Object.keys(patch).every(k=>equal(objective[k],patch[k])))return copy(objective);const at=clock(),next=copy(config);const i=next.objectives.findIndex(o=>o.id===objective.id);if(i<0)fail();next.objectives[i]={...next.objectives[i],...patch,updatedAt:Math.max(at,objective.updatedAt)};save(next);return copy(next.objectives[i]);}
  function jobs(){const value=sync(getJobs());if(!Array.isArray(value)||value.length>32)fail('No se puede verificar la cola actual.');return value;}
- function ownerProof(o){try{const value=sync(getTargetOwner(o.scope,{q:o.target.q,r:o.target.r}));if(!value||value.scope!==o.scope||!value.ownerId||value.ownerId===o.scope.split('/')[1]||clock()-value.observedAt>core.MAX_AGE||value.observedAt>clock()||sync(isTargetAllowed(o))!==true)return null;return copy(value);}catch{return null;}}
+ function chainParentsValid(o){
+  if(!o.autoNext)return true;const w=verifiedWorld(o.scope);if(!w)return false;let child=o,seen=new Set();
+  for(;;){const parent=config.objectives.find(x=>x.scope===o.scope&&x.successorId===child.id);if(!parent)return true;
+   if(seen.has(parent.id)||parent.status!=='captured'||!w.systems.some(s=>samePoint(s,parent.target)))return false;seen.add(parent.id);child=parent;}
+ }
+ function ownerProof(o){try{if(!chainParentsValid(o))return null;const value=sync(getTargetOwner(o.scope,{q:o.target.q,r:o.target.r}));if(!value||value.scope!==o.scope||!value.ownerId||value.ownerId===o.scope.split('/')[1]||clock()-value.observedAt>core.MAX_AGE||value.observedAt>clock()||sync(isTargetAllowed(o))!==true||o.autoNext&&sync(isChainTargetAllowed(o))!==true)return null;return copy(value);}catch{return null;}}
  function specFor(o,t){return {scope:o.scope,originId:t.originId,originName:t.originName,
   target:t.kind==='attack'?{mode:'amounts',routeKey:'',presetKey:'',label:o.target.name,coordinate:copy(t.target),originCoordinate:copy(t.origin)}:
    {mode:'custom',missionAction:'send',routeKey:'',presetKey:'conquest-transfer',label:'Reunión de conquista',coordinate:copy(t.target)},
@@ -87,14 +93,14 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
   for(const r of config.receipts)if(r.scope===s&&(!w||w.observedAt<=r.sentAt)&&!pending.some(j=>j.scope===s&&j.originId===r.originId))pending.push({scope:s,originId:r.originId,status:'sent',sentAt:r.sentAt});
   return core.plan(config.objectives.filter(o=>o.scope===s),raw,pending,s,clock()).map(p=>{const o=config.objectives.find(o=>o.id===p.id);if(o.status==='planning'&&!o.ticket){const proof=ownerProof(o);if(!proof||o.ownerId&&o.ownerId!==proof.ownerId)return {...p,ready:false,origin:null,transfers:[],reservations:[],message:'Propietario del objetivo no verificable, protegido o cambiado. Revisa el mapa y la campaña.'};}return p;});
  }
- function add(input){if(!load())fail(error);const c=context(),s=scope(c?.scope);object(input,['target','fleet','defense','maxRaids','maxLosses']);
+ function add(input){if(!load())fail(error);const c=context(),s=scope(c?.scope);object(input,['target','fleet','defense','maxRaids','maxLosses','autoNext']);
   const t=get(input,'target');object(t,['q','r','name']);const target={...point({q:get(t,'q'),r:get(t,'r')}),name:string(get(t,'name'),200)};if(!target.name.trim())fail('Indica el nombre del objetivo.');
   if(jobs().some(j=>j.scope===s&&j.status!=='sent'&&samePoint(j.target?.coordinate,target)))fail('Ya existe una misión pendiente para ese objetivo. Revísala antes de crear una campaña.');
   if(config.objectives.some(o=>o.scope===s&&samePoint(o.target,target)))fail('Ya existe un objetivo para esas coordenadas, incluso si está detenido.');
   if(sync(legacyTargets()).some(o=>o.scope===s&&samePoint(o.targetCoordinate,target)&&!['completed','cancelled','limit'].includes(o.status)))fail('Cancela primero la campaña de reintentos existente para ese destino.');
   const w=verifiedWorld(s);if(w?.systems.some(x=>samePoint(x,target)))fail('El objetivo ya es propio.');
   const at=clock(),o={id:id(newId()),scope:s,target,status:'planning',createdAt:at,updatedAt:at,fleet:fleet(get(input,'fleet'),true),defense:fleet(get(input,'defense')),
-   maxRaids:integer(get(input,'maxRaids'),100,1),maxLosses:integer(get(input,'maxLosses'),200000,1),raids:0,losses:zeros(),reports:[],latestReport:null,sequence:0,ticket:null,barrierAt:0,ownerId:null,message:'Objetivo creado. Revisando disponibilidad y reunión previa.'};
+   autoNext:get(input,'autoNext')??false,successorId:null,budgetKnown:true,maxRaids:integer(get(input,'maxRaids'),100,1),maxLosses:integer(get(input,'maxLosses'),200000,1),raids:0,losses:zeros(),reports:[],latestReport:null,sequence:0,ticket:null,barrierAt:0,ownerId:null,message:'Objetivo creado. Revisando disponibilidad y reunión previa.'};
   save({...config,objectives:[...config.objectives,o]});return copy(o);
  }
  function stop(idValue,status,message){if(!load())fail(error);const o=current(idValue);if(!o)fail('No se encuentra el objetivo en esta cuenta.');
@@ -132,10 +138,26 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
   save(next);return copy(n);
  }
  function remove(idValue){if(!load())fail(error);const o=current(idValue);if(!o||!['cancelled','captured'].includes(o.status)||o.ticket?.state==='uncertain')fail('Cancela o confirma la captura antes de retirar el objetivo.');
+  if(o.successorId&&config.objectives.some(x=>x.id===o.successorId))fail('Retira primero los registros sucesores terminados; el historial protege la cadena activa.');
   if(o.ticket?.kind==='attack'&&(o.ticket.state==='sent'||jobs().some(j=>j.id===o.ticket.id&&j.status==='sent')))fail('Espera el reporte de la incursión enviada antes de retirar su registro.');
   if(o.ticket&&jobs().some(j=>j.id===o.ticket.id&&['waiting','paused','sending','uncertain'].includes(j.status)))fail('La misión aún necesita revisión.');const tombstones=copy(config.tombstones||[]),old=tombstones.find(t=>t.scope===o.scope&&samePoint(t.target,o.target));if(old)old.throughAt=clock();else tombstones.push({scope:o.scope,target:{q:o.target.q,r:o.target.r},throughAt:clock()});save({...config,tombstones,objectives:config.objectives.filter(x=>x.id!==o.id)});
  }
- function observeReport(value){if(!load())return true;const at=clock(),report=core.parseReport(value,at);
+ function continuation(idValue,enabled){
+  if(!load())fail(error);const o=current(idValue);if(!o||o.status!=='captured'||o.ticket||o.successorId||enabled&&!o.budgetKnown||typeof enabled!=='boolean')fail('Revisa primero la captura y las misiones pendientes.');
+  return change(o,{autoNext:enabled,barrierAt:clock(),message:enabled?'Continuación autorizada: esperando censo propio posterior y candidatos verificables.':'Continuación detenida. La captura queda registrada.'});
+ }
+ function rememberReport(report,value){
+  if(!report||report.scope!==context()?.scope||!report.owner)return;
+  const battle=get(get(get(value,'detail'),'sections'),'battle');
+  const exact=key=>{const rows=get(battle,key);return Array.isArray(rows)&&rows.length===SHIPS.length&&SHIPS.every(t=>rows.some(r=>get(r,'type')===t));};
+  const old=intelligence.find(x=>samePoint(x.target,report.target)&&x.ownerId===report.owner);
+  if(old&&old.takenAt>report.takenAt)return;
+  const remaining=exact('defenderShips')&&exact('defenderLost')?report.defenderRemaining:null;
+  const entry={target:copy(report.target),ownerId:report.owner,takenAt:report.takenAt,remaining:copy(remaining),bonus:report.defenderSectorBonusPct};
+  if(old&&old.takenAt===report.takenAt&&!equal(old,entry))entry.remaining=null;
+  intelligence=intelligence.filter(x=>!samePoint(x.target,report.target)&&clock()-x.takenAt<=core.MAX_AGE);intelligence.push(entry);intelligence=intelligence.slice(-64);
+ }
+ function observeReport(value){if(!load())return true;const at=clock(),report=core.parseReport(value,at);rememberReport(report,value);
   if(!report){
    const target=get(get(get(value,'detail'),'route'),'to'),s=get(value,'scope');
    const known=s===context()?.scope&&config.objectives.find(o=>o.scope===s&&samePoint(o.target,target));
@@ -156,7 +178,8 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
   if(report.captured){
    report.netReplenishment=null;
    const losses=copy(o.losses);if(o.ticket?.kind==='attack'&&o.ticket.state==='sent'&&samePoint(o.ticket.origin,report.origin)&&report.attackerShips&&equal(report.attackerShips,o.ticket.quantities)&&report.attackerLost&&SHIPS.every(t=>report.attackerLost[t]<=report.attackerShips[t]))for(const t of SHIPS)losses[t]=integer(losses[t]+report.attackerLost[t],200000);
-   const captured=change(o,{losses,latestReport:report,reports:[...o.reports,report.id],message:'Captura explícita confirmada. Campaña terminada.'});
+   const budgetKnown=o.budgetKnown&&(!o.ticket||o.ticket.kind!=='attack'||o.ticket.state!=='sent'||Boolean(samePoint(o.ticket.origin,report.origin)&&report.attackerShips&&equal(report.attackerShips,o.ticket.quantities)&&report.attackerLost&&SHIPS.every(t=>report.attackerLost[t]<=report.attackerShips[t])));
+   const captured=change(o,{losses,budgetKnown,autoNext:o.autoNext&&budgetKnown,latestReport:report,reports:[...o.reports,report.id],message:'Captura explícita confirmada. Campaña terminada.'});
    const ended=stop(captured.id,'captured','Captura explícita confirmada. Campaña terminada.');if(ended.ticket?.kind==='attack'&&ended.ticket.state==='sent'&&samePoint(ended.ticket.origin,report.origin)&&report.takenAt>=ended.ticket.sentAt)change(ended,{ticket:null});return true;
   }
   if(o.status==='captured'){if(!report.captured&&report.takenAt>(o.latestReport?.takenAt??o.updatedAt))stop(o.id,'paused','Un reporte posterior contradice la captura. Revisa la propiedad.');return true;}
@@ -221,6 +244,7 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
   const proof=ownerProof(o);if(!proof||proof.ownerId!==o.ownerId||proof.epoch!==o.ticket.proof.epoch||proof.generation!==o.ticket.proof.generation)return false;
   const w=verifiedWorld(o.scope),t=o.ticket;if(!w||o.barrierAt&&w.observedAt<=o.barrierAt||w.systems.some(x=>samePoint(x,o.target)))return false;
   const origin=w.systems.find(x=>x.id===t.originId);if(!origin||!samePoint(origin,t.origin)||SHIPS.some(type=>origin.fleet[type]-o.defense[type]<t.quantities[type]))return false;
+  if(o.autoNext&&(origin.maxDispatchRange===null||distance(origin,t.target)>origin.maxDispatchRange))return false;
   if(t.kind==='transfer'&&!w.systems.some(x=>x.id===t.destinationId&&samePoint(x,t.target)))return false;
   if(t.kind==='attack'&&(SHIPS.reduce((sum,type)=>sum+t.quantities[type],0)>o.maxLosses-SHIPS.reduce((sum,type)=>sum+o.losses[type],0)||o.raids>=o.maxRaids||SHIPS.reduce((sum,type)=>sum+o.losses[type],0)>=o.maxLosses||w.transits.some(x=>samePoint(x.to,origin)||samePoint(x.to,o.target))))return false;
   return true;
@@ -259,6 +283,23 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
     if(!job){if(!permitJob({id:t.id,campaignId:'conquest:'+o.id,...specFor(o,t)},true))continue;sync(queue(specFor(o,t),{id:t.id,campaignId:'conquest:'+o.id}));change(o,{ticket:{...t,state:'queued'}});return true;}
    }
    if(!c.canAct)return false;
+   // Capture confirmation alone never supplies stock or permission for the next
+   // target. Require a later own census and persist the successor atomically.
+   for(const o of config.objectives.filter(x=>x.scope===s&&x.status==='captured'&&x.autoNext&&x.budgetKnown&&!x.successorId&&!x.ticket)){
+    if(!w||w.observedAt<=o.barrierAt||!w.systems.some(x=>samePoint(x,o.target)))continue;
+    const used=SHIPS.reduce((n,t)=>n+o.losses[t],0);
+    if(o.raids>=o.maxRaids||used>=o.maxLosses){change(o,{autoNext:false,message:'Límite global de la cadena alcanzado. No se renueva tras una captura.'});return true;}
+    if(config.objectives.length>=core.MAX_OBJECTIVES){change(o,{autoNext:false,message:'Historial de objetivos lleno. Revisa los registros antes de continuar.'});return true;}
+    const pending=jobs(),legacy=sync(legacyTargets()),raw=sync(getCandidates(s));if(!Array.isArray(raw))continue;
+    const candidates=raw.filter(t=>w.systems.some(x=>x.maxDispatchRange!==null&&distance(x,t)<=x.maxDispatchRange)&&!w.systems.some(x=>samePoint(x,t))&&!config.objectives.some(x=>x.scope===s&&samePoint(x.target,t))&&!pending.some(j=>j.scope===s&&samePoint(j.target?.coordinate,t))&&!legacy.some(x=>x.scope===s&&samePoint(x.targetCoordinate,t)&&!['completed','cancelled','limit'].includes(x.status))&&sync(isTargetAllowed({scope:s,target:t}))===true);
+    const selected=core.rankTargets(candidates,intelligence,o.target,clock())[0];
+    if(!selected){const message='Captura confirmada. Esperando candidatos atacables observados con protección y tratados verificables.';if(o.message!==message){change(o,{message});return true;}continue;}
+    const at=clock(),next={...copy(o),id:id(newId()),target:{q:selected.q,r:selected.r,name:selected.name},status:'planning',createdAt:at,updatedAt:at,reports:[],latestReport:null,sequence:0,ticket:null,barrierAt:at,ownerId:selected.ownerId,successorId:null,
+     message:selected.known?'Siguiente objetivo: información defensiva exacta reciente; menor defensa por tipo cuando es comparable y cercanía hexagonal.':'Siguiente objetivo: defensas desconocidas; cercanía hexagonal entre candidatos atacables observados.'};
+    if(!ownerProof(next))continue;
+    const objectives=config.objectives.map(x=>x.id===o.id?{...x,successorId:next.id,updatedAt:at,message:'Captura terminada. Siguiente objetivo seleccionado: '+next.target.name}:x);
+    save({...config,objectives:[...objectives,next]});return true;
+   }
    const options=plans();
    for(const o of config.objectives.filter(x=>x.scope===s&&x.status==='planning'&&!x.ticket)){
     const p=options.find(x=>x.id===o.id);if(!p?.origin)continue;
@@ -277,7 +318,7 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
   finally{running=false;}
  }
  function dueOrigins(){if(!load()||!config.objectives.length)return [];const c=context();return config.objectives.filter(o=>o.scope===c?.scope&&o.status==='planning'&&o.ticket?.state==='queued').filter(o=>{const j=jobs().find(x=>x.id===o.ticket.id);return j?.status==='waiting'&&canRunJob(j);}).map(o=>o.ticket.originId);}
- return {add,list,plans,tick,observeReport,recoverReports,pause,resume,cancel:cancelObjective,configure,acknowledge,remove,canRunJob,canUseFleet,dueOrigins,
+ return {add,list,plans,tick,continuation,observeReport,recoverReports,pause,resume,cancel:cancelObjective,configure,acknowledge,remove,canRunJob,canUseFleet,dueOrigins,
   navigationList:()=>list().map(o=>({...o,originId:o.ticket?.originId,paused:o.status!=='planning'})),
   exportConfig:()=>load()?copy(config):fail(error),validateConfig:validate,
   observationSince:()=>list().filter(o=>!['captured','cancelled'].includes(o.status)).reduce((n,o)=>n===null?o.createdAt:Math.min(n,o.createdAt),null),

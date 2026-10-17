@@ -19,7 +19,7 @@ function installConquestFixture(){
    return {status:'sent',message:'Synthetic native acceptance; no network or game order'};}});
  controller=OldLightConquestController.create({read:()=>stored,write:value=>{stored=clone(value);return true},getContext:()=>context,getWorld:()=>{worldReads++;return clone(world)},getJobs:()=>queue.list(),
   queue:(spec,options)=>queue.queue(spec,options),cancel:id=>queue.cancel(id),cancelPreparing:()=>false,
-  getTargetOwner:(scope,target)=>owners.read(scope,target),isTargetAllowed:()=>true,now:()=>clock,newId:()=>uuid(seq++),onChange:()=>{}});
+  getTargetOwner:(scope,target)=>owners.read(scope,target),getCandidates:scope=>owners.candidates(scope),isChainTargetAllowed:o=>owners.eligible(o.scope,o.target),isTargetAllowed:()=>true,now:()=>clock,newId:()=>uuid(seq++),onChange:()=>{}});
  const panel=OldLightConquestPanel.create({controller,document,confirm:()=>confirmation});panel.mount(layoutRoot.querySelector('#campaigns'));
  const navigation=OldLightReinforcementRuntime.create({core:{list:controller.navigationList,dueOrigins:controller.dueOrigins,pause:controller.pause},
   adapter:{canNavigate:()=>true,selectSystem:async(id,{isCurrent})=>{if(!isCurrent())return false;context.originId=id;context.originName=world.systems.find(s=>s.id===id).name;return true}},getContext:()=>context,now:()=>clock});
@@ -32,7 +32,7 @@ function installConquestFixture(){
   if(captured){world.systems.push({id:uuid(99),q:10,r:0,name:'Captured target',fleet:[]});world.ownership.players[0].owned.push({q:10,r:0});world.ownership.players[1].owned=[];}
   changed();return report;
  }
- globalThis.conquestFixture={run,arrive,report,setConfirmation:value=>{confirmation=value},restock:()=>{world.systems[0].fleet=ships(12);changed()},
+ globalThis.conquestFixture={run,arrive,report,addEligibleTarget:q=>{for(const row of world.systems)row.maxDispatchRange=100;Object.assign(world.ownership.players[0],{kind:'human',protectedUntil:null,treatyWith:[]});Object.assign(world.ownership.players[1],{kind:'human',protectedUntil:null});world.ownership.players[1].owned.push({q,r:0});changed();},setConfirmation:value=>{confirmation=value},restock:()=>{world.systems[0].fleet=ships(12);changed()},
   censusReads:()=>worldReads,render:()=>panel.render(),state:()=>({worldReads,objectives:controller.list(),plans:controller.plans(),jobs:queue.list(),calls:clone(calls),context:clone(context)}),
   loseProof:()=>{world.connected=false;changed();controller.tick();panel.render()}};
 }

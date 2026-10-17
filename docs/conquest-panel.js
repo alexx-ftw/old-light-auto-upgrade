@@ -5,7 +5,7 @@
 const SHIPS=['probe','marauder','sentinel','vanguard'];
 const LABELS={probe:'Probe',marauder:'Marauder',sentinel:'Sentinel',vanguard:'Vanguard'};
 function create({controller,document:doc,onChange=()=>{},confirm=message=>doc.defaultView.confirm(message)}={}){
- let root,form,cards,status,key='',error='',fields,authorized;
+ let root,form,cards,status,key='',error='',fields,authorized,autoNext;
  const el=(tag,text,cls)=>{const node=doc.createElement(tag);if(text!==undefined)node.textContent=text;if(cls)node.className=cls;return node;};
  const counts=value=>SHIPS.filter(t=>value?.[t]).map(t=>`${value[t]} ${LABELS[t]}`).join(' · ')||'0';
  function field(parent,caption,value,{min=0,max=50000,type='number',name}={}){
@@ -59,7 +59,13 @@ function create({controller,document:doc,onChange=()=>{},confirm=message=>doc.de
    if(['paused','limit'].includes(o.status))button(actions,'Reanudar','resume',()=>controller.resume(o.id));
    if(!['captured','cancelled'].includes(o.status))button(actions,'Cancelar','cancel',()=>controller.cancel(o.id));
    if(o.ticket&&['uncertain','cancelled'].includes(o.status))button(actions,'Cerrar tras revisión manual','acknowledge',()=>{if(confirm('Confirma que has comprobado las misiones del juego. Se cerrará este objetivo sin reenviar ni retirar flotas enviadas.'))controller.acknowledge(o.id);});
-   if(['captured','cancelled'].includes(o.status))button(actions,'Retirar registro','remove',()=>controller.remove(o.id));
+   if(o.status==='captured'&&o.budgetKnown===false)card.append(el('p','El presupuesto de esta captura no está verificado. Revisa las pérdidas y crea una nueva campaña limitada; no se reinician ni descartan gastos automáticamente.'));
+   if(o.autoNext)card.append(el('p','Cadena autorizada: los límites de incursiones y pérdidas se comparten; no se reinician al capturar.'));
+   if(o.status==='captured'&&!o.ticket&&!o.successorId){
+    if(o.autoNext)button(actions,'Detener continuación','stop-chain',()=>controller.continuation(o.id,false));
+    else {const next=button(actions,'Continuar con el siguiente objetivo','continue-chain',()=>{if(confirm('¿Autorizar la continuación automática tras cada captura dentro de los límites restantes? Prioriza datos defensivos exactos recientes, menor defensa comparable y cercanía desde la captura. Conserva las confirmaciones nativas.'))controller.continuation(o.id,true);});next.disabled=o.budgetKnown===false;if(next.disabled)next.title='Las pérdidas pendientes no están verificadas; no se puede reutilizar el presupuesto.';}
+   }
+   if(['captured','cancelled'].includes(o.status)){const remove=button(actions,'Retirar registro','remove',()=>controller.remove(o.id));remove.disabled=Boolean(o.successorId&&objectives.some(x=>x.id===o.successorId));if(remove.disabled)remove.title='Retira primero los registros sucesores terminados para conservar el historial de la cadena.';}
    if(['paused','limit'].includes(o.status)&&!o.ticket){const editor=el('details'),summary=el('summary','Editar plan detenido');editor.append(summary);const read=settings(editor,o);button(editor,'Guardar plan','save-plan',()=>controller.configure(o.id,read()));card.append(editor);}
    cards.append(card);
   }
@@ -73,8 +79,9 @@ function create({controller,document:doc,onChange=()=>{},confirm=message=>doc.de
   const details=el('details'),summary=el('summary','Marcar sistema como objetivo');details.append(summary);form=el('form');const target=el('div',undefined,'cq-grid');form.append(target);
   const name=field(target,'Nombre del objetivo','',{type:'text'}),q=field(target,'Coordenada q','',{min:-10000000,max:10000000}),r=field(target,'Coordenada r','',{min:-10000000,max:10000000});fields=settings(form);
   const authorization=el('label',undefined,'cq-authorize');authorized=el('input');authorized.type='checkbox';authorization.append(authorized,el('span','Autorizar las incursiones y refuerzos de esta campaña dentro de estos límites, cuando el Helper esté activo.'));form.append(authorization);
-  const submit=el('button','Crear campaña limitada');submit.type='submit';form.append(submit);form.addEventListener('submit',event=>{event.preventDefault();attempt(()=>{if(!authorized.checked)throw Error('Marca la autorización de esta campaña antes de crearla.');if(!confirm('¿Crear esta campaña con la flota, defensas y límites indicados? El Helper podrá preparar sus misiones nativas cuando esté activo.'))return;
-   controller.add({target:{q:integer(q,-10000000,10000000),r:integer(r,-10000000,10000000),name:name.value.trim()},...fields()});authorized.checked=false;});});details.append(form);root.append(details);
+  const chainLabel=el('label',undefined,'cq-authorize');autoNext=el('input');autoNext.type='checkbox';chainLabel.append(autoNext,el('span','Continuar automáticamente tras una captura: mismos límites globales, datos defensivos recientes primero, menor defensa comparable y cercanía hexagonal desde el sistema capturado.'));form.append(chainLabel);
+  const submit=el('button','Crear campaña limitada');submit.type='submit';form.append(submit);form.addEventListener('submit',event=>{event.preventDefault();attempt(()=>{if(!authorized.checked)throw Error('Marca la autorización de esta campaña antes de crearla.');if(!confirm('¿Crear esta campaña con la flota, defensas y límites indicados? El Helper podrá preparar sus misiones nativas cuando esté activo. Si marcas continuar, esta autorización cubre los siguientes objetivos con el mismo presupuesto global.'))return;
+   controller.add({target:{q:integer(q,-10000000,10000000),r:integer(r,-10000000,10000000),name:name.value.trim()},...fields(),autoNext:autoNext.checked});authorized.checked=false;autoNext.checked=false;});});details.append(form);root.append(details);
   status=el('p',undefined,'cq-status');status.tabIndex=-1;status.setAttribute('role','status');cards=el('div');root.append(status,cards);container.prepend(root);render();
  }
  return {mount,render,destroy(){root?.remove();root=null;}};

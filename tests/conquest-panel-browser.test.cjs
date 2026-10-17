@@ -44,6 +44,15 @@ test('conquest UI and real queue assemble before a single raid reevaluate Victor
   await b.evaluate(`layoutRoot.querySelector('.cq-card').scrollIntoView({block:'start'})`);
   fs.writeFileSync(path.join(b.artifacts,'conquest-captured.png'),Buffer.from((await b.command('Page.captureScreenshot',{format:'png',captureBeyondViewport:true})).data,'base64'));
   fs.writeFileSync(path.join(b.artifacts,'conquest-state.json'),JSON.stringify({state,sourceHashes:Object.fromEntries([...modules,{name:'queue',source:queueSource},{name:'css',source:css},{name:'fixture',source:fixture}].map(m=>[m.name,crypto.createHash('sha256').update(m.source).digest('hex')]))},null,2));
+  await b.evaluate(`conquestFixture.addEligibleTarget(11);conquestFixture.setConfirmation(false);layoutRoot.querySelector('[data-conquest-action="continue-chain"]').click();conquestFixture.run()`);
+  state=await b.evaluate('conquestFixture.state()');assert.equal(state.objectives.length,1);assert.equal(state.objectives[0].autoNext,false,'declining continuation preserves single-target authorization');
+  await b.evaluate(`conquestFixture.setConfirmation(true);layoutRoot.querySelector('[data-conquest-action="continue-chain"]').click();conquestFixture.restock();conquestFixture.run()`);
+  state=await b.evaluate('conquestFixture.state()');assert.equal(state.objectives.length,2);assert.equal(state.objectives[1].target.q,11);assert.equal(state.objectives[1].raids,2);assert.equal(state.objectives[1].losses.marauder,2);assert.equal(state.calls.length,3,'selection is not evidence of fresh stock after creating the successor');
+  await b.evaluate('conquestFixture.restock();conquestFixture.run()');state=await b.evaluate('conquestFixture.state()');assert.equal(state.calls.length,4);assert.equal(state.calls[3].target.coordinate.q,11);assert.equal(state.objectives[1].raids,3);assert.equal(state.objectives[0].status,'captured');
+  await b.evaluate('conquestFixture.run();conquestFixture.run()');assert.equal((await b.evaluate('conquestFixture.state()')).calls.length,4,'a successor still permits only one raid before its report');
+  assert.equal(await b.evaluate(`layoutRoot.querySelector('.cq-card [data-conquest-action="remove"]').disabled`),true,'the captured ancestor remains guarded while its successor is registered');
+  fs.writeFileSync(path.join(b.artifacts,'conquest-chain-state.json'),JSON.stringify(state,null,2));
+  fs.writeFileSync(path.join(b.artifacts,'conquest-chain.png'),Buffer.from((await b.command('Page.captureScreenshot',{format:'png',captureBeyondViewport:true})).data,'base64'));
   assert.deepEqual(b.errors,[]);assert.deepEqual(b.denied,[]);assert.equal(await b.evaluate('document.title'),'Offline conquest campaign QA');
   t.diagnostic('CONQUEST_BROWSER_ARTIFACTS='+b.artifacts);
  }finally{await b.close()}

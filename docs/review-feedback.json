@@ -5236,6 +5236,161 @@
         "Comprobar roles legítimamente sin asignación, modo apagado y pérdida de censo sin efectos ni lecturas adicionales.",
         "Confirmar que no cambia arbitraje/reservas ni afirma resolver Structures o vulnerabilidad."
       ]
+    },
+    {
+      "id": "confirmed-capture-chain-eligibility-budget",
+      "feedback": "Continuar tras captura confirmada con elegibilidad positiva, información defensiva fresca y límites heredados; cerrar guardas de historia y presupuesto detectadas en borradores.",
+      "beforeFail": {
+        "revision": "cce35a0190e03248b5526759183ef26f164acc6c",
+        "command": "node --test --test-name-pattern='capture continuation waits for a later own census' tests/conquest-capture-chain.test.cjs",
+        "observedFailure": "La base rechaza el nuevo campo autoNext y no ofrece sucesión; es ausencia de la capacidad solicitada, no un duplicado atribuido a la versión publicada.",
+        "evidence": "docs/1.17.33-capture-chain-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "capture continuation waits for a later own census and chooses the nearest observed eligible target once"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "single-target legacy campaigns never silently acquire continuation authorization"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "capture continuation skips own, reserved and already managed targets and waits without inventing candidates"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "continuation retains global raid and exact loss budgets instead of renewing them per captured target"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "unknown attack losses cannot release a captured campaign into a new global budget"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "continuation persistence rejection and no-op cannot queue an unpersisted successor"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "paused permissions and lost ownership suppress continuation and prepared automatic jobs"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "fresh exact defenses outrank unknown targets and weaker comparable vectors outrank closeness"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "defense vectors with incomparable ship types or unknown bonuses use hex distance without invented strength"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "unmanaged exact report intelligence preserves legacy routing and informs later selection only while fresh"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "positive attackability requires explicit protection and self treaty knowledge and excludes protected rivals"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "cached candidate eligibility rechecks live publication, clock rollback and expiring treaties"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "actual passive observer projects only minimal eligibility fields and preserves native per-field delta semantics"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "candidate reader revocation during its final status check and throwing bridge lookup both fail closed"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "automatic selection and both queue boundaries require the native dispatch range of the real origin"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "stopped continuation never renews budgets and explicit continuation is blocked with unknown historical losses"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "waiting messages do not postpone a confirmed capture census when a shield expires without a new quote"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "future, stale, changed-owner and same-time conflicting reports never rank an unknown defense as zero"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "a captured record with missing legacy loss evidence cannot be newly opted into an automatic chain"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "removing a captured ancestor cannot erase the lineage that revokes its active successor"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "a reciprocal treaty with self also blocks eligibility but unrelated rival treaties do not"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "the bounded objective history stops automatic succession instead of silently discarding captured records"
+        },
+        {
+          "file": "tests/conquest-panel-browser.test.cjs",
+          "name": "conquest UI and real queue assemble before a single raid reevaluate Victory and stop on explicit capture offline"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Captura y censo posterior frente a reportes repetidos, stock previo y falta de candidatos",
+          "expected": "Un sucesor durable con presupuesto heredado o espera sin órdenes",
+          "regression": {
+            "file": "tests/conquest-capture-chain.test.cjs",
+            "name": "capture continuation waits for a later own census and chooses the nearest observed eligible target once"
+          }
+        },
+        {
+          "scenario": "Pérdidas desconocidas e historial de ancestros",
+          "expected": "No reutilizar gasto ni borrar el vínculo que revoca la autoridad del sucesor",
+          "regression": {
+            "file": "tests/conquest-capture-chain.test.cjs",
+            "name": "removing a captured ancestor cannot erase the lineage that revokes its active successor"
+          }
+        },
+        {
+          "scenario": "Protección/tratados/alcance ausentes o revocados",
+          "expected": "Esperar y conservar todas las guardas de origen y misión",
+          "regression": {
+            "file": "tests/conquest-capture-chain.test.cjs",
+            "name": "automatic selection and both queue boundaries require the native dispatch range of the real origin"
+          }
+        },
+        {
+          "scenario": "Autorización explícita en Chromium frente a cancelación y campaña anterior",
+          "expected": "No continuar al rechazar; al aceptar usar el mismo presupuesto y una incursión antes del reporte",
+          "regression": {
+            "file": "tests/conquest-panel-browser.test.cjs",
+            "name": "conquest UI and real queue assemble before a single raid reevaluate Victory and stop on explicit capture offline"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Partida instalada y forma real de campos opcionales",
+          "reason": "Solo fixtures/Chromium offline y assets públicos fijados; ausencia de metadatos requiere espera, no consultas o datos inventados."
+        },
+        {
+          "scope": "Inteligencia defensiva incompleta y concurrencia global",
+          "reason": "No se supone contrato sparse completo ni fórmula de fuerza; caché local acotado y coordinación existente, sin CAS global nuevo."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Contrastar fuente nativa de geometría/rango y semántica por campo de deltas; desconocido nunca permiso.",
+        "Atacar ranking con owner cambiado, tipos mixtos, bonus/frescura desconocidos, conflictos e identidad entre generaciones.",
+        "Recorrer captura→historia→sucesor→cola y rutas UI de retirada/cancelación/recarga; exigir un claim y límites no renovados.",
+        "Reproducir migración con almacenamiento producido por código anterior y no inferir presupuesto por presencia de arrays.",
+        "Verificar ausencia de nuevas API de juego/credenciales/permisos/telemetría y todas las guardas nativas conservadas."
+      ]
     }
   ]
 }
