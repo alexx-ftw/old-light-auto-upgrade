@@ -5126,6 +5126,67 @@
         "Revisar blur forzado, conteos normales y que consentimiento/error/borrado prevalezcan, incluso off→on antes del evento.",
         "Verificar exportación actual sin generación/estado interno y ausencia de APIs nuevas de portapapeles, categorías o permisos."
       ]
+    },
+    {
+      "id": "metrics-view-lifecycle-reconciliation",
+      "feedback": "Al restaurar la vista antes de una notificación de almacenamiento diferida, el panel conserva checkbox e informe anteriores aunque cambió el consentimiento o caducaron los contadores.",
+      "beforeFail": {
+        "revision": "d5fb89024266016145f1132177f1de1bbb4e985b",
+        "command": "node --test --test-name-pattern='Restored metrics panels reconcile consent' tests/metrics-integration.test.cjs (mismo harness sobre fuentes base aisladas, ver evidencia)",
+        "observedFailure": "Tras revocación externa y pageshow persistido antes de storage, checkbox observado true, esperado false; la copia seleccionada anterior sigue visible.",
+        "evidence": "docs/1.17.31-metrics-lifecycle-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/metrics-integration.test.cjs",
+          "name": "Restored metrics panels reconcile consent and selected copies before delayed storage notifications without writing"
+        },
+        {
+          "file": "tests/metrics-integration.test.cjs",
+          "name": "Visible and resumed metrics views reconcile current counters and retention without hidden reads or writes"
+        },
+        {
+          "file": "tests/metrics-integration.test.cjs",
+          "name": "Restored metrics read failures surface immediately and never implicitly reactivate recovered storage"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Revocación o nueva generación ya habilitada antes de pageshow, storage pendiente",
+          "expected": "Refresco forzado de elección e informe, sin conservar copia anterior ni escribir consentimiento/contadores.",
+          "regression": {
+            "file": "tests/metrics-integration.test.cjs",
+            "name": "Restored metrics panels reconcile consent and selected copies before delayed storage notifications without writing"
+          }
+        },
+        {
+          "scenario": "Reloj avanza31días, resume correcto, visibilidad oculta/visible y target incorrecto",
+          "expected": "Oculto/target incorrecto no leen; resume/visible filtran datos caducados y muestran contadores actuales, sin escribir.",
+          "regression": {
+            "file": "tests/metrics-integration.test.cjs",
+            "name": "Visible and resumed metrics views reconcile current counters and retention without hidden reads or writes"
+          }
+        },
+        {
+          "scenario": "Lectura falla al restaurar y luego almacenamiento se recupera",
+          "expected": "Aviso/checkbox detenido e informe vacío inmediatos; reanudación repetida no reactiva, activación explícita sí permite recuperar.",
+          "regression": {
+            "file": "tests/metrics-integration.test.cjs",
+            "name": "Restored metrics read failures surface immediately and never implicitly reactivate recovered storage"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "BFCache, descarte y suspensión reales",
+          "reason": "Orden de eventos, concurrencia y reloj simulados; no prueba un orden universal de storage/pageshow ni un incidente del propietario."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Reproducir misma vista anterior antes de storage y otra generación habilitada; no confundir fallo UI con permiso del núcleo.",
+        "Verificar targets de eventos y que solo leen getReport, sin sampling/reinicio/consentimiento; oculto y carga nueva no agregan lecturas.",
+        "Comprobar retención, errores persistentes, forcePreview y eventos duplicados con núcleo/collector y categorías intactos."
+      ]
     }
   ]
 }

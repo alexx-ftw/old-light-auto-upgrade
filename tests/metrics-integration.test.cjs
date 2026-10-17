@@ -18,7 +18,7 @@ function harness(options = {}) {
   const end = source.indexOf('  function installMetricsPanel(', begin);
   assert.ok(begin > 0 && end > begin);
   const context = vm.createContext({
-    SCRIPT_VERSION: '1.12.0', crypto: options.crypto === undefined ? crypto : options.crypto,
+    SCRIPT_VERSION: '1.12.0', Date: options.clockDate || Date, crypto: options.crypto === undefined ? crypto : options.crypto,
     localStorage: {
       getItem: name => storage.get(name) ?? null,
       setItem: (name, value) => { if (failWrite) throw new Error('quota'); writes.push(name); storage.set(name, value); },
@@ -129,7 +129,8 @@ function panelHarness(options = {}) {
   const shadow = element('div'); shadow.querySelector = selector => selector === '[data-page="data"]' ? dataPage : null;
   const window = element('window');
   const urls = [];
-  const context = vm.createContext({ metrics, document: { createElement: element }, window, Blob,
+  const document = element('document'); document.createElement = element; document.visibilityState = 'visible';
+  const context = vm.createContext({ metrics, document, window, Blob, Date: options.clockDate || Date,
     URL: { createObjectURL(blob) { urls.push(blob); return 'blob:local-report'; }, revokeObjectURL() {} },
     setTimeout: callback => callback(),
     setText: (node, value) => { node.textContent = value; },
@@ -140,7 +141,7 @@ function panelHarness(options = {}) {
   context.install(shadow);
   const action = name => nodes.find(node => node.dataset.action === name);
   const field = name => nodes.find(node => node.dataset.field === name);
-  return { metrics, storage, setFailWrite, nodes, dataPage, shadow, window, action, field, urls };
+  return { metrics, storage, setFailWrite, nodes, dataPage, shadow, window, document, action, field, urls };
 }
 
 test('Metrics controls require trusted reactivation after opt-out, support preview, and preserve game settings', () => {
@@ -433,4 +434,94 @@ test('Selected metrics previews export current data and invalidate on consent ro
   h.storage.clear(); h.window.fire('storage', { key: null });
   assert.deepEqual(JSON.parse(preview.value).days, [], 'Whole-storage clear invalidates the selected copy immediately');
   assert.equal(h.field('metrics-preview-note').hidden, true);
+});
+
+test('Restored metrics panels reconcile consent and selected copies before delayed storage notifications without writing', () => {
+  const writes = [];
+  class ObservedStorage extends Map {
+    set(name, value) { writes.push(name); return super.set(name, value); }
+    delete(name) { writes.push(name); return super.delete(name); }
+  }
+  const h = panelHarness({ storage: new ObservedStorage() });
+  h.metrics.record('helper.loaded'); h.action('metrics-preview').fire('click');
+  const preview = h.nodes.find(node => node.id === 'oldlight-metrics-report');
+  h.shadow.activeElement = preview; preview.selectionStart = 0; preview.selectionEnd = preview.value.length;
+  h.metrics.record('settings.changed');
+  assert.equal(h.field('metrics-preview-note').hidden, false);
+  // Model a suspended page: external consent changes, with its storage task
+  // intentionally delivered after the restored-page notification.
+  h.window.fire('pagehide', { persisted: true });
+  h.storage.set(consentKey, JSON.stringify({ enabled: false, generation: '00000000-0000-4000-8000-000000000002' }));
+  writes.length = 0;
+  h.window.fire('pageshow', { persisted: true });
+  assert.equal(h.action('metrics-toggle').checked, false, 'The restored panel must not retain an old enabled checkbox');
+  assert.deepEqual(JSON.parse(preview.value).days, [], 'Resume invalidates the selected copy after revocation');
+  assert.equal(h.field('metrics-preview-note').hidden, true);
+  assert.match(h.field('metrics-status').textContent, /Desactivadas/);
+  assert.deepEqual(writes, [], 'Reconciliation must not opt in, count, erase, or rewrite storage');
+  h.window.fire('storage', { key: consentKey });
+  assert.equal(h.action('metrics-toggle').checked, false); assert.deepEqual(writes, []);
+  h.shadow.activeElement = null;
+  h.metrics.setEnabled(true); h.metrics.record('helper.loaded');
+  h.shadow.activeElement = preview; preview.selectionStart = 0; preview.selectionEnd = preview.value.length;
+  h.metrics.record('settings.changed');
+  const generation = '00000000-0000-4000-8000-000000000003';
+  h.storage.set(consentKey, JSON.stringify({ enabled: true, generation }));
+  h.storage.set(key, JSON.stringify({ schema: 1, version: '1.12.0', generation, days: [] }));
+  writes.length = 0;
+  h.window.fire('pageshow', { persisted: true }); h.document.fire('resume');
+  assert.equal(h.action('metrics-toggle').checked, true, 'Another tab may already have reactivated a new generation');
+  assert.deepEqual(JSON.parse(preview.value).days, [], 'Resume never pins a revoked generation even when currently enabled');
+  assert.equal(h.field('metrics-preview-note').hidden, true); assert.deepEqual(writes, []);
+});
+
+test('Visible and resumed metrics views reconcile current counters and retention without hidden reads or writes', () => {
+  let stamp = Date.parse('2026-10-17T12:00:00Z'), reads = 0, writes = 0;
+  class ClockDate extends Date { constructor(...args) { super(...(args.length ? args : [stamp])); } static now() { return stamp; } }
+  class ObservedStorage extends Map {
+    get(name) { if (name === key) reads++; return super.get(name); }
+    set(name, value) { writes++; return super.set(name, value); }
+  }
+  const h = panelHarness({ storage: new ObservedStorage(), clockDate: ClockDate });
+  h.metrics.record('helper.loaded'); h.action('metrics-preview').fire('click');
+  const preview = h.nodes.find(node => node.id === 'oldlight-metrics-report');
+  h.shadow.activeElement = preview; preview.selectionStart = 0; preview.selectionEnd = preview.value.length;
+  const old = preview.value;
+  stamp += 31 * 86400000;
+  reads = 0; writes = 0;
+  h.document.visibilityState = 'hidden'; h.document.fire('visibilitychange'); h.window.fire('resume');
+  assert.equal(reads, 0, 'Hidden visibility and a resume event on the wrong target do not read counters');
+  assert.equal(preview.value, old);
+  h.document.fire('resume');
+  assert.equal(reads, 1); assert.equal(writes, 0);
+  assert.deepEqual(JSON.parse(preview.value).days, [], 'An actual document resume refreshes expired selected data');
+  assert.equal(h.action('metrics-toggle').checked, true, 'Read-only retention reconciliation does not change consent');
+  h.shadow.activeElement = null; h.metrics.record('settings.changed');
+  const stored = JSON.parse(h.storage.get(key)); stored.days[0].counts['settings.changed'] = 2; h.storage.set(key, JSON.stringify(stored));
+  reads = 0; writes = 0;
+  h.document.visibilityState = 'hidden'; h.document.fire('visibilitychange'); assert.equal(reads, 0);
+  h.document.visibilityState = 'visible'; h.document.fire('visibilitychange');
+  assert.equal(reads, 1); assert.equal(writes, 0); assert.equal(JSON.parse(preview.value).days[0].counts['settings.changed'], 2);
+  h.window.fire('pageshow', { persisted: false }); assert.equal(reads, 1, 'A fresh load already has its initial view');
+});
+
+test('Restored metrics read failures surface immediately and never implicitly reactivate recovered storage', () => {
+  let failRead = false;
+  class FailingStorage extends Map {
+    get(name) { if (failRead && name === key) throw Error('private lifecycle storage failure'); return super.get(name); }
+  }
+  const h = panelHarness({ storage: new FailingStorage() });
+  h.metrics.record('helper.loaded'); h.action('metrics-preview').fire('click');
+  const preview = h.nodes.find(node => node.id === 'oldlight-metrics-report');
+  h.shadow.activeElement = preview; preview.selectionStart = 0; preview.selectionEnd = preview.value.length;
+  failRead = true;
+  h.window.fire('pageshow', { persisted: true });
+  assert.equal(h.action('metrics-toggle').checked, false); assert.deepEqual(JSON.parse(preview.value).days, []);
+  assert.match(h.field('metrics-status').textContent, /medición está detenida/); assert.equal(preview.value.includes('private'), false);
+  h.action('metrics-export').fire('click'); assert.equal(h.urls.length, 0);
+  failRead = false;
+  h.document.fire('resume'); h.document.fire('visibilitychange'); h.window.fire('pageshow', { persisted: true });
+  assert.equal(h.action('metrics-toggle').checked, false, 'Lifecycle refreshes cannot clear forced-off state');
+  h.action('metrics-toggle').checked = true; h.action('metrics-toggle').fire('change');
+  assert.equal(h.action('metrics-toggle').checked, true); assert.deepEqual(JSON.parse(preview.value).days, []);
 });

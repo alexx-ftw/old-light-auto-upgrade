@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.30
+// @version      1.17.31
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -6261,7 +6261,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.30';
+  const SCRIPT_VERSION = '1.17.31';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -6679,6 +6679,14 @@ return Object.freeze({ encode });
     });
     window.addEventListener('storage', event => {
       if (['old-light-auto-upgrade:metrics:v1', 'old-light-auto-upgrade:metrics-consent:v1', null].includes(event.key)) refresh('', event.key !== 'old-light-auto-upgrade:metrics:v1');
+    });
+    // A restored page may be shown before a deferred storage notification.
+    // Reconcile only the view; never restart sampling or change consent here.
+    const refreshRestoredView = () => refresh('', true);
+    window.addEventListener('pageshow', event => { if (event.persisted) refreshRestoredView(); });
+    document.addEventListener('resume', refreshRestoredView);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') refreshRestoredView();
     });
     metrics.onChange(refresh);
     refresh();
@@ -7978,6 +7986,11 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.31', title: 'Métricas actualizadas al volver a la pestaña', changes: [
+        'Al volver a una pestaña o recuperar su vista guardada, el panel consulta la elección y los contadores actuales, sin esperar otra notificación.',
+        'La reanudación actualiza también una copia seleccionada: no conserva datos revocados o caducados ni reactiva una medición detenida por error.',
+        'Solo refresca la vista: no escribe datos, reinicia muestras ni añade permisos. Mantiene la elección guardada y los contadores por versión.',
+      ] },
       { version: '1.17.30', title: 'Copiar el informe de métricas sin perder la selección', changes: [
         'Si llegan nuevos contadores mientras seleccionas el informe para copiarlo, conserva esa copia y avisa; se actualiza al salir del campo.',
         'Desactivar, borrar, cambiar el consentimiento o fallar el almacenamiento invalida la copia. La exportación siempre usa el informe actual.',
