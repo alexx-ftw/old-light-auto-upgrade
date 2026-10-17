@@ -21,3 +21,7 @@ La prueba de silencio real espera40s, exige rechazo entre39y50s ycierre del grup
 ## Publicación y límites
 
 El workflow manual ejecuta el gate soportado exacto en la rama candidata antes de main: [procedimiento](manual-release-gate.md). Solo publicar con commitlimpio,gatefinal,revisión independiente,CI de rama yconcurrencia comprobados; después verificar CIautomático ybytes servidos. Un pase diagnóstico no sustituye esas comprobaciones.40s puede seguir fallando en otrohost yno modifica autoridad,datos,acciones otelemetría del Helper. No se ha probado partida real.
+
+## Cierre de cobertura del workflow
+
+edd22ee aprobó gate local2390/2390 (412599.379ms de suite sobre420000) y [gate manual38985192898](https://github.com/alexx-ftw/old-light-auto-upgrade/actions/runs/38985192898). Su primera preparación de workflow sustituía los jobs de orden por el gate completo. Antes de main se corrigió esa reducción de cobertura: los dos órdenes originales quedan íntegros, el hash pasa al final y se añade el job completo. El nuevo árbol exige revisión/gate/CI propios; no hereda la aprobación de edd22ee. El presupuesto420s permanece intacto ysu margen local reducido se conserva como límite observado.
