@@ -2372,12 +2372,12 @@ function create({read,write,getContext,getWorld,getJobs,queue,cancel,cancelPrepa
   return change(o,{autoNext:enabled,barrierAt:clock(),message:enabled?'Continuación autorizada: esperando censo propio posterior y candidatos verificables.':'Continuación detenida. La captura queda registrada.'});
  }
  function rememberReport(report,value){
-  if(!report||report.scope!==context()?.scope||!report.owner)return;
+  if(!report||report.scope!==context()?.scope)return;
   const battle=get(get(get(value,'detail'),'sections'),'battle');
   const exact=key=>{const rows=get(battle,key);return Array.isArray(rows)&&rows.length===SHIPS.length&&SHIPS.every(t=>rows.some(r=>get(r,'type')===t));};
-  const old=intelligence.find(x=>samePoint(x.target,report.target)&&x.ownerId===report.owner);
+  const old=intelligence.find(x=>samePoint(x.target,report.target));
   if(old&&old.takenAt>report.takenAt)return;
-  const remaining=exact('defenderShips')&&exact('defenderLost')?report.defenderRemaining:null;
+  const remaining=report.owner&&exact('defenderShips')&&exact('defenderLost')?report.defenderRemaining:null;
   const entry={target:copy(report.target),ownerId:report.owner,takenAt:report.takenAt,remaining:copy(remaining),bonus:report.defenderSectorBonusPct};
   if(old&&old.takenAt===report.takenAt&&!equal(old,entry))entry.remaining=null;
   intelligence=intelligence.filter(x=>!samePoint(x.target,report.target)&&clock()-x.takenAt<=core.MAX_AGE);intelligence.push(entry);intelligence=intelligence.slice(-64);

@@ -5391,6 +5391,67 @@
         "Reproducir migración con almacenamiento producido por código anterior y no inferir presupuesto por presencia de arrays.",
         "Verificar ausencia de nuevas API de juego/credenciales/permisos/telemetría y todas las guardas nativas conservadas."
       ]
+    },
+    {
+      "id": "capture-chain-intelligence-coordinate-order",
+      "feedback": "La primera candidata33 ignoraba reportes posteriores sin dueño y dejaba que un dueño anterior expulsara inteligencia más reciente.",
+      "beforeFail": {
+        "revision": "5cadbe433fb4d84649760d5161b5b613f189e027",
+        "command": "node --test --test-name-pattern='newer unidentified-owner combat|older combat from another owner|an unidentified-owner invalidation' tests/conquest-capture-chain.test.cjs",
+        "observedFailure": "Los tres casos finales copiados sin cambios al archive5cad fallan; se eligeq20 con cero obsoleto o se pierde evidencia reciente deq20 por un reporte viejo.",
+        "evidence": "docs/1.17.33-capture-chain-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "newer unidentified-owner combat invalidates previous exact zero defense instead of preserving its preference"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "older combat from another owner cannot evict newer exact defense evidence for the same coordinate"
+        },
+        {
+          "file": "tests/conquest-capture-chain.test.cjs",
+          "name": "an unidentified-owner invalidation remains newer than a replayed previously known report"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Nuevo combate sin UUID con evidencia exacta anterior",
+          "expected": "Invalidar confianza sin asumir nuevo dueño o defensa cero",
+          "regression": {
+            "file": "tests/conquest-capture-chain.test.cjs",
+            "name": "newer unidentified-owner combat invalidates previous exact zero defense instead of preserving its preference"
+          }
+        },
+        {
+          "scenario": "Reporte viejo de otro dueño",
+          "expected": "No reemplazar el hecho más nuevo de la coordenada",
+          "regression": {
+            "file": "tests/conquest-capture-chain.test.cjs",
+            "name": "older combat from another owner cannot evict newer exact defense evidence for the same coordinate"
+          }
+        },
+        {
+          "scenario": "Replay tras invalidación por dueño desconocido",
+          "expected": "Mantener desconocido hasta evidencia posterior verificable",
+          "regression": {
+            "file": "tests/conquest-capture-chain.test.cjs",
+            "name": "an unidentified-owner invalidation remains newer than a replayed previously known report"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Actualidad de defensas entre observaciones y partida instalada",
+          "reason": "Son reportes sintéticos; TTL acotado y orden temporal no prueban que no hayan cambiado defensores desde el último informe."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Repetir las tres secuencias sobre bytes finales y archive exacto, sin cambiar el test.",
+        "Contrastar timestamp por coordenada antes de validar dueño, conflictos a igual fecha y marcador de incertidumbre.",
+        "Conservar routing legado y límites de caché/scope sin nueva recopilación o permiso de ataque."
+      ]
     }
   ]
 }

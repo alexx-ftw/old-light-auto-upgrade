@@ -132,3 +132,16 @@ test('a reciprocal treaty with self also blocks eligibility but unrelated rival 
 test('the bounded objective history stops automatic succession instead of silently discarding captured records',()=>{
  const h=harness();h.add();h.capture();for(let q=100;q<115;q++)h.add({target:{q,r:0,name:'Other '+q},autoNext:false});h.advanceChain();assert.equal(h.app.list().length,core.MAX_OBJECTIVES);assert.equal(h.app.list()[0].autoNext,false);assert.match(h.app.list()[0].message,/Historial/);assert.equal(h.calls.length,0);
 });
+
+test('newer unidentified-owner combat invalidates previous exact zero defense instead of preserving its preference',()=>{
+ const h=harness();assert.equal(h.app.observeReport(h.report({q:20,before:1,lost:1})),false);assert.equal(h.app.observeReport(h.report({q:20,before:100,lost:0,owner:null})),false);
+ h.add();h.capture();h.advanceChain();assert.equal(h.app.list()[1].target.q,11);assert.match(h.app.list()[1].message,/desconocidas/);
+});
+test('older combat from another owner cannot evict newer exact defense evidence for the same coordinate',()=>{
+ const h=harness(),recent=h.report({q:20,before:1,lost:1});assert.equal(h.app.observeReport(recent),false);const old=h.report({q:20,before:100,lost:0,owner:uuid(91)});old.item.takenAt=recent.item.takenAt-1;assert.equal(h.app.observeReport(old),false);
+ h.add();h.capture();h.advanceChain();assert.equal(h.app.list()[1].target.q,20);assert.match(h.app.list()[1].message,/información defensiva exacta/);
+});
+test('an unidentified-owner invalidation remains newer than a replayed previously known report',()=>{
+ const h=harness(),old=h.report({q:20,before:1,lost:1});h.app.observeReport(old);h.app.observeReport(h.report({q:20,before:100,lost:0,owner:null}));h.app.observeReport(old);
+ h.add();h.capture();h.advanceChain();assert.equal(h.app.list()[1].target.q,11);
+});
