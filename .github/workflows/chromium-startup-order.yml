@@ -1,23 +1,12 @@
-name: Chromium startup order diagnostic
+name: Manual complete release gate
 on:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/chromium-startup-order.yml
-      - tests/helpers/browser-process.cjs
-      - tests/helpers/native-browser.cjs
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  diagnostic:
-    name: First real browser - ${{ matrix.first }}
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
-    strategy:
-      fail-fast: false
-      matrix:
-        first: [conquest, native]
+    timeout-minutes: 15
     env:
       OVERLAY_BROWSER_REQUIRED: '1'
     steps:
@@ -25,39 +14,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Provision public native modules without launching browser
+      - name: Provision hash-pinned public native scene modules (read only)
         run: NODE_USE_ENV_PROXY=1 node tools/native-scene-assets.cjs
-      - name: Record launcher identity without browser warmup
-        run: |
-          readlink -f /usr/bin/chromium
-          sha256sum /usr/bin/chromium
-          node --version
-      - name: Run both complete files in the declared order and preserve failures
-        env:
-          FIRST: ${{ matrix.first }}
-        run: |
-          set +e
-          result=0
-          files=(tests/conquest-panel-browser.test.cjs tests/native-galaxy-overlay.test.cjs)
-          if [ "$FIRST" = native ]; then files=(tests/native-galaxy-overlay.test.cjs tests/conquest-panel-browser.test.cjs); fi
-          ordinal=0
-          for file in "${files[@]}"; do
-            ordinal=$((ordinal + 1))
-            echo "DIAGNOSTIC_FILE ordinal=$ordinal file=$file"
-            node --test --test-concurrency=1 --test-timeout=120000 "$file"
-            status=$?
-            echo "DIAGNOSTIC_RESULT ordinal=$ordinal exit=$status"
-            if [ "$status" -ne 0 ]; then result=1; fi
-          done
-          exit "$result"
-      - name: Preserve diagnostic browser evidence
+      - name: Run complete committed release gate including real Chromium overlay frames
+        run: node validate-release.cjs --report "$RUNNER_TEMP/release-validation.json"
+      - name: Preserve browser screenshots, frame measurements and gate report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: chromium-startup-order-${{ matrix.first }}
+          name: offline-overlay-browser-evidence
           path: |
+            /tmp/oldlight-overlay-browser-*/*.png
+            /tmp/oldlight-overlay-browser-*/frames.json
+            /tmp/oldlight-native-browser-*/*.png
+            /tmp/oldlight-native-browser-*/frames.json
             /tmp/oldlight-native-browser-*/browser-startup.json
             /tmp/oldlight-native-browser-*/browser-stderr.log
-            /tmp/oldlight-native-browser-*/frames.json
-            /tmp/oldlight-native-browser-*/*.png
+            ${{ runner.temp }}/release-validation.json
           if-no-files-found: warn

@@ -4487,7 +4487,7 @@
         },
         {
           "file": "tests/browser-process.test.cjs",
-          "name": "silent browser startup still fails at the unchanged fifteen second deadline and cleans its process"
+          "name": "silent browser startup fails at the measured forty second cold deadline and cleans its process"
         }
       ],
       "boundaries": [
@@ -4524,11 +4524,11 @@
           }
         },
         {
-          "scenario": "silent browser startup still fails at the unchanged fifteen second deadline and cleans its process",
+          "scenario": "silent browser startup fails at the measured forty second cold deadline and cleans its process",
           "expected": "Conservar causa y límites, no reintentar/omitir pruebas; limpiar exclusivamente procesos propios y no publicar secretos.",
           "regression": {
             "file": "tests/browser-process.test.cjs",
-            "name": "silent browser startup still fails at the unchanged fifteen second deadline and cleans its process"
+            "name": "silent browser startup fails at the measured forty second cold deadline and cleans its process"
           }
         }
       ],
@@ -4966,6 +4966,59 @@
         "Verificar que el test falla con la política anterior y usa adaptador y panel reales.",
         "Confirmar ausencia de cambios en userscript, telemetría y elecciones previas.",
         "No presentar preparación local como publicación o validación remota."
+      ]
+    },
+    {
+      "id": "measured-cold-browser-startup-budget",
+      "feedback": "El límite15s del harness aborta Chromium frío legítimo observado a31704ms antes de completar2389aserciones; los arranques posteriores son~150ms.",
+      "beforeFail": {
+        "revision": "75b504b7f52c2a34321a3a7d66c43c19f87952e1",
+        "command": "QA_BROWSER_PROCESS_SOURCE=/workspace/oldlight-transfer/browser-process-before-cold-budget.cjs node --test --test-name-pattern='native cold startup accepts' tests/browser-process.test.cjs",
+        "observedFailure": "Con helper anterior el reloj virtual llega15001ms con estadofailed, esperado pending; el endpoint real tardío31704ms fue observado enCI38984164825 yseguido de2389pass.",
+        "evidence": "docs/cold-browser-startup-budget.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/browser-process.test.cjs",
+          "name": "native cold startup accepts the measured late endpoint without retry and still rejects silence at forty seconds"
+        },
+        {
+          "file": "tests/browser-process.test.cjs",
+          "name": "silent browser startup fails at the measured forty second cold deadline and cleans its process"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "Endpointcompleto a31704ms, antesdel presupuesto40s",
+          "expected": "Pendiente después15s,readyuna vez,sinretry,timeoutcancelado ytiempos inmutables.",
+          "regression": {
+            "file": "tests/browser-process.test.cjs",
+            "name": "native cold startup accepts the measured late endpoint without retry and still rejects silence at forty seconds"
+          }
+        },
+        {
+          "scenario": "Silencio al límite40s con proceso real",
+          "expected": "Rechazo acotado,cierre de grupo propio ydiagnóstico failed; no omitir ni reemplazar prueba real.",
+          "regression": {
+            "file": "tests/browser-process.test.cjs",
+            "name": "silent browser startup fails at the measured forty second cold deadline and cleans its process"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Distribución de latencias ycausa exacta del almacenamiento",
+          "reason": "31.704s es una observación legítima;40s con25%marginno espercentilgarantizado. Datos de procesosvivos/hosts distintos no prueban cada dependencia."
+        },
+        {
+          "scope": "Partida real",
+          "reason": "Solo herramienta de pruebas; userscript,telemetría yelecciones no cambian."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Verificar31.704×1.25→40,no copiar45diagnóstico niintroducirwarmup/retry/fallback.",
+        "Reproducir mismohelper/reloj endpointtardío con15fail y40pass, más silencio real40s, salida temprana,señales ycleanup.",
+        "Mantener420global ytodos los tests; verificarCLImanualsoportado exacto enramaantesmain yCIautomático posterior."
       ]
     }
   ]

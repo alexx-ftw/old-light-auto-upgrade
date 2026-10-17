@@ -27,7 +27,7 @@ No sobrescribe un informe existente. No acepta listas de tests, filtros ni opcio
 
 El reporte utiliza resúmenes estructurados por archivo y global del [test runner de Node.js](https://nodejs.org/docs/latest-v24.x/api/test.html#event-testsummary), en lugar de interpretar como éxito cualquier texto impreso por las pruebas. Identifica el commit, el árbol y los hashes exactos de los archivos probados. Los resultados solo son válidos para esos bytes. No reutilices un informe después de modificar fuentes, pruebas, builders o configuración de publicación.
 
-El presupuesto global de la suite completa es420segundos, dimensionado con [tiempos medidos y margen acotado](suite-budget-validation.md). No cambia los límites de Chromium15s, test individual120s ni builder30s. El reporte conserva concurrencia1 y muestras de capacidad/carga; un corte sigue fallando.
+El presupuesto global de la suite completa es420segundos, dimensionado con [tiempos medidos y margen acotado](suite-budget-validation.md). El [helper nativo de Chromium dispone de40s para arranque frío medido](cold-browser-startup-budget.md); el harness overlay separado conserva15s. Siguen120s por defecto de Node, los overrides existentes de Conquista60s y escenas nativas180s, y builder30s. El reporte conserva concurrencia1 y muestras de capacidad/carga; un corte sigue fallando.
 
 ## Qué verifica automáticamente
 

@@ -194,3 +194,7 @@ El experimento de transporte stderr sobre b0ed476 refutó que agrupación/fragme
 ## Política y valor inicial de métricas locales
 
 Que el panel y el adaptador coincidan no garantiza que la política publicada diga lo mismo. Contrastar las tres superficies con elección ausente y elecciones explícitas true/false, y exigir que renderizar no escriba consentimiento. La [regresión](privacy-metrics-default-validation.md) falla con la frase anterior; corregir transparencia no resuelve por sí mismo la aclaración pendiente sobre el valor inicial ni autoriza cambiar recogida de datos.
+
+## Presupuesto de arranque con evidencia tardía legítima
+
+Los15s parecían suficientes en lanzamientos calientes y rechazaban a un Chromium frío que llegó a31704ms ycompletó todas las aserciones. Exigir [evidencia bajo preparación del gate](cold-browser-startup-budget.md), distinguir duración de herramienta y contrato del producto, ydimensionar margen explícito sinprecarga/retry ni eliminar pruebas. La correlación entre fallos de página/lecturas ydemora no identifica por sí sola causa exacta. Revisión debe ejecutar endpointtardío contra helperprevio yactual, silencio real40s/cierre, capacidad420s yCIsoportado de rama antesmain. Mantener como incertidumbre nuevoshosts yno usar un control caliente como aprobación.

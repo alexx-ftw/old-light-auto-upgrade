@@ -4,6 +4,9 @@ const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),{spa
 function sanitize(value){return String(value).replace(/\b(?:https?|wss?):\/\/[^\s]+/gi,'<url>').replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|ph[ctx]_[A-Za-z0-9_-]+)\b/g,'<redacted>').replace(/\bBearer\s+[^\s]+/gi,'Bearer <redacted>').replace(/(["']?\b(?:token|authorization|password|secret|api[_-]?key)\b["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\r\n]*)/gi,'$1<redacted>');}
 
 function byteBound(value,max){const bytes=Buffer.from(value,'utf8');if(bytes.length<=max)return value;let end=max;while(end>0&&(bytes[end]&192)===128)end--;return bytes.subarray(0,end).toString('utf8');}
+// A measured cold launch needed31.704s before all UI checks passed.
+// 25% headroom rounds39.630s to40s; no warmup, retry or fallback.
+const STARTUP_TIMEOUT_MS=40000;
 let launchOrdinal=0;
 function launch(executable,args,artifacts){
  let realpath=null;try{realpath=fs.realpathSync(executable);}catch{}
@@ -30,11 +33,11 @@ function launch(executable,args,artifacts){
  const endpoint=new Promise((resolve,reject)=>{
   const finish=(error,url)=>{if(done)return;done=true;clearTimeout(timer);metadata.status=error?'failed':'ready';metadata.outcomeAtMs=elapsed();if(!error)metadata.readyAfterMs=metadata.outcomeAtMs;persist();logSummary('settled');error?reject(error):resolve(url);};
   const fail=reason=>finish(Error(reason+'; executable='+executable+'; stderr='+stderrText().slice(-2000)+'; diagnostics='+path.join(artifacts,'browser-startup.json')));
-  timer=setTimeout(()=>fail('Native Chromium startup timeout'),15000);
+  timer=setTimeout(()=>fail('Native Chromium startup timeout'),STARTUP_TIMEOUT_MS);
   child.once('error',error=>fail('Native Chromium launch failed: '+sanitize(error.message)));
   child.once('exit',(code,signalValue)=>{exitCode=code;exitSignal=signalValue;if(!done)fail('Native Chromium exited before DevTools: code='+code+' signal='+signalValue);});
   child.stderr.on('data',data=>{if(!done&&metadata.firstStderrAfterMs===null)metadata.firstStderrAfterMs=elapsed();const text=String(data);if(stderr.length+text.length>16000)stderrTruncated=true;stderr=(stderr+text).slice(0,16000);if(!done){endpointWindow=(endpointWindow+text).slice(-4096);const match=/DevTools listening on (ws:\/\/[^\s]+)[\r\n]/.exec(endpointWindow);if(match){finish(null,match[1]);endpointWindow='';}}});
  });
  return {endpoint,close,child};
 }
-module.exports={launch,sanitize};
+module.exports={launch,sanitize,STARTUP_TIMEOUT_MS};
