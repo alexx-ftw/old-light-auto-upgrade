@@ -5452,6 +5452,91 @@
         "Contrastar timestamp por coordenada antes de validar dueño, conflictos a igual fecha y marcador de incertidumbre.",
         "Conservar routing legado y límites de caché/scope sin nueva recopilación o permiso de ataque."
       ]
+    },
+    {
+      "id": "drive-restore-preserve-confirmed-unapplied-intent",
+      "feedback": "Un rechazo previo de restauración consumía un respaldo automático pendiente sin aplicar datos. Los códigos de error no prueban ausencia de aplicación.",
+      "beforeFail": {
+        "revision": "652379604c530ccecc4633187cfb87f192ed2158",
+        "command": "node --test tests/drive-reconnect.test.cjs",
+        "observedFailure": "Harness integrado sin cambios productivos:22 PASS,1 FAIL; dirty=false esperado true tras busy, applied=0 y una descarga.",
+        "evidence": "docs/1.17.34-drive-restore-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/drive-reconnect.test.cjs",
+          "name": "a confirmed pre-application restore rejection preserves the previous automatic backup intent"
+        },
+        {
+          "file": "tests/drive-reconnect.test.cjs",
+          "name": "a successful restore consumes the obsolete automatic backup intent"
+        },
+        {
+          "file": "tests/drive-reconnect.test.cjs",
+          "name": "a failure after application starts never revives the obsolete automatic backup intent"
+        },
+        {
+          "file": "tests/drive-reconnect.test.cjs",
+          "name": "a lost restore reply cannot revive old intent or retry application automatically"
+        },
+        {
+          "file": "tests/drive-reconnect.test.cjs",
+          "name": "new local changes during an uncertain restore remain pending and blocked"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "a confirmed pre-application restore rejection preserves the previous automatic backup intent",
+          "expected": "Conservar pendiente y bloqueo sin aplicación.",
+          "regression": {
+            "file": "tests/drive-reconnect.test.cjs",
+            "name": "a confirmed pre-application restore rejection preserves the previous automatic backup intent"
+          }
+        },
+        {
+          "scenario": "a successful restore consumes the obsolete automatic backup intent",
+          "expected": "Consumir intención anterior al restaurar.",
+          "regression": {
+            "file": "tests/drive-reconnect.test.cjs",
+            "name": "a successful restore consumes the obsolete automatic backup intent"
+          }
+        },
+        {
+          "scenario": "a failure after application starts never revives the obsolete automatic backup intent",
+          "expected": "No revivir intención anterior con resultado incierto.",
+          "regression": {
+            "file": "tests/drive-reconnect.test.cjs",
+            "name": "a failure after application starts never revives the obsolete automatic backup intent"
+          }
+        },
+        {
+          "scenario": "a lost restore reply cannot revive old intent or retry application automatically",
+          "expected": "Una aplicación y ninguna repetición automática.",
+          "regression": {
+            "file": "tests/drive-reconnect.test.cjs",
+            "name": "a lost restore reply cannot revive old intent or retry application automatically"
+          }
+        },
+        {
+          "scenario": "new local changes during an uncertain restore remain pending and blocked",
+          "expected": "Mantener nuevo cambio pendiente y bloqueado.",
+          "regression": {
+            "file": "tests/drive-reconnect.test.cjs",
+            "name": "new local changes during an uncertain restore remain pending and blocked"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Google real e instalación del usuario",
+          "reason": "Pruebas offline con puentes y datos sintéticos; no se opera en cuentas ni partida."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Verificar que not-applied solo se emite antes de llamar applyBackup, sin inferirlo del código.",
+        "Revisar generación/cuenta/configuración y cambios nuevos durante la operación.",
+        "Contrastar recuperación explícita, deduplicación existente y ausencia de reintentos automáticos de restauración."
+      ]
     }
   ]
 }

@@ -43,7 +43,7 @@ function ports() {
 }
 function node() { return Object.assign(eventTarget(), { value: '', checked: false, disabled: false, hidden: false, textContent: '', dataset: {},
   classList: { toggle() {}, add() {}, remove() {} }, replaceChildren() {}, append() {}, remove() {}, focus() {}, click() {}, setAttribute() {} }); }
-function setup({ storedRoute, storageFailure = false } = {}) {
+function setup({ storedRoute, storageFailure = false, applyBackup = () => {}, fetchBackup } = {}) {
   const stored = new Map(storedRoute ? [[ROUTE, storedRoute]] : []);
   const gm = new Map([['old-light-auto-upgrade:drive:v1', { clientId: CLIENT, autoBackup: false, autoSync: false }]]);
   const gameRef = {}, driveRef = { closed: false, focus() {} };
@@ -61,10 +61,10 @@ function setup({ storedRoute, storageFailure = false } = {}) {
         setItem: (key, value) => { if (storageFailure) throw Error('storage'); stored.set(key, value); },
         removeItem: key => { if (storageFailure) throw Error('storage'); stored.delete(key); } },
       __get: (key, fallback) => gm.get(key) ?? fallback,
-      __set: (key, value) => gm.set(key, value) });
+      __set: (key, value) => gm.set(key, value), __apply: applyBackup });
     let body = source.slice(source.indexOf('  function createDriveBackup('), source.indexOf('  // END DRIVE BACKUP'));
     body = body.replace('return { mount, notifyChanged', 'return { testing: { openCompanion, closeSession, session: () => session }, mount, notifyChanged');
-    vm.runInContext(body + `\nthis.api = createDriveBackup({ getBackup: () => ({}), applyBackup() {}, gmGetValue: __get, gmSetValue: __set });`, ctx);
+    vm.runInContext(body + `\nthis.api = createDriveBackup({ getBackup: () => ({}), applyBackup: __apply, gmGetValue: __get, gmSetValue: __set });`, ctx);
     game = { window, time, api: ctx.api }; return game;
   }
   function loadDrive() {
@@ -75,13 +75,23 @@ function setup({ storedRoute, storageFailure = false } = {}) {
     const nonce = game.api.testing.session().nonce;
     const ctx = vm.createContext({ ...common, ...time, window, document,
       location: { origin: DRIVE, pathname: '/old-light-auto-upgrade/drive.html', hash: '#bridge=' + nonce, search: '' }, history: { replaceState() {} },
-      navigator: {}, fetch() { throw Error('Network must not be used in reconnect tests'); } });
+      navigator: {}, fetch: fetchBackup || (() => { throw Error('Network must not be used in reconnect tests'); }) });
     const instrumented = companionSource.replace('  beginBootstrap();', `
       globalThis.testing = {
         authorize() { token = 'test-memory-token'; account = { id: 'test-user' }; expiresAt = Date.now() + 3600000;
           expirationTimer = setTimeout(expireToken, 3600000); status('connected'); },
-        state: () => ({ hasToken: Boolean(token), authorized: isAuthorized(), bridgeAlive, configReady, statusCode, connectionCode, authPending, dirty, autoTimer }),
+        state: () => ({ hasToken: Boolean(token), authorized: isAuthorized(), bridgeAlive, configReady, statusCode, connectionCode, authPending, dirty, dirtyOwner, autoBlocked, autoTimer }),
         lose: () => loseBridge(), expire: expireToken,
+        async prepareRestore(backup) {
+          const sha256 = await hashBackup(backup);
+          const selected = { id: 'copy1', appProperties: { backupId: 'fixture1', sha256 } };
+          copies.set(selected.id, selected); ui.backups.value = selected.id;
+          return { format: COPY_FORMAT, schemaVersion: 1, backupId: 'fixture1', sha256,
+            createdAt: '2026-10-17T00:00:00Z', backup };
+        },
+        restore: () => operate(restoreCopy),
+        unblock: () => { autoBlocked = false; scheduleAuto(); },
+
       };
       beginBootstrap();`);
     drive = { window, time, nodes };
@@ -91,8 +101,8 @@ function setup({ storedRoute, storageFailure = false } = {}) {
   return { loadGame, loadDrive, get game() { return game; }, get drive() { return drive; }, stored, gm, gameRef, driveRef,
     opened: () => opened, oauthRequests: () => oauthRequests };
 }
-async function connected() {
-  const env = setup(); env.game.api.testing.openCompanion(); env.loadDrive(); await flush();
+async function connected(options) {
+  const env = setup(options); env.game.api.testing.openCompanion(); env.loadDrive(); await flush();
   assert.equal(env.drive.api.state().bridgeAlive, true);
   env.drive.api.authorize(); await flush(); assert.equal(env.game.api.getStatus().code, 'connected'); return env;
 }
@@ -234,4 +244,75 @@ test('a pending automatic backup gets a real new timer after recovery even with 
   env.drive.time.fireIntervals(3000); await flush();
   assert.equal(env.drive.api.state().dirty, true); assert.equal(env.drive.api.state().authorized, true);
   assert.equal(env.drive.time.has(env.drive.api.state().autoTimer), true);
+});
+
+async function restoreFixture(applyBackup) {
+  let envelope, reads = 0;
+  const env = await connected({ applyBackup, fetchBackup: async () => {
+    reads++; return new Response(JSON.stringify(envelope), { headers: { 'content-type': 'application/json' } });
+  } });
+  envelope = await env.drive.api.prepareRestore({ format: 'old-light-auto-upgrade-backup', schemaVersion: 1,
+    scriptVersion: '1.17.33', exportedAt: '2026-10-17T00:00:00Z', settings: {}, notifications: {}, drive: {} });
+  env.game.api.importConfig({ ...env.game.api.exportConfig(), autoBackup: true, autoSync: false }); await flush();
+  env.game.api.notifyChanged(); await flush();
+  assert.equal(env.drive.api.state().dirty, true);
+  return { env, reads: () => reads };
+}
+test('a confirmed pre-application restore rejection preserves the previous automatic backup intent', async () => {
+  let applied = 0;
+  const { env, reads } = await restoreFixture(() => { applied++; });
+  env.game.api.testing.session().serving = true;
+  await env.drive.api.restore(); await flush();
+  assert.equal(applied, 0); assert.equal(reads(), 1);
+  assert.equal(env.drive.api.state().dirty, true);
+  assert.equal(env.drive.api.state().autoBlocked, true);
+  assert.equal(env.drive.time.has(env.drive.api.state().autoTimer), false);
+  env.game.api.testing.session().serving = false;
+  env.drive.api.unblock();
+  assert.equal(env.drive.time.has(env.drive.api.state().autoTimer), true);
+});
+test('a successful restore consumes the obsolete automatic backup intent', async () => {
+  let applied = 0;
+  const { env } = await restoreFixture(() => { applied++; });
+  await env.drive.api.restore(); await flush();
+  assert.equal(applied, 1); assert.equal(env.drive.api.state().dirty, false);
+  assert.equal(env.drive.api.state().statusCode, 'restored');
+});
+test('a failure after application starts never revives the obsolete automatic backup intent', async () => {
+  let applied = 0;
+  const { env } = await restoreFixture(() => { applied++; throw Object.assign(Error('after apply'), { code: 'busy' }); });
+  await env.drive.api.restore(); await flush();
+  assert.equal(applied, 1); assert.equal(env.drive.api.state().dirty, false);
+  assert.equal(env.drive.api.state().autoBlocked, true);
+  assert.equal(env.drive.time.has(env.drive.api.state().autoTimer), false);
+});
+test('a lost restore reply cannot revive old intent or retry application automatically', async () => {
+  let applied = 0, started;
+  const began = new Promise(resolve => { started = resolve; });
+  const { env, reads } = await restoreFixture(() => { applied++; started(); return new Promise(() => {}); });
+  const restoring = env.drive.api.restore();
+  await began;
+  assert.equal(applied, 1);
+  env.drive.time.jump(15001); env.drive.time.fireTimeouts(); await restoring; await flush();
+  assert.equal(env.drive.api.state().statusCode, 'timeout');
+  assert.equal(env.drive.api.state().dirty, false);
+  env.drive.time.jump(60000); env.drive.time.fireTimeouts(); await flush();
+  assert.equal(applied, 1); assert.equal(reads(), 1);
+});
+test('new local changes during an uncertain restore remain pending and blocked', async () => {
+  let rejectApply, started;
+  const began = new Promise(resolve => { started = resolve; });
+  const { env } = await restoreFixture(() => new Promise((_, reject) => { rejectApply = reject; started(); }));
+  const restoring = env.drive.api.restore();
+  await began;
+  assert.equal(typeof rejectApply, 'function');
+  // This is an independent private-bridge change, delivered while apply is pending.
+  const port = env.game.api.testing.session().port;
+  port.postMessage({ protocol: PROTOCOL, type: 'settings-changed', backupChange: true, sharedChanged: false });
+  await flush();
+  rejectApply(Error('post application failure'));
+  await restoring; await flush();
+  assert.equal(env.drive.api.state().dirty, true);
+  assert.equal(env.drive.api.state().autoBlocked, true);
+  assert.equal(env.drive.time.has(env.drive.api.state().autoTimer), false);
 });

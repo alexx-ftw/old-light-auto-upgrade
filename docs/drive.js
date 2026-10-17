@@ -467,7 +467,7 @@
     const id = `request_${++requestCounter}`;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => { pending.delete(id); reject(error('timeout')); }, 15000);
-      pending.set(id, { resolve, reject, timeout });
+      pending.set(id, { resolve, reject, timeout, type });
       if (!post({ type, id, revision: configRevision, ...fields })) {
         clearTimeout(timeout); pending.delete(id); reject(error('bridge_lost'));
       }
@@ -551,7 +551,13 @@
       if (!item) return;
       pending.delete(message.id); clearTimeout(item.timeout);
       if (message.ok === true) item.resolve(message);
-      else item.reject(error(Object.hasOwn(STATUS, message.error) ? message.error : 'failed'));
+      else {
+        const rejected = error(Object.hasOwn(STATUS, message.error) ? message.error : 'failed');
+        if (item.type === 'apply-backup' && message.applicationOutcome === 'not-applied') {
+          rejected.applicationOutcome = 'not-applied';
+        }
+        item.reject(rejected);
+      }
       return;
     }
     if (message.type === 'config') {
@@ -831,9 +837,23 @@
     const actualHash = await hashBackup(backup);
     assertCurrent(expected);
     if (actualHash !== envelope.sha256) throw error('invalid_backup');
+    const previousDirty = dirty;
+    const previousOwner = dirtyOwner;
+    const previousAccount = accountKey();
     dirty = false;
     clearTimeout(autoTimer);
-    await rpc('apply-backup', { json });
+    try { await rpc('apply-backup', { json }); }
+    catch (caught) {
+      // Only the helper can prove that application never started. Error codes,
+      // timeouts and lost replies cannot establish that the old settings remain.
+      if (caught.applicationOutcome === 'not-applied' && previousDirty &&
+          expected === generation && bridgeAlive && isAuthorized() &&
+          config.autoBackup && accountKey() === previousAccount && previousOwner === previousAccount) {
+        dirty = true;
+        dirtyOwner = previousOwner;
+      }
+      throw caught;
+    }
     // The imported configuration may deliberately change the OAuth client ID.
     // Its successful application is still acknowledged even if that clears auth.
     if (!bridgeAlive) throw error('bridge_lost');

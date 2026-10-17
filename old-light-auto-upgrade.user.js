@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.33
+// @version      1.17.34
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -6386,7 +6386,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.33';
+  const SCRIPT_VERSION = '1.17.34';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -8113,6 +8113,10 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.34', title: 'Conservar respaldo pendiente tras rechazo de restauración', changes: [
+        'Conserva el respaldo automático pendiente cuando el Helper demuestra que no inició la restauración.',
+        'Los errores inciertos siguen bloqueados; no se reintenta automáticamente una restauración.',
+      ] },
       { version: '1.17.33', title: 'Continuar conquista tras una captura confirmada', changes: [
         'Una cadena autorizada selecciona el siguiente sistema atacable observado tras confirmar propiedad con un censo posterior a la captura.',
         'Prioriza defensas exactas recientes del mismo dueño, menor defensa por tipo cuando es comparable y distancia hexagonal desde la captura; desconocido no significa cero.',
@@ -18064,7 +18068,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const id = `request_${++requestCounter}`;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => { pending.delete(id); reject(error('timeout')); }, 15000);
-      pending.set(id, { resolve, reject, timeout });
+      pending.set(id, { resolve, reject, timeout, type });
       if (!post({ type, id, revision: configRevision, ...fields })) {
         clearTimeout(timeout); pending.delete(id); reject(error('bridge_lost'));
       }
@@ -18148,7 +18152,13 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       if (!item) return;
       pending.delete(message.id); clearTimeout(item.timeout);
       if (message.ok === true) item.resolve(message);
-      else item.reject(error(Object.hasOwn(STATUS, message.error) ? message.error : 'failed'));
+      else {
+        const rejected = error(Object.hasOwn(STATUS, message.error) ? message.error : 'failed');
+        if (item.type === 'apply-backup' && message.applicationOutcome === 'not-applied') {
+          rejected.applicationOutcome = 'not-applied';
+        }
+        item.reject(rejected);
+      }
       return;
     }
     if (message.type === 'config') {
@@ -18428,9 +18438,23 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
     const actualHash = await hashBackup(backup);
     assertCurrent(expected);
     if (actualHash !== envelope.sha256) throw error('invalid_backup');
+    const previousDirty = dirty;
+    const previousOwner = dirtyOwner;
+    const previousAccount = accountKey();
     dirty = false;
     clearTimeout(autoTimer);
-    await rpc('apply-backup', { json });
+    try { await rpc('apply-backup', { json }); }
+    catch (caught) {
+      // Only the helper can prove that application never started. Error codes,
+      // timeouts and lost replies cannot establish that the old settings remain.
+      if (caught.applicationOutcome === 'not-applied' && previousDirty &&
+          expected === generation && bridgeAlive && isAuthorized() &&
+          config.autoBackup && accountKey() === previousAccount && previousOwner === previousAccount) {
+        dirty = true;
+        dirtyOwner = previousOwner;
+      }
+      throw caught;
+    }
     // The imported configuration may deliberately change the OAuth client ID.
     // Its successful application is still acknowledged even if that clears auth.
     if (!bridgeAlive) throw error('bridge_lost');
@@ -19235,13 +19259,15 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       if (!['get-backup', 'apply-backup', 'get-sync', 'merge-sync', 'set-config', 'remember-account', 'store-authorization', 'check-authorization'].includes(message.type)) return;
       if (typeof message.id !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(message.id)) return;
       if (message.revision !== configRevision) {
-        send(current, { type: 'reply', id: message.id, ok: false, error: 'expired' });
+        send(current, { type: 'reply', id: message.id, ok: false, error: 'expired',
+          ...(message.type === 'apply-backup' ? { applicationOutcome: 'not-applied' } : {}) });
         return;
       }
       if (message.type === 'check-authorization' || current.authId && message.type !== 'store-authorization') {
         const auth = readAuthorization();
         if (!auth || auth.id !== current.authId || message.type === 'check-authorization' && message.authorizationId !== auth.id) {
-          send(current, { type: 'reply', id: message.id, ok: false, error: 'expired' });
+          send(current, { type: 'reply', id: message.id, ok: false, error: 'expired',
+          ...(message.type === 'apply-backup' ? { applicationOutcome: 'not-applied' } : {}) });
           if (current.local || current.expiresAt > Date.now()) closeSession('expired', { preserveAuthorization: true });
           else current.authId = null;
           return;
@@ -19304,10 +19330,12 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         return;
       }
       if (current.serving) {
-        send(current, { type: 'reply', id: message.id, ok: false, error: 'busy' });
+        send(current, { type: 'reply', id: message.id, ok: false, error: 'busy',
+          ...(message.type === 'apply-backup' ? { applicationOutcome: 'not-applied' } : {}) });
         return;
       }
       current.serving = true;
+      let applicationStarted = false;
       try {
         if (message.type === 'get-sync' || message.type === 'merge-sync') {
           if (!config.autoSync || !preferenceSync) throw Object.assign(new Error('busy'), { code: 'busy' });
@@ -19316,7 +19344,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
         } else if (message.type === 'get-backup') {
           const value = await getBackup();
           if (message.revision !== configRevision) {
-            send(current, { type: 'reply', id: message.id, ok: false, error: 'expired' });
+            send(current, { type: 'reply', id: message.id, ok: false, error: 'expired',
+          ...(message.type === 'apply-backup' ? { applicationOutcome: 'not-applied' } : {}) });
             return;
           }
           const json = JSON.stringify(value);
@@ -19326,6 +19355,7 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
           const value = parseBackup(message.json);
           if (current !== session || destroyed) return;
           applying = true;
+          applicationStarted = true;
           await applyBackup(value);
           suppressChangedUntil = Date.now() + 1000;
           send(current, { type: 'reply', id: message.id, ok: true });
@@ -19334,7 +19364,8 @@ function createMissionTargetResolver({ getContext, canAct = () => true } = {}) {
       } catch (cause) {
         const syncRequest = ['get-sync', 'merge-sync'].includes(message.type);
         const code = Object.hasOwn(LABELS, cause?.code) ? cause.code : syncRequest ? 'invalid_sync' : 'invalid_backup';
-        send(current, { type: 'reply', id: message.id, ok: false, error: code });
+        send(current, { type: 'reply', id: message.id, ok: false, error: code,
+          ...(message.type === 'apply-backup' && !applicationStarted ? { applicationOutcome: 'not-applied' } : {}) });
         report(code);
       } finally {
         current.serving = false;
