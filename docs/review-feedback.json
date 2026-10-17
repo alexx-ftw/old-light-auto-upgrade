@@ -5662,6 +5662,179 @@
         "No alterar claves, consentimiento, borrado explícito ni exportar datos ajenos.",
         "Contrastar actualización una vez, generación revocada, tiempos y reintentos; no presentar legacy/CAS como resueltos."
       ]
+    },
+    {
+      "id": "backup-incomplete-rollback-durable-pause",
+      "feedback": "Rollback incompleto pausaba solo en memoria y dejaba enabledtrue guardado; recargar reactivaba después del mensaje de pausa.",
+      "beforeFail": {
+        "revision": "43ab2c43440fc158371176568a2db5b9b4f850c5",
+        "command": "node --test /tmp/oldlight-backup-rollback-before/tests/backup-rollback-pause.test.cjs",
+        "observedFailure": "Mismo archivo de12casos contra fuente43ab:4PASS/8FAIL; memoriafalse pero bytes yrecargatrue. Candidata12PASS.",
+        "evidence": "docs/1.17.36-backup-rollback-pause-validation.md"
+      },
+      "regressions": [
+        {
+          "file": "tests/backup-rollback-pause.test.cjs",
+          "name": "incomplete backup rollback durably pauses before reload while preserving prior preferences"
+        },
+        {
+          "file": "tests/backup-rollback-pause.test.cjs",
+          "name": "a complete backup rollback retains the exact previous bytes and original enabled choice"
+        },
+        {
+          "file": "tests/backup-rollback-pause.test.cjs",
+          "name": "a successful backup import still applies the requested preferences and reports its change"
+        },
+        {
+          "file": "tests/backup-rollback-pause.test.cjs",
+          "name": "rollback rendering failure cannot prevent the durable pause or leave import exclusion active"
+        },
+        {
+          "file": "tests/backup-rollback-pause.test.cjs",
+          "name": "a failing imperial suspend cannot prevent a durable Helper pause"
+        },
+        {
+          "file": "tests/backup-rollback-pause.test.cjs",
+          "name": "future backup schema is rejected before writes, cancellation or configuration application"
+        },
+        {
+          "file": "tests/backup-rollback-pause.test.cjs",
+          "name": "malformed imported activation cannot apply a backup or overwrite prior preferences"
+        },
+        {
+          "file": "tests/backup-rollback-pause.test.cjs",
+          "name": "incomplete rollback from absent settings still creates a durable paused configuration"
+        },
+        {
+          "file": "tests/backup-rollback-pause.test.cjs",
+          "name": "failed pause readback never claims a durable stop even when the write may have succeeded"
+        },
+        {
+          "file": "tests/backup-rollback-pause.test.cjs",
+          "name": "durable rollback pause preserves unknown stored preference fields for future versions"
+        },
+        {
+          "file": "tests/backup-rollback-pause.test.cjs",
+          "name": "an unconfirmed durable pause warns session only when its write will ignore"
+        },
+        {
+          "file": "tests/backup-rollback-pause.test.cjs",
+          "name": "an unconfirmed durable pause warns session only when its write will throw"
+        }
+      ],
+      "boundaries": [
+        {
+          "scenario": "incomplete backup rollback durably pauses before reload while preserving prior preferences",
+          "expected": "Pausa comprobada si rollback incompleto; advertencia si no se confirma; preservación de preferencias y controles de éxito.",
+          "regression": {
+            "file": "tests/backup-rollback-pause.test.cjs",
+            "name": "incomplete backup rollback durably pauses before reload while preserving prior preferences"
+          }
+        },
+        {
+          "scenario": "a complete backup rollback retains the exact previous bytes and original enabled choice",
+          "expected": "Pausa comprobada si rollback incompleto; advertencia si no se confirma; preservación de preferencias y controles de éxito.",
+          "regression": {
+            "file": "tests/backup-rollback-pause.test.cjs",
+            "name": "a complete backup rollback retains the exact previous bytes and original enabled choice"
+          }
+        },
+        {
+          "scenario": "a successful backup import still applies the requested preferences and reports its change",
+          "expected": "Pausa comprobada si rollback incompleto; advertencia si no se confirma; preservación de preferencias y controles de éxito.",
+          "regression": {
+            "file": "tests/backup-rollback-pause.test.cjs",
+            "name": "a successful backup import still applies the requested preferences and reports its change"
+          }
+        },
+        {
+          "scenario": "rollback rendering failure cannot prevent the durable pause or leave import exclusion active",
+          "expected": "Pausa comprobada si rollback incompleto; advertencia si no se confirma; preservación de preferencias y controles de éxito.",
+          "regression": {
+            "file": "tests/backup-rollback-pause.test.cjs",
+            "name": "rollback rendering failure cannot prevent the durable pause or leave import exclusion active"
+          }
+        },
+        {
+          "scenario": "a failing imperial suspend cannot prevent a durable Helper pause",
+          "expected": "Pausa comprobada si rollback incompleto; advertencia si no se confirma; preservación de preferencias y controles de éxito.",
+          "regression": {
+            "file": "tests/backup-rollback-pause.test.cjs",
+            "name": "a failing imperial suspend cannot prevent a durable Helper pause"
+          }
+        },
+        {
+          "scenario": "future backup schema is rejected before writes, cancellation or configuration application",
+          "expected": "Pausa comprobada si rollback incompleto; advertencia si no se confirma; preservación de preferencias y controles de éxito.",
+          "regression": {
+            "file": "tests/backup-rollback-pause.test.cjs",
+            "name": "future backup schema is rejected before writes, cancellation or configuration application"
+          }
+        },
+        {
+          "scenario": "malformed imported activation cannot apply a backup or overwrite prior preferences",
+          "expected": "Pausa comprobada si rollback incompleto; advertencia si no se confirma; preservación de preferencias y controles de éxito.",
+          "regression": {
+            "file": "tests/backup-rollback-pause.test.cjs",
+            "name": "malformed imported activation cannot apply a backup or overwrite prior preferences"
+          }
+        },
+        {
+          "scenario": "incomplete rollback from absent settings still creates a durable paused configuration",
+          "expected": "Pausa comprobada si rollback incompleto; advertencia si no se confirma; preservación de preferencias y controles de éxito.",
+          "regression": {
+            "file": "tests/backup-rollback-pause.test.cjs",
+            "name": "incomplete rollback from absent settings still creates a durable paused configuration"
+          }
+        },
+        {
+          "scenario": "failed pause readback never claims a durable stop even when the write may have succeeded",
+          "expected": "Pausa comprobada si rollback incompleto; advertencia si no se confirma; preservación de preferencias y controles de éxito.",
+          "regression": {
+            "file": "tests/backup-rollback-pause.test.cjs",
+            "name": "failed pause readback never claims a durable stop even when the write may have succeeded"
+          }
+        },
+        {
+          "scenario": "durable rollback pause preserves unknown stored preference fields for future versions",
+          "expected": "Pausa comprobada si rollback incompleto; advertencia si no se confirma; preservación de preferencias y controles de éxito.",
+          "regression": {
+            "file": "tests/backup-rollback-pause.test.cjs",
+            "name": "durable rollback pause preserves unknown stored preference fields for future versions"
+          }
+        },
+        {
+          "scenario": "an unconfirmed durable pause warns session only when its write will ignore",
+          "expected": "Pausa comprobada si rollback incompleto; advertencia si no se confirma; preservación de preferencias y controles de éxito.",
+          "regression": {
+            "file": "tests/backup-rollback-pause.test.cjs",
+            "name": "an unconfirmed durable pause warns session only when its write will ignore"
+          }
+        },
+        {
+          "scenario": "an unconfirmed durable pause warns session only when its write will throw",
+          "expected": "Pausa comprobada si rollback incompleto; advertencia si no se confirma; preservación de preferencias y controles de éxito.",
+          "regression": {
+            "file": "tests/backup-rollback-pause.test.cjs",
+            "name": "an unconfirmed durable pause warns session only when its write will throw"
+          }
+        }
+      ],
+      "qaGaps": [
+        {
+          "scope": "Almacenamiento completamente averiado o escritor concurrente posterior",
+          "reason": "No se puede confirmar persistencia ni ofrecer CAS; se mantiene la pausa de sesión y advertencia."
+        },
+        {
+          "scope": "Sesión real, UI/cleanup que lance y lector local permisivo previo",
+          "reason": "Pruebas VM sintéticas; callbacks pueden reemplazar error exterior después del stop. readSettings malformado es seguimiento separado, no resuelto aquí."
+        }
+      ],
+      "independentReviewCriteria": [
+        "Verificar pausa antes de UI y persistencia/readback sin settingsChanged con estado mixto.",
+        "Conservar bytes completos en rollback exitoso y campos desconocidos al guardar pausa; no alterar consentimiento/telemetría.",
+        "Probar fallo/noop/readfailure, suspend/render, esquema futuro e importación inválida sin efectos; distinguir garantías de recarga y límites."
+      ]
     }
   ]
 }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Old Light Auto Upgrade
 // @namespace    old-light-auto-upgrade
-// @version      1.17.35
+// @version      1.17.36
 // @description  Gestión imperial coordinada de sistemas propios, objetivos globales de flota, roles y panel de recursos/colas. Depot necesario antes que flota, reserva de recursos y ETA, mejoras por prioridad, presets, flotas editables en misiones y campañas, reintentos con +1 Marauder, objetivos de nivel, informes y avisos, autoguardado, copias y sincronización automática bidireccional de ajustes por Drive y métricas locales opcionales de uso y errores. Con actualización automática.
 // @match        https://oldlight.io/*
 // @homepageURL  https://github.com/alexx-ftw/old-light-auto-upgrade
@@ -6400,7 +6400,7 @@ return Object.freeze({ encode });
   // Nunca elimina hidden/disabled; la construcción usa los controles nativos.
   // Los informes se consultan mediante GET, sin marcarlos como leídos.
 
-  const SCRIPT_VERSION = '1.17.35';
+  const SCRIPT_VERSION = '1.17.36';
   const KEY = 'old-light-auto-upgrade:v1';
   const HOST_ID = 'old-light-auto-upgrade-panel';
   const PANEL = '#hud-panel-structures';
@@ -8128,6 +8128,10 @@ return Object.freeze({ encode });
   // Keep the newest entry aligned with SCRIPT_VERSION when preparing a release.
   function helperChangelogEntries() {
     return [
+      { version: '1.17.36', title: 'Pausa comprobada tras recuperación incompleta de copia', changes: [
+        'Guarda y comprueba la pausa antes de reconstruir la interfaz si falla la recuperación de una importación.',
+        'Conserva las preferencias anteriores, incluidos campos desconocidos, y avisa si la pausa solo puede confirmarse en esta sesión.',
+      ] },
       { version: '1.17.35', title: 'Protección local entre versiones compatibles', changes: [
         'Detiene el registro local de una versión anterior que detecta contadores de una versión posterior.',
         'Indica cuándo recargar la pestaña y conserva el consentimiento y el borrado explícito.',
@@ -9239,16 +9243,32 @@ return Object.freeze({ encode });
       try { attackRetry.restoreCheckpoint(previous.attackRetriesCheckpoint); } catch { restored = false; }
       try { if (previous.empire && empireController) empireController.setConfig(previous.empire); } catch { restored = false; }
       settings = previous.settings;
+      let pauseSaved = false;
+      if (!restored) {
+        settings = { ...settings, enabled: false };
+        try { empireController?.suspend(2147483647); } catch { /* The Helper hold must still be saved. */ }
+        // Stop before rendering: a failed UI recovery must not bypass the hold.
+        // Read back the exact bytes; a silent no-op is not a durable pause.
+        try {
+          let stored = settings;
+          try {
+            const parsed = previous.raw === null ? null : JSON.parse(previous.raw);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) stored = parsed;
+          } catch { /* Preserve the last valid in-memory preferences if raw bytes were corrupt. */ }
+          const paused = JSON.stringify({ ...stored, enabled: false });
+          localStorage.setItem(KEY, paused);
+          pauseSaved = localStorage.getItem(KEY) === paused;
+        } catch { /* Keep this session paused and disclose the reload risk. */ }
+        error = pauseSaved
+          ? 'La importación no pudo restaurar todos los ajustes. Automatización pausada; revisa la configuración antes de reactivarla.'
+          : 'La importación no pudo restaurar todos los ajustes. Pausa solo en esta sesión: no pudo confirmarse el guardado. Revisa el almacenamiento antes de recargar.';
+      }
       restoreNumericInputs();
       syncSettingsTabs();
       layoutHelper();
-      if (!restored) {
-        settings.enabled = false;
-        error = 'La importación no pudo restaurar todos los ajustes. Revisa la configuración.';
-      }
       throw backupError(restored
         ? 'No se pudo guardar la copia. Se han conservado los ajustes anteriores.'
-        : 'La importación falló y no pudo restaurar todos los ajustes. Automatización pausada.');
+        : error);
     } finally {
       importingBackup = false;
       attackRetry.cleanupCancelledJobs();

@@ -230,3 +230,7 @@ Un código busy o invalid_backup no demuestra que la importación no comenzara: 
 ## Métricas locales entre versiones compatibles1.17.35
 
 Reiniciar por versión no autoriza que un escritor antiguo borre repetidamente el informe posterior. Exigir secuencia entre dos instancias y control de misma versión, comparación numérica y opt-out desde la instancia bloqueada. No confundir protección cooperativa secuencial con reparación del código legacy ya cargado o CAS. Una clave nueva también cambia qué bytes puede borrar el opt-out legacy: revisar ese contrato antes de proponer migraciones. [Auditoría y límites](1.17.35-local-metrics-version-validation.md).
+
+## Rollback incompleto y recarga1.17.36
+
+Una pausa en memoria no protege después de recargar si los bytes previos siguen enabledtrue. Exigir readSettings productivo tras el fallo, readback de escritura y controles de no-op/readfailure; establecer stop antes de callbacks de UI que puedan lanzar. Cambiar activación no autoriza eliminar campos futuros del objeto guardado. Mantener límites de almacenamiento roto, CAS y lector local malformado como seguimiento distinto. [Evidencia](1.17.36-backup-rollback-pause-validation.md).
